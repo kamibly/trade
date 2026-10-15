@@ -77,6 +77,27 @@
       <div id="analysis"></div>
     </section>
 
+    <section id="view-portfolio" class="view" hidden>
+      <div class="seg wide" id="pf-seg" role="group" aria-label="Show">
+        <button type="button" data-pf="holdings" class="on">My holdings</button>
+        <button type="button" data-pf="paper">Paper trading</button>
+      </div>
+      <div id="pf-holdings">
+        <div id="holdings-total"></div>
+        <ul id="holdings-list" class="list"></ul>
+        <div class="actions">
+          <button type="button" id="hold-add" class="primary">Add holding</button>
+          <button type="button" id="hold-edit" class="ghost">Edit</button>
+        </div>
+        <p class="muted small">You get an alert when a holding reaches its stop-loss or target, or gets a Sell signal. The app never buys or sells for you.</p>
+      </div>
+      <div id="pf-paper" hidden>
+        <div id="paper-body"></div>
+        <p class="muted small">The paper account buys with pretend money on every new Buy signal from the scan, risking your set share of the account per trade and putting at most 20% in one symbol. It sells on the stop-loss, the target or a Sell signal. Fees of 0.1% per trade are included.</p>
+        <button type="button" id="paper-reset" class="ghost danger">Start the paper account over</button>
+      </div>
+    </section>
+
     <section id="view-settings" class="view" hidden>
       <div class="card">
         <h2>Stock data key</h2>
@@ -117,6 +138,20 @@
           <span>Quiet hours, 22:00 to 07:00</span>
         </label>
         <p class="muted small">While the app is closed, alerts need the OCI server (stage 4). Phones may also pause apps left in the background.</p>
+      </div>
+
+      <div class="card">
+        <h2>Risk</h2>
+        <div class="row two">
+          <label class="field"><span>Stop-loss, in ATRs below entry</span><input id="stop-atr" type="number" inputmode="decimal" min="0.5" max="10" step="0.5"></label>
+          <label class="field"><span>Target, in ATRs above entry</span><input id="take-atr" type="number" inputmode="decimal" min="0.5" max="20" step="0.5"></label>
+        </div>
+        <div class="row two">
+          <label class="field"><span>Risk per paper trade, % of account</span><input id="risk-pct" type="number" inputmode="decimal" min="0.1" max="5" step="0.1"></label>
+          <label class="field"><span>Paper account size, USD</span><input id="paper-start" type="number" inputmode="numeric" min="100" max="10000000" step="100"></label>
+        </div>
+        <p class="muted small">ATR is the average size of one candle's move, so levels adapt to how jumpy each symbol is. A new account size applies when you start the paper account over.</p>
+        <p id="risk-status" class="small" role="status"></p>
       </div>
 
       <div class="card">
@@ -163,6 +198,7 @@
     <button type="button" data-view="signals" class="on"><span aria-hidden="true">⚡</span>Signals</button>
     <button type="button" data-view="watch"><span aria-hidden="true">☰</span>Watchlist</button>
     <button type="button" data-view="chart"><span aria-hidden="true">📈</span>Chart</button>
+    <button type="button" data-view="portfolio"><span aria-hidden="true">💼</span>Portfolio</button>
     <button type="button" data-view="settings"><span aria-hidden="true">⚙</span>Settings</button>
   </nav>
 
@@ -182,6 +218,32 @@
       <div class="row end">
         <button type="button" id="add-cancel" class="ghost">Cancel</button>
         <button type="submit" id="add-ok" class="primary">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="hold-dialog">
+    <form id="hold-form" method="dialog">
+      <h2>Add holding</h2>
+      <div class="seg wide" role="radiogroup" aria-label="Market">
+        <button type="button" data-htype="stock" class="on">US stock</button>
+        <button type="button" data-htype="crypto">Crypto</button>
+      </div>
+      <label class="field"><span>Ticker or coin, for example AAPL or BTC</span>
+        <input id="hold-symbol" autocomplete="off" autocapitalize="characters" spellcheck="false" required></label>
+      <div class="row two">
+        <label class="field"><span>How many</span><input id="hold-qty" type="number" inputmode="decimal" min="0" step="any" required></label>
+        <label class="field"><span>Price paid, USD</span><input id="hold-price" type="number" inputmode="decimal" min="0" step="any" required></label>
+      </div>
+      <div class="row two">
+        <label class="field"><span>Stop-loss, USD</span><input id="hold-stop" type="number" inputmode="decimal" min="0" step="any" placeholder="Auto"></label>
+        <label class="field"><span>Target, USD</span><input id="hold-take" type="number" inputmode="decimal" min="0" step="any" placeholder="Auto"></label>
+      </div>
+      <p class="muted small">Leave stop-loss and target empty to set them from your Risk settings.</p>
+      <p id="hold-error" class="small bad" role="alert"></p>
+      <div class="row end">
+        <button type="button" id="hold-cancel" class="ghost">Cancel</button>
+        <button type="submit" id="hold-ok" class="primary">Add</button>
       </div>
     </form>
   </dialog>
