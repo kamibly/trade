@@ -2,6 +2,9 @@
 # that runs jobspy-service). It builds from the trade_folder folder next to
 # docker-compose.yml (a copy of this server folder), then run:
 #   docker compose up -d --build trade-service
+#
+# Host port 8898 is what the OCI load balancer and the app use; 8004 is the
+# port inside the container.
 
 services:
   trade-service:
@@ -9,7 +12,7 @@ services:
     container_name: trade-service
     restart: unless-stopped
     ports:
-      - "8004:8004"
+      - "8898:8004"
     environment:
       TRADE_API_KEY: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
       ALLOWED_ORIGIN: "https://kamibly.github.io"

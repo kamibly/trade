@@ -85,7 +85,7 @@ jobspy-service. It sends alerts while the app is closed, scans the S&P 500 and
 top 50 crypto 4 times a day, and syncs your watchlist and holdings. It scores
 with copies of the app's own JavaScript (kept in step by `npm run sync-server`),
 so its signals match the phone's. Only that folder goes to the VM, as
-`trade_folder`, on port 8004. Setup steps are in
+`trade_folder`, on host port 8898 (8004 inside the container). Setup steps are in
 [server/README.md](server/README.md).
 
 ## Data sources

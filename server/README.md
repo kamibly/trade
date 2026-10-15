@@ -62,7 +62,7 @@ Start it and check it answers:
 
 ```bash
 docker compose up -d --build trade-service
-curl http://localhost:8004/health
+curl http://localhost:8898/health
 ```
 
 ## 3. Create the notification keys
@@ -88,21 +88,22 @@ The same way as jobspy-service:
 
 1. OCI Console → Networking → Load Balancers → your load balancer.
 2. **Backend Sets** → create one (for example `trade-backend`) pointing at the
-   VM's private IP, port `8004`. Health check: HTTP, port `8004`, path
-   `/health`, method GET, status `200`.
+   VM's private IP, port `8898` (the host port from the compose file, not
+   `8004`, which is only the port inside the container). Health check: HTTP,
+   port `8898`, path `/health`, method GET, status `200`.
    `/health` needs no key, so the load balancer can check it.
-3. **Listeners** → create one on port `8004`, protocol
+3. **Listeners** → create one on port `8898`, protocol
    HTTPS, with the same SSL certificate as your other listeners, forwarding to
    `trade-backend`.
-4. **Security Lists / Network Security Groups** → allow ingress on port `8004`.
+4. **Security Lists / Network Security Groups** → allow ingress on port `8898`.
 
-Then check from a browser: `https://your-name.duckdns.org:8004/health`.
+Then check from a browser: `https://your-name.duckdns.org:8898/health`.
 
 ## 5. Connect the app
 
 In the app: Settings → **Your server**.
 
-1. Enter the address (`https://your-name.duckdns.org:8004`) and your
+1. Enter the address (`https://your-name.duckdns.org:8898`) and your
    `TRADE_API_KEY`, then tap **Save and connect**. Your watchlist and holdings
    upload to the server.
 2. Tap **Turn on server alerts** and allow notifications.
