@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="description" content="Stock and crypto charts, signals and alerts on your phone.">
+  <title>Trade</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <script src="vendor/lightweight-charts.standalone.production.js" defer></script>
+  <script src="js/app.js" type="module"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1 id="title">Watchlist</h1>
+    <span id="offline" class="pill warn" hidden>Offline</span>
+  </header>
+
+  <main>
+    <section id="view-watch" class="view" aria-labelledby="title">
+      <div class="toolbar">
+        <div class="seg" id="filter" role="group" aria-label="Show">
+          <button type="button" data-filter="all" class="on">All</button>
+          <button type="button" data-filter="stock">Stocks</button>
+          <button type="button" data-filter="crypto">Crypto</button>
+        </div>
+        <button type="button" id="edit-btn" class="ghost">Edit</button>
+      </div>
+      <p id="watch-notice" class="notice" hidden></p>
+      <ul id="watch-list" class="list"></ul>
+      <div class="actions">
+        <button type="button" id="add-btn" class="primary">Add symbol</button>
+        <button type="button" id="top-btn">Top crypto</button>
+      </div>
+      <p id="watch-updated" class="muted small center"></p>
+    </section>
+
+    <section id="view-chart" class="view" hidden>
+      <div class="chart-head">
+        <button type="button" id="chart-pick" class="symbol-btn" aria-haspopup="dialog">
+          <span id="chart-symbol">–</span><span class="caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="chart-price">
+          <span id="chart-price" class="big">–</span>
+          <span id="chart-change" class="change"></span>
+        </div>
+        <div id="chart-sub" class="muted small"></div>
+      </div>
+      <div class="seg wide" id="tf-seg" role="group" aria-label="Timeframe">
+        <button type="button" data-tf="15m">15m</button>
+        <button type="button" data-tf="1h">1H</button>
+        <button type="button" data-tf="1D">1D</button>
+        <button type="button" data-tf="1W">1W</button>
+      </div>
+      <div id="chart" class="chart" role="img" aria-label="Price chart"></div>
+      <p id="chart-status" class="muted small"></p>
+    </section>
+
+    <section id="view-settings" class="view" hidden>
+      <div class="card">
+        <h2>Stock data key</h2>
+        <p class="muted small">Stock prices come from Twelve Data. Get a free key at
+          <a href="https://twelvedata.com/register" target="_blank" rel="noopener">twelvedata.com</a>, then paste it here.
+          It stays on this phone only.</p>
+        <label class="field">
+          <span>Twelve Data API key</span>
+          <input id="key-input" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key">
+        </label>
+        <div class="row">
+          <button type="button" id="key-save" class="primary">Save and test</button>
+          <button type="button" id="key-show" class="ghost">Show</button>
+        </div>
+        <p id="key-status" class="small" role="status"></p>
+      </div>
+
+      <div class="card">
+        <h2>Display</h2>
+        <label class="field">
+          <span>Chart opens on</span>
+          <select id="tf-default">
+            <option value="15m">15 minutes (day trading)</option>
+            <option value="1h">1 hour (swing)</option>
+            <option value="1D">1 day (swing)</option>
+            <option value="1W">1 week (long term)</option>
+          </select>
+        </label>
+        <label class="switch">
+          <input id="cad-toggle" type="checkbox">
+          <span>Show prices in CAD too</span>
+        </label>
+        <p id="fx-status" class="muted small"></p>
+      </div>
+
+      <div class="card">
+        <h2>Backup</h2>
+        <p class="muted small">Your watchlist and settings live only on this phone. Save a backup file to move them to another phone.</p>
+        <div class="row">
+          <button type="button" id="backup-save">Save backup</button>
+          <button type="button" id="backup-load">Restore backup</button>
+          <input id="backup-file" type="file" accept="application/json,.json" hidden>
+        </div>
+        <button type="button" id="clear-cache" class="ghost danger">Clear saved prices</button>
+        <p id="backup-status" class="small" role="status"></p>
+      </div>
+
+      <div class="card">
+        <h2>About</h2>
+        <p class="small">Trade gives decision support, not financial advice. No method predicts prices reliably.</p>
+        <p class="muted small">Data: Twelve Data (stocks), Coinbase, Kraken and CoinGecko (crypto), Frankfurter/ECB (USD to CAD).
+          Charts by <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView Lightweight Charts</a>.</p>
+        <p class="muted small" id="version"></p>
+      </div>
+    </section>
+  </main>
+
+  <nav class="tabbar" aria-label="Sections">
+    <button type="button" data-view="watch" class="on"><span aria-hidden="true">☰</span>Watchlist</button>
+    <button type="button" data-view="chart"><span aria-hidden="true">📈</span>Chart</button>
+    <button type="button" data-view="settings"><span aria-hidden="true">⚙</span>Settings</button>
+  </nav>
+
+  <dialog id="add-dialog">
+    <form id="add-form" method="dialog">
+      <h2>Add symbol</h2>
+      <div class="seg wide" role="radiogroup" aria-label="Market">
+        <button type="button" data-type="stock" class="on">US stock</button>
+        <button type="button" data-type="crypto">Crypto</button>
+      </div>
+      <label class="field">
+        <span id="add-label">Ticker, for example AAPL</span>
+        <input id="add-input" autocomplete="off" autocapitalize="characters" spellcheck="false" list="crypto-options" required>
+      </label>
+      <datalist id="crypto-options"></datalist>
+      <p id="add-error" class="small bad" role="alert"></p>
+      <div class="row end">
+        <button type="button" id="add-cancel" class="ghost">Cancel</button>
+        <button type="submit" id="add-ok" class="primary">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="list-dialog">
+    <h2 id="list-title">Pick</h2>
+    <ul id="list-items" class="list compact"></ul>
+    <div class="row end"><button type="button" id="list-close" class="ghost">Close</button></div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

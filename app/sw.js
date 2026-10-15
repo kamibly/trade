@@ -1,0 +1,66 @@
+// Keeps the app's own files on the phone so Trade opens without a connection.
+// Price APIs are other sites and pass straight through: a cached copy would
+// hide real errors and show stale prices as if they were live.
+
+const CACHE = 'trade-v1';
+const ASSETS = [
+  './',
+  './index.html',
+  './styles.css',
+  './manifest.webmanifest',
+  './js/app.js',
+  './js/candles.js',
+  './js/chart.js',
+  './js/data.js',
+  './js/format.js',
+  './js/limiter.js',
+  './js/storage.js',
+  './vendor/lightweight-charts.standalone.production.js',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
+  './icons/icon-maskable-512.png',
+  './icons/apple-touch-icon.png',
+];
+
+self.addEventListener('install', event => {
+  event.waitUntil(
+    caches.open(CACHE)
+      // 'reload' skips the browser's HTTP cache so a new version never stores old files.
+      .then(cache => cache.addAll(ASSETS.map(url => new Request(url, { cache: 'reload' }))))
+      .then(() => self.skipWaiting()),
+  );
+});
+
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k.startsWith('trade-') && k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim()),
+  );
+});
+
+self.addEventListener('fetch', event => {
+  const { request } = event;
+  if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
+
+  // Pages: try the network briefly so updates arrive, else the saved copy.
+  if (request.mode === 'navigate') {
+    event.respondWith((async () => {
+      try {
+        return await Promise.race([
+          fetch(request),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('slow')), 4000)),
+        ]);
+      } catch {
+        const cache = await caches.open(CACHE);
+        return (await cache.match('./index.html')) || Response.error();
+      }
+    })());
+    return;
+  }
+
+  // App files: the saved copy first; this version's files never change.
+  event.respondWith(
+    caches.match(request, { ignoreSearch: true }).then(hit => hit || fetch(request)),
+  );
+});
