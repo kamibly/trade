@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyze, votesAt, baseVotesAt, signalAt, METHOD_IDS } from '../app/js/signals.js';
-import { featureNames, featureVector, sequence, label, lgbmProbability, lstmProbability, usable, mlVotes, SEQ_LEN, HORIZON } from '../app/js/ml.js';
+import { featureNames, featureVector, sequence, label, lgbmProbability, lstmProbability, usable, mlVotes, voteFor, SEQ_LEN, HORIZON } from '../app/js/ml.js';
 import { backtest } from '../app/js/backtest.js';
 import { scanItem } from '../app/js/scanner.js';
 
@@ -100,4 +100,12 @@ test('the scanner passes the timeframe models to the scoring', async () => {
   const without = await scanItem({ type: 'crypto', symbol: 'BTC' }, '1D', { stopAtr: 2, takeAtr: 3 }, { buy: 40, sell: -40 }, { ...deps, getModels: undefined });
   assert.deepEqual(seen, ['1D']);
   assert.ok(withMl.result.score > without.result.score); // a strongly bullish model lifts the score
+});
+
+test('votes are measured from the model\'s usual prediction', () => {
+  assert.equal(voteFor(0.6, {}), (0.6 - 0.5) * 4); // older models: 50% midpoint
+  const m = { center: 0.45, scale: 0.02 };
+  assert.ok(Math.abs(voteFor(0.46, m) - 0.5) < 1e-12);
+  assert.equal(voteFor(0.40, m), -1);
+  assert.equal(voteFor(0.45, m), 0);
 });

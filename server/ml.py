@@ -33,8 +33,7 @@ import service
 
 HORIZON = 10
 FEE = 0.001
-MIN_VOTE = 0.3            # the backtest's "clear opinion": |vote| >= 0.3, vote = (p - 0.5) * 4
-CLEAR = MIN_VOTE / 4
+MIN_VOTE = 0.3            # the backtest's "clear opinion": |vote| >= 0.3
 MIN_HIT, MIN_N = 0.5, 200
 TEST_SHARE = 0.3
 MIN_TRAIN_ROWS, MIN_TEST_ROWS = 1000, 300
@@ -152,12 +151,34 @@ def valid_split(train: Data):
     return train.take(np.arange(k)), train.take(np.arange(k, len(train)))
 
 
-def hit_rate(probs, ret) -> dict:
-    """Like the backtest: clear calls only, right when the move beats the fees."""
+def calibrate(probs) -> dict:
+    """Where a model's predictions usually sit and how far they spread.
+
+    On real prices the models rarely stray far from the base rate (often about
+    45% "up after fees"), so a fixed 50% midpoint would make almost every call
+    "down" and none of them clear. The vote is measured from the model's own
+    middle instead: vote = (p - center) / scale, with the boldest 10% of
+    predictions at full strength. Set on training-period data only.
+    """
     import numpy as np
-    p, ret = np.asarray(probs, dtype=np.float64), np.asarray(ret, dtype=np.float64)
-    clear = np.abs(p - 0.5) >= CLEAR
-    right = ((p > 0.5) & (ret > 2 * FEE)) | ((p < 0.5) & (ret < -2 * FEE))
+    p = np.asarray(probs, dtype=np.float64)
+    center = float(np.median(p))
+    scale = float(np.quantile(np.abs(p - center), 0.9))
+    return {"center": round(center, 6), "scale": round(max(scale, 1e-4), 6)}
+
+
+def votes_of(probs, cal: dict):
+    import numpy as np
+    return np.clip((np.asarray(probs, dtype=np.float64) - cal["center"]) / cal["scale"], -1, 1)
+
+
+def hit_rate(probs, ret, cal: Optional[dict] = None) -> dict:
+    """Like the backtest: clear votes only, right when the move beats the fees."""
+    import numpy as np
+    cal = cal or {"center": 0.5, "scale": 0.25}
+    v, ret = votes_of(probs, cal), np.asarray(ret, dtype=np.float64)
+    clear = np.abs(v) >= MIN_VOTE
+    right = ((v > 0) & (ret > 2 * FEE)) | ((v < 0) & (ret < -2 * FEE))
     n = int(clear.sum())
     hits = int((clear & right).sum())
     up = float((ret > 2 * FEE).mean()) if len(ret) else 0.0
@@ -316,12 +337,15 @@ def train_models(data: Data, features: List[str], tf: str, symbols: Optional[int
     if len(train) < MIN_TRAIN_ROWS or len(test) < MIN_TEST_ROWS:
         raise ValueError(f"Not enough history to train: {len(train)} training and {len(test)} test rows")
 
+    _, valid = valid_split(train)
     booster, best, lgbm = train_lgbm(train, features)
-    lgbm["test"] = hit_rate(booster.predict(test.x, num_iteration=best), test.ret)
+    lgbm.update(calibrate(booster.predict(valid.x, num_iteration=best)))
+    lgbm["test"] = hit_rate(booster.predict(test.x, num_iteration=best), test.ret, lgbm)
     del booster
 
     net, lstm = train_lstm(train)
-    lstm["test"] = hit_rate(lstm_probs(net, test.seq), test.ret)
+    lstm.update(calibrate(lstm_probs(net, valid.seq)))
+    lstm["test"] = hit_rate(lstm_probs(net, test.seq), test.ret, lstm)
 
     for m in (lgbm, lstm):
         m["test"]["usable"] = usable(m["test"])

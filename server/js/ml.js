@@ -150,7 +150,18 @@ export function lstmProbability(model, seq) {
 
 export const usable = m => !!m && m.test && m.test.hit > MIN_HIT && m.test.n >= 200;
 
-const describe = (p, m) => `${Math.round(p * 100)}% chance higher in ${HORIZON} candles · right ${Math.round(m.test.hit * 100)}% in its test`;
+// Votes are measured from where the model's predictions usually sit (center)
+// and how far they spread (scale), both set on its training data. Real prices
+// keep most predictions near the base rate, so a fixed 50% midpoint would make
+// nearly every call "down". Models without them use 50% and ±25%.
+export function voteFor(p, m) {
+  const center = Number.isFinite(m.center) ? m.center : 0.5;
+  const scale = m.scale > 0 ? m.scale : 0.25;
+  return clamp((p - center) / scale, -1, 1);
+}
+
+const pct = v => `${Math.round(v * 100)}%`;
+const describe = (p, m) => `${pct(p)} chance higher after fees in ${HORIZON} candles${Number.isFinite(m.center) ? ` (usually ${pct(m.center)})` : ''} · right ${pct(m.test.hit)} in its test`;
 
 // models: { cutoff, lgbm, lstm } for this timeframe. Only candles after the
 // cutoff get votes: earlier ones were used for training, so votes there would
@@ -161,13 +172,13 @@ export function mlVotes(S, i, baseVotes, models) {
   const { lgbm, lstm } = models;
   if (usable(lgbm)) {
     const p = lgbmProbability(lgbm, featureVector(S, i, baseVotes, lgbm.features));
-    out.push({ id: 'lgbm', name: 'LightGBM (gradient-boosted trees)', group: 'ml', vote: clamp((p - 0.5) * 4, -1, 1), note: describe(p, lgbm) });
+    out.push({ id: 'lgbm', name: 'LightGBM (gradient-boosted trees)', group: 'ml', vote: voteFor(p, lgbm), note: describe(p, lgbm) });
   }
   if (usable(lstm)) {
     const seq = sequence(S, i);
     if (seq) {
       const p = lstmProbability(lstm, seq);
-      out.push({ id: 'lstm', name: 'LSTM neural network', group: 'ml', vote: clamp((p - 0.5) * 4, -1, 1), note: describe(p, lstm) });
+      out.push({ id: 'lstm', name: 'LSTM neural network', group: 'ml', vote: voteFor(p, lstm), note: describe(p, lstm) });
     }
   }
   return out;

@@ -75,6 +75,12 @@ def test_split_is_by_time_and_drops_rows_that_see_the_test_period():
 def test_hit_rate_counts_clear_calls_after_fees():
     out = ml.hit_rate([0.7, 0.3, 0.9, 0.52], [0.01, -0.01, 0.001, 0.05])  # the last call isn't clear enough
     assert out["n"] == 3 and out["hit"] == round(2 / 3, 4)
+    # Votes are measured from the model's own middle: near-50/50 predictions still make calls.
+    cal = ml.calibrate([0.44, 0.45, 0.46, 0.45, 0.47, 0.43])
+    assert cal["center"] == 0.45 and 0.01 <= cal["scale"] <= 0.02
+    near = ml.hit_rate([0.47, 0.43, 0.45], [0.01, -0.01, 0.05], cal)
+    assert near["n"] == 2 and near["hit"] == 1
+    assert ml.hit_rate([0.47, 0.43], [0.01, -0.01])["n"] == 0  # a fixed 50% midpoint sees no clear calls
     assert ml.usable({"hit": 0.55, "n": 200}) and not ml.usable({"hit": 0.55, "n": 199}) and not ml.usable({"hit": 0.5, "n": 999})
 
 
@@ -87,6 +93,7 @@ def test_training_scores_the_test_period_and_js_predicts_the_same(dataset):
     for name in ("lgbm", "lstm"):
         t = models[name]["test"]
         assert t["rows"] == models["testRows"] and 0 <= t["hit"] <= 1 and "usable" in t
+        assert 0 < models[name]["center"] < 1 and models[name]["scale"] > 0 and t["n"] > 0
     assert models["lgbm"]["features"] == dataset["features"] and models["lgbm"]["trees"]
     # The trending series are learnable: the trees should beat a coin flip.
     assert models["lgbm"]["test"]["hit"] > 0.5
