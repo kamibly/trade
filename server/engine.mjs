@@ -3,16 +3,17 @@
 // a symbol scores exactly the same on the server as on the phone.
 //
 // The Python service runs it as:  node engine.mjs < job.json > result.json
-// job: { mode: 'watch' | 'market' | 'dataset', ... }  (see runWatch, runMarket and runDataset below)
+// job: { mode: 'watch' | 'prices' | 'market' | 'dataset', ... }  (see the run* functions below)
 
 import { TIMEFRAMES } from './js/candles.js';
 import { readFile } from 'node:fs/promises';
-import { fetchCandles, yahooCandles, fetchCryptoTop } from './js/data.js';
+import { fetchCandles, yahooCandles, yahooPrice, fetchCryptoTop } from './js/data.js';
 import { analyze, signalAt, baseVotesAt, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
 import { featureNames, featureVector, sequence, label } from './js/ml.js';
 import { backtest } from './js/backtest.js';
 import { summarize, alertFor, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
+import * as paper from './js/paper.js';
 import { formatMoney } from './js/format.js';
 
 const SP500_CSV = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv';
@@ -22,6 +23,7 @@ const key = item => `${item.type}:${item.symbol}`;
 export const defaultDeps = {
   fetchCandles,
   yahooCandles,
+  yahooPrice,
   fetchCryptoTop,
   fetchText: async url => {
     const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
@@ -82,9 +84,15 @@ async function pool(items, size, fn) {
 
 const levels = s => `Entry ${formatMoney(s.entry)} · Stop ${formatMoney(s.stop)} · Target ${formatMoney(s.take)}`;
 
-// Watchlist and holdings on the alert timeframe.
-// job: { tf, settings, items, holdings, prev: { key: signal }, weights: { "key:tf": {at, weights} } }
-// result: { signals, alerts, holdingsAlerted, weights, errors }
+// Paper trades become a short line for the app's Paper tab.
+const paperLine = ev => (ev.kind === 'open'
+  ? `Bought ${ev.symbol} at ${formatMoney(ev.price)} (${formatMoney(ev.cost)})`
+  : `Sold ${ev.symbol} at ${formatMoney(ev.price)} (${ev.reason}), ${ev.pnl >= 0 ? '+' : ''}${formatMoney(ev.pnl)}`);
+
+// Watchlist and holdings on the alert timeframe, plus the paper account.
+// job: { tf, settings, items, holdings, prev: { key: signal }, weights: { "key:tf": {at, weights} },
+//        models, paper: account | null, riskPct }
+// result: { signals, alerts, changes, holdingsAlerted, weights, errors, paper, paperEvents }
 export async function runWatch(job, deps = defaultDeps) {
   const { tf, settings } = job;
   const weights = { ...(job.weights || {}) };
@@ -100,11 +108,13 @@ export async function runWatch(job, deps = defaultDeps) {
     }
   });
   const held = new Set((job.holdings || []).map(h => h.key));
+  const changes = {};
   for (const [k, s] of Object.entries(signals)) {
     const p = prev[k];
     // Like the phone: no alert the first time a symbol is scored or after a timeframe change.
     const action = p && p.tf === tf ? alertFor(p.action, s.action) : null;
     if (!action) continue;
+    changes[k] = action;
     const yours = action === 'sell' && held.has(k);
     alerts.push({
       kind: 'signal',
@@ -135,7 +145,74 @@ export async function runWatch(job, deps = defaultDeps) {
       });
     }
   }
-  return { signals, alerts, holdingsAlerted, weights, errors };
+  // The paper account trades the same signals: buys on a new Buy, sells on a
+  // Sell, the stop-loss or the target.
+  let paperEvents = [];
+  if (job.paper) {
+    paperEvents = paper.step(job.paper, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now() })
+      .map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
+  }
+  return { signals, alerts, changes, holdingsAlerted, weights, errors, paper: job.paper || null, paperEvents };
+}
+
+// The latest price: Yahoo Finance's live quote for stocks, the newest 15-minute
+// candle for crypto (Coinbase, then Kraken, then CoinGecko).
+async function latestPrice(item, settings, deps) {
+  if (item.type === 'stock') {
+    try {
+      return await deps.yahooPrice(item);
+    } catch (e) {
+      if (!settings.twelveKey) throw e;
+    }
+  }
+  const { candles } = await candlesFor(item, '15m', settings, deps);
+  if (!candles.length) throw new Error('No price');
+  return candles.at(-1).close;
+}
+
+// Every-minute check of holdings and paper positions against their stop-loss
+// and target, at the latest price.
+// job: { settings, items, holdings, paper, actions: { key: last signal action } }
+// result: { prices, alerts, holdingsAlerted, paper, paperEvents, errors }
+export async function runPrices(job, deps = defaultDeps) {
+  const { settings } = job;
+  const prices = {};
+  const errors = {};
+  await pool(job.items || [], 4, async item => {
+    try {
+      prices[key(item)] = await latestPrice(item, settings, deps);
+    } catch (e) {
+      errors[key(item)] = e.message;
+    }
+  });
+  const alerts = [];
+  const holdingsAlerted = {};
+  for (const h of job.holdings || []) {
+    const price = prices[h.key];
+    if (!Number.isFinite(price)) continue;
+    // Only levels here: Sell signals come from the candle-close checks.
+    const { alerts: hits, alerted } = checkHolding(h, price, 'hold');
+    holdingsAlerted[h.id] = alerted;
+    for (const a of hits) {
+      if (a !== 'stop' && a !== 'target') continue;
+      alerts.push({
+        kind: a,
+        key: h.key,
+        urgent: a === 'stop',
+        title: a === 'stop' ? `Stop-loss hit: ${h.symbol}` : `Target reached: ${h.symbol}`,
+        body: a === 'stop' ? `${formatMoney(price)} is at or below your stop of ${formatMoney(h.stop)}. Consider selling.`
+          : `${formatMoney(price)} is at or above your target of ${formatMoney(h.take)}. Consider taking profit.`,
+        hash: 'portfolio',
+      });
+    }
+  }
+  let paperEvents = [];
+  if (job.paper) {
+    const signals = Object.fromEntries(Object.entries(prices).map(([k, p]) => [k, { entry: p, action: 'hold' }]));
+    paperEvents = paper.step(job.paper, { signals, alerts: {}, now: deps.now() })
+      .map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
+  }
+  return { prices, alerts, holdingsAlerted, paper: job.paper || null, paperEvents, errors };
 }
 
 export function parseSp500(csv) {
@@ -274,7 +351,7 @@ async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
-  const run = { market: runMarket, dataset: runDataset }[job.mode] || runWatch;
+  const run = { market: runMarket, dataset: runDataset, prices: runPrices }[job.mode] || runWatch;
   const result = await run(job);
   if (job.stream) {
     // Training data is big: a header line, then one row per line, so Python

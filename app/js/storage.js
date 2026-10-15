@@ -102,6 +102,9 @@ export const getHoldings = () => {
 };
 export const saveHoldings = list => write('holdings', list);
 export const getPaper = () => read('paper', null);
+// The paper account your server runs, when connected: { paper, events, prices, fetchedAt }.
+export const getServerPaper = () => read('serverPaper', null);
+export const saveServerPaper = p => write('serverPaper', p);
 export const savePaper = acc => write('paper', acc);
 
 // When the watchlist, holdings or synced settings last changed on this phone.

@@ -8,7 +8,8 @@ the server and the phone agree on every score. This module runs it with Node.
 Environment variables:
     VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT  - app notifications
     TRADE_TZ           - time zone for quiet hours and scan times, default America/Toronto
-    MARKET_SCAN_TIMES  - when the S&P 500 and top-50 crypto scan runs, default "09:45,12:30,15:45,20:00"
+    MARKET_SCAN_TIMES  - when the S&P 500 and top-50 crypto scan runs, default hourly while the
+                         US market is open plus 20:00: "09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00"
     TWELVE_DATA_KEY    - optional; backup for stocks Yahoo Finance can't serve
     DATA_DIR           - where trade.json is kept, default /data
     TRAIN_AT           - when the machine-learning models retrain each week, default "Sun 03:00"
@@ -31,7 +32,8 @@ VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:you@example.com")
 TZ_NAME = os.environ.get("TRADE_TZ", "America/Toronto")
-MARKET_SCAN_TIMES = os.environ.get("MARKET_SCAN_TIMES", "09:45,12:30,15:45,20:00")
+DEFAULT_SCAN_TIMES = "09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00"
+MARKET_SCAN_TIMES = os.environ.get("MARKET_SCAN_TIMES", DEFAULT_SCAN_TIMES)
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 STATE_FILE = os.path.join(DATA_DIR, "trade.json")
@@ -42,8 +44,13 @@ TRAIN_AT = os.environ.get("TRAIN_AT", "Sun 03:00")
 TRAIN_SYMBOLS = int(os.environ.get("TRAIN_SYMBOLS", "120") or 120)
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
-# How often the watchlist and holdings are checked, by alert timeframe (minutes).
+# How often the watchlist and holdings are checked, by alert timeframe (minutes),
+# besides the check right after every candle closes.
 WATCH_EVERY = {"15m": 5, "1h": 15, "1D": 15, "1W": 60}
+TF_SECONDS = {"15m": 900, "1h": 3600, "1D": 86400, "1W": 604800}
+CLOSE_DELAY_MS = 60_000      # give the data sources a minute to publish a closed candle
+PRICES_EVERY_MS = 60_000     # stop-loss and target checks
+NEW_YORK = ZoneInfo("America/New_York")
 QUIET_START, QUIET_END = 22, 7
 TIMEFRAMES = set(WATCH_EVERY)
 
@@ -83,6 +90,9 @@ def _empty_state() -> dict:
         "lastMarketSlot": None,
         "training": {"lastRunAt": None, "results": {}},  # last model training per timeframe
         "lastTrainSlot": None,
+        "paper": None,            # the paper-trading account (runs here, shown in the app)
+        "paperEvents": [],        # its latest buys and sells
+        "prices": {"lastRunAt": None, "values": {}, "errors": {}},
     }
 
 
@@ -181,6 +191,8 @@ def clean_profile(raw: dict) -> dict:
             "stopAtr": _num(s.get("stopAtr"), 2, 0.5, 10),
             "takeAtr": _num(s.get("takeAtr"), 3, 0.5, 20),
             "quietHours": bool(s.get("quietHours", True)),
+            "riskPct": _num(s.get("riskPct"), 1, 0.1, 5),
+            "paperStart": round(_num(s.get("paperStart"), 10000, 100, 10_000_000)),
         },
         "updatedAt": int(_num(raw.get("updatedAt"), now_ms(), 0, 1e15)),
     }
@@ -318,7 +330,7 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
     try:
         state = load_state()
         profile = state.get("profile")
-        if not profile or not state["subscriptions"]:
+        if not profile:
             return None
         tf = profile["settings"]["alertTf"]
         items = watch_items(profile)
@@ -332,6 +344,8 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
             "prev": state["signals"],
             "weights": {k: v for k, v in state["weights"].items() if k in keys},
             "models": load_models(tf),
+            "paper": state.get("paper") or new_paper(profile),
+            "riskPct": profile["settings"].get("riskPct", 1),
         }
         try:
             result = engine(job, 600)
@@ -356,6 +370,96 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
                 "lastAlerts": ([{"title": a["title"], "at": now_ms()} for a in result["alerts"]] + st["watch"].get("lastAlerts", []))[:20],
                 "sent": sent,
             }
+            save_paper(st, result)
+
+        update_state(apply)
+        return result
+    finally:
+        lock.release()
+
+
+def new_paper(profile: dict) -> dict:
+    """A fresh paper account, the same shape as app/js/paper.js newAccount()."""
+    start = (profile.get("settings") or {}).get("paperStart", 10000)
+    now = now_ms()
+    return {"start": start, "cash": start, "createdAt": now, "positions": [], "trades": [], "history": [{"t": now, "equity": start}]}
+
+
+def save_paper(st: dict, result: dict) -> None:
+    if result.get("paper") is not None:
+        st["paper"] = result["paper"]
+    if result.get("paperEvents"):
+        st["paperEvents"] = (list(reversed(result["paperEvents"])) + st.get("paperEvents", []))[:50]
+
+
+def reset_paper(start: Optional[float] = None) -> dict:
+    def apply(st):
+        profile = st.get("profile") or {"settings": {}}
+        acc = new_paper({"settings": {**profile.get("settings", {}), **({"paperStart": start} if start else {})}})
+        st["paper"], st["paperEvents"] = acc, []
+
+    with _run_locks["watch"]:  # not while a check is changing the account
+        return update_state(apply)["paper"]
+
+
+def us_market_open(now: Optional[datetime] = None) -> bool:
+    """Regular US stock hours, 9:30 to 16:00 New York time on weekdays (holidays not counted)."""
+    t = (now or datetime.now(NEW_YORK)).astimezone(NEW_YORK)
+    return t.weekday() < 5 and (t.hour, t.minute) >= (9, 30) and t.hour < 16
+
+
+def price_items(state: dict, now: Optional[datetime] = None) -> List[dict]:
+    """Holdings with a stop or target, and paper positions. Stocks only while their market is open."""
+    profile = state.get("profile") or {}
+    items, seen = [], set()
+    rows = [h for h in profile.get("holdings", []) if h.get("stop") or h.get("take")] + list((state.get("paper") or {}).get("positions", []))
+    stocks_open = us_market_open(now)
+    for r in rows:
+        k = f"{r['type']}:{r['symbol']}"
+        if k in seen or (r["type"] == "stock" and not stocks_open):
+            continue
+        seen.add(k)
+        items.append({x: r[x] for x in ("type", "symbol", "name", "geckoId") if x in r})
+    return items
+
+
+def run_prices(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """Every minute: holdings' stop-loss and target, and the paper positions' exits."""
+    lock = _run_locks["watch"]  # never at the same time as a watch run: both change holdings and paper
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        state = load_state()
+        profile = state.get("profile")
+        items = price_items(state)
+        if not profile or not items:
+            return None
+        job = {
+            "mode": "prices",
+            "settings": engine_settings(profile),
+            "items": items,
+            "holdings": profile["holdings"],
+            "paper": state.get("paper"),
+        }
+        try:
+            result = engine(job, 120)
+        except Exception as e:
+            logger.warning("Price check failed: %s", e)
+            update_state(lambda st: st["prices"].update(lastRunAt=now_ms(), errors={"engine": str(e)}))
+            return None
+        if result["alerts"] and state["subscriptions"]:
+            deliver(result["alerts"], profile["settings"]["quietHours"])
+
+        def apply(st):
+            p = st.get("profile")
+            if p:
+                for h in p["holdings"]:
+                    if h["id"] in result["holdingsAlerted"]:
+                        h["alerted"] = result["holdingsAlerted"][h["id"]]
+            if st["watch"] is not None and result["alerts"]:
+                st["watch"]["lastAlerts"] = ([{"title": a["title"], "at": now_ms()} for a in result["alerts"]] + st["watch"].get("lastAlerts", []))[:20]
+            st["prices"] = {"lastRunAt": now_ms(), "values": result["prices"], "errors": result["errors"]}
+            save_paper(st, result)
 
         update_state(apply)
         return result
@@ -511,7 +615,7 @@ def scan_times() -> List[str]:
                 out.append(f"{h:02d}:{m:02d}")
         except ValueError:
             continue
-    return sorted(set(out)) or ["09:45", "12:30", "15:45", "20:00"]
+    return sorted(set(out)) or DEFAULT_SCAN_TIMES.split(",")
 
 
 def due_market_slot(now: datetime, last_slot: Optional[str]) -> Optional[str]:
@@ -536,13 +640,32 @@ def next_market_at(now: Optional[datetime] = None) -> str:
     return ""
 
 
+def candle_closed_since(tf: str, last: int, now: int) -> bool:
+    """Whether a candle of `tf` closed (a minute ago or more) since the last run."""
+    step = TF_SECONDS.get(tf, 86400) * 1000
+    return (now - CLOSE_DELAY_MS) // step > (last - CLOSE_DELAY_MS) // step
+
+
 def watch_due(state: dict, now: int) -> bool:
+    """Right after each candle of the alert timeframe closes, and every few minutes in between."""
     profile = state.get("profile")
     if not profile:
         return False
-    every = WATCH_EVERY.get(profile["settings"]["alertTf"], 15) * 60_000
+    tf = profile["settings"]["alertTf"]
+    every = WATCH_EVERY.get(tf, 15) * 60_000
     last = state["watch"].get("lastRunAt") or 0
-    return now - last >= every
+    return now - last >= every or candle_closed_since(tf, last, now)
+
+
+def prices_due(state: dict, now: int) -> bool:
+    return now - ((state.get("prices") or {}).get("lastRunAt") or 0) >= PRICES_EVERY_MS
+
+
+def _spawn(fn) -> None:
+    """Each job runs in its own thread, so a long market scan or training never
+    delays the candle-close and every-minute checks. Each job's lock skips a
+    run while the previous one is still going."""
+    threading.Thread(target=fn, daemon=True).start()
 
 
 def start_scheduler() -> None:
@@ -551,18 +674,21 @@ def start_scheduler() -> None:
         while True:
             try:
                 state = load_state()
-                if watch_due(state, now_ms()):
-                    run_watch()
+                now = now_ms()
+                if watch_due(state, now):
+                    _spawn(run_watch)
+                elif prices_due(state, now):
+                    _spawn(run_prices)
                 slot = due_market_slot(datetime.now(tz()), state.get("lastMarketSlot"))
                 if slot:
                     update_state(lambda st: st.update(lastMarketSlot=slot))
-                    run_market()
-                train = train_due(load_state(), datetime.now(tz()))
+                    _spawn(run_market)
+                train = train_due(state, datetime.now(tz()))
                 if train:
                     update_state(lambda st: st.update(lastTrainSlot=train))
-                    run_train()
+                    _spawn(run_train)
             except Exception:
                 logger.exception("Scheduler step failed")
-            time.sleep(30)
+            time.sleep(15)
 
     threading.Thread(target=loop, name="trade-scheduler", daemon=True).start()

@@ -5,7 +5,7 @@
 export class ServerError extends Error {}
 
 // Settings that travel with the watchlist and holdings.
-export const SYNCED_SETTINGS = ['alertTf', 'buyAt', 'sellAt', 'stopAtr', 'takeAtr', 'quietHours'];
+export const SYNCED_SETTINGS = ['alertTf', 'buyAt', 'sellAt', 'stopAtr', 'takeAtr', 'quietHours', 'riskPct', 'paperStart'];
 
 export function cleanUrl(raw) {
   let url = String(raw || '').trim().replace(/\/+$/, '');
