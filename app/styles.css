@@ -303,3 +303,4 @@ h3 { font-size: 15px; margin: 0 0 8px; }
 .bt-row { display: flex; justify-content: space-between; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
 .bt-row:first-of-type { border-top: 0; }
 .bt-row span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+.market-title { font-size: 14px; color: var(--muted); margin: 12px 0 8px; }

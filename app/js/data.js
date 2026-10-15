@@ -3,7 +3,7 @@
 // US stocks from Twelve Data with the key saved on this phone.
 
 import {
-  TIMEFRAMES, fromCoinbase, fromKraken, fromCoinGeckoOhlc, fromTwelve, toWeekly, twelveErrorMessage,
+  TIMEFRAMES, fromCoinbase, fromKraken, fromCoinGeckoOhlc, fromTwelve, fromYahoo, toWeekly, twelveErrorMessage,
 } from './candles.js';
 import { CreditLimiter } from './limiter.js';
 
@@ -20,12 +20,12 @@ const STABLECOINS = new Set(['usdt', 'usdc', 'dai', 'busd', 'tusd', 'usde', 'usd
 
 export class DataError extends Error {}
 
-async function getJson(url, { timeout = 15000 } = {}) {
+export async function getJson(url, { timeout = 15000, headers } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeout);
   const host = new URL(url).host;
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
+    const res = await fetch(url, { signal: ctrl.signal, headers });
     let body = null;
     try { body = await res.json(); } catch { /* not JSON */ }
     if (!res.ok) {
@@ -112,6 +112,17 @@ async function stockCandles(item, tf, key, signal) {
     symbol: item.symbol, interval: TIMEFRAMES[tf].twelve, outputsize: '500', timezone: 'UTC',
   }, key, 1, signal);
   return { candles: fromTwelve(json), source: 'Twelve Data' };
+}
+
+// Yahoo Finance needs no key but refuses browser calls, so only the OCI
+// server uses it. Class shares use a dash there (BRK-B, not BRK.B).
+export async function yahooCandles(item, tf) {
+  const [interval, range] = TIMEFRAMES[tf].yahoo;
+  const symbol = encodeURIComponent(item.symbol.replace(/\./g, '-'));
+  const json = await getJson(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=${interval}&range=${range}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' },
+  });
+  return { candles: fromYahoo(json).slice(-500), source: 'Yahoo Finance' };
 }
 
 // ---- Public API -------------------------------------------------------------

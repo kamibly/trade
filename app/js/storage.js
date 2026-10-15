@@ -34,6 +34,9 @@ export const DEFAULT_SETTINGS = {
   paperStart: 10000,
   stopAtr: 2,
   takeAtr: 3,
+  serverUrl: '',
+  serverKey: '',
+  serverPush: false,
   overlays: { ma: true, bands: false, cloud: false, forecast: true, markers: true },
 };
 
@@ -98,6 +101,14 @@ export const getHoldings = () => {
 export const saveHoldings = list => write('holdings', list);
 export const getPaper = () => read('paper', null);
 export const savePaper = acc => write('paper', acc);
+
+// When the watchlist, holdings or synced settings last changed on this phone.
+export const getSyncMeta = () => read('sync', { changedAt: 0 });
+export const saveSyncMeta = meta => write('sync', meta);
+
+// The server's last market scan, so the Signals tab shows it offline.
+export const getMarket = () => read('market', null);
+export const saveMarket = m => write('market', m);
 
 export const getFx = () => read('fx', null);
 export const saveFx = fx => write('fx', fx);

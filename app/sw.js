@@ -2,7 +2,7 @@
 // Price APIs are other sites and pass straight through: a cached copy would
 // hide real errors and show stale prices as if they were live.
 
-const CACHE = 'trade-v3';
+const CACHE = 'trade-v4';
 const ASSETS = [
   './',
   './index.html',
@@ -21,6 +21,7 @@ const ASSETS = [
   './js/paper.js',
   './js/portfolio.js',
   './js/scanner.js',
+  './js/server.js',
   './js/signals.js',
   './js/storage.js',
   './vendor/lightweight-charts.standalone.production.js',
@@ -72,6 +73,19 @@ self.addEventListener('fetch', event => {
   event.respondWith(
     caches.match(request, { ignoreSearch: true }).then(hit => hit || fetch(request)),
   );
+});
+
+// Alerts from your OCI server while the app is closed.
+self.addEventListener('push', event => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch { data = { title: 'Trade', body: event.data && event.data.text() }; }
+  event.waitUntil(self.registration.showNotification(data.title || 'Trade', {
+    body: data.body || '',
+    icon: 'icons/icon-192.png',
+    badge: 'icons/badge-96.png',
+    tag: data.tag || data.hash || 'trade',
+    data: { hash: data.hash || 'signals' },
+  }));
 });
 
 // Tapping an alert opens the app on that symbol's chart.
