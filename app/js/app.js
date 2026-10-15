@@ -16,8 +16,9 @@ import * as paper from './paper.js';
 import * as pf from './portfolio.js';
 import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
+import { usable as modelUsable, HORIZON as ML_HORIZON } from './ml.js';
 
-export const APP_VERSION = '0.4.0 (stage 4)';
+export const APP_VERSION = '0.5.0 (stage 5)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -58,6 +59,7 @@ const state = {
   holdType: 'stock',
   analysis: null, // { id, S, votes, bt } for the chart on screen
   market: store.getMarket(), // { at, fetchedAt, buys, sells, ... } from the server's scan
+  models: store.getModels(), // { tf: { cutoff, trainedAt, lgbm, lstm } } trained on the server
   syncMeta: store.getSyncMeta(),
   syncTimer: null,
   serverStatus: null,
@@ -503,10 +505,11 @@ function renderAnalysis() {
     return;
   }
   // The votes and backtest take a moment on a phone, so they are kept until the candles change.
-  const id = `${store.itemKey(state.chartItem)}:${state.chartTf}:${candles.length}:${candles.at(-1).time}:${candles.at(-1).close}`;
+  const models = state.models[state.chartTf] || null;
+  const id = `${store.itemKey(state.chartItem)}:${state.chartTf}:${candles.length}:${candles.at(-1).time}:${candles.at(-1).close}:${models ? models.trainedAt : ''}`;
   const opts = { thresholds: thresholds(), ...riskOpts() };
   if (!state.analysis || state.analysis.id !== id || state.analysis.opts !== JSON.stringify(opts)) {
-    const S = analyze(candles);
+    const S = analyze(candles, { models });
     const votes = voteMatrix(S);
     const bt = backtest(S, { ...opts, votes });
     if (bt) store.saveWeight(state.chartItem, state.chartTf, bt.weights);
@@ -540,7 +543,36 @@ function renderAnalysis() {
         el('div', { class: 'vote-name' }, el('span', { text: v.name }), el('span', { class: `vote-num ${v.vote > 0 ? 'good' : v.vote < 0 ? 'bad' : 'muted'}`, text: v.vote === 0 ? '0' : `${v.vote > 0 ? '+' : ''}${v.vote.toFixed(2)}` })),
         el('div', { class: 'muted small', text: methodNote(v, bt) }),
         scoreMeter(v.vote * 100)))))),
+    modelsCard(models, bt),
   );
+}
+
+// What the server's models are and whether they earned a vote on this timeframe.
+function modelsCard(models, bt) {
+  if (!models) {
+    return serverOn()
+      ? el('p', { class: 'muted small', text: `Machine learning: your server hasn't trained models for the ${TIMEFRAMES[state.chartTf].label} chart yet. It trains weekly, and for a new alert timeframe soon after you switch.` })
+      : el('p', { class: 'muted small', text: 'Machine learning (LightGBM and an LSTM network) runs when your server is connected in Settings.' });
+  }
+  const fmtDate = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const row = (name, m) => {
+    const t = m && m.test;
+    if (!t) return el('div', { class: 'bt-row' }, el('span', { text: name }), el('span', { class: 'muted', text: 'not trained' }));
+    const used = modelUsable(m);
+    const s = bt && bt.stats[name === 'LightGBM' ? 'lgbm' : 'lstm'];
+    return el('div', { class: 'bt-row' },
+      el('span', { text: name }),
+      el('span', {
+        class: used ? 'good' : 'muted',
+        text: `right ${Math.round(t.hit * 100)}% of ${t.n} test calls · ${used ? `votes${s && s.n ? ` · weight ${bt.weights[s.id].toFixed(2)}` : ''}` : 'not used'}`,
+      }));
+  };
+  return el('div', { class: 'card' },
+    el('h3', { text: 'Machine-learning models' }),
+    el('p', { class: 'muted small', text: `Trained on your server ${fmtDate(models.trainedAt)} from ${models.symbols} charts. Each predicts whether the price is higher after fees ${ML_HORIZON} candles later, and was tested on the newest ${models.testRows} candles it never trained on (prices went up ${Math.round(((models.lgbm && models.lgbm.test && models.lgbm.test.upShare) || 0) * 100)}% of the time there).` }),
+    row('LightGBM', models.lgbm),
+    row('LSTM', models.lstm),
+    el('p', { class: 'muted small', text: 'A model votes only if it was right more than half the time on at least 200 clear test calls. Like every method, the backtest then weights it by how often it was right.' }));
 }
 
 function methodNote(v, bt) {
@@ -681,12 +713,28 @@ async function refreshMarket({ force = false } = {}) {
   if (!serverOn() || !navigator.onLine) return;
   if (!force && state.market && Date.now() - (state.market.fetchedAt || 0) < MARKET_REFRESH_MS) return;
   try {
-    const { market } = await srv.serverFetch(state.settings, '/signals');
+    const { market, modelsAt = {} } = await srv.serverFetch(state.settings, '/signals');
     state.market = market ? { ...market, fetchedAt: Date.now() } : { fetchedAt: Date.now() };
     store.saveMarket(state.market);
     if (state.view === 'signals') renderMarket();
+    await refreshModels(modelsAt);
   } catch (e) {
     console.warn('Market scan fetch failed', e);
+  }
+}
+
+// Downloads the models only when the server has trained new ones.
+async function refreshModels(modelsAt) {
+  const have = Object.fromEntries(Object.entries(state.models).map(([tf, m]) => [tf, m.trainedAt]));
+  if (JSON.stringify(have, Object.keys(have).sort()) === JSON.stringify(modelsAt, Object.keys(modelsAt).sort())) return;
+  try {
+    const { models } = await srv.serverFetch(state.settings, '/models');
+    state.models = models || {};
+    store.saveModels(state.models);
+    state.analysis = null;
+    if (state.view === 'chart') renderAnalysis();
+  } catch (e) {
+    console.warn('Model download failed', e);
   }
 }
 
@@ -716,7 +764,17 @@ function renderServer() {
     w.lastRunAt ? `Watchlist and holdings checked ${timeAgo(w.lastRunAt)}, every ${st.watchEveryMinutes} minutes${errs ? `, ${errs} symbol${errs === 1 ? '' : 's'} failed` : ''}.` : 'Watchlist checks start once a phone turns on server alerts.',
     st.market.lastRunAt ? `Market scan ${timeAgo(st.market.lastRunAt)}.` : '',
     st.market.nextAt ? `Next market scan ${new Date(st.market.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '',
+    modelsLine(st),
   ].filter(Boolean).join(' ');
+}
+
+function modelsLine(st) {
+  const models = Object.entries(st.models || {});
+  const failed = Object.entries((st.training && st.training.results) || {}).filter(([, r]) => r.error);
+  const next = st.training && st.training.nextAt ? ` Next training ${new Date(st.training.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '';
+  if (!models.length) return `${failed.length ? `Model training failed: ${failed[0][1].error}.` : 'Machine-learning models are not trained yet.'}${next}`;
+  const pct = t => (t ? `${Math.round(t.hit * 100)}%${t.usable ? '' : ' (not used)'}` : 'none');
+  return `${models.map(([tf, m]) => `${TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf} models right ${pct(m.lgbm)} (LightGBM) and ${pct(m.lstm)} (LSTM) in their test, trained ${timeAgo(m.trainedAt)}.`).join(' ')}${failed.length ? ` Last training of ${failed.map(([tf]) => tf).join(', ')} failed.` : ''}${next}`;
 }
 
 async function saveServer() {
@@ -816,7 +874,7 @@ async function runScan({ force = false } = {}) {
   const abort = new AbortController();
   state.scan = { busy: true, done: 0, total: items.length, at: state.scan.at, errors: {}, abort };
   renderSignals();
-  const deps = { getCandles: store.getCandles, saveCandles: store.saveCandles, fetchCandles, getWeight: store.weightFor, saveWeight: store.saveWeight };
+  const deps = { getCandles: store.getCandles, saveCandles: store.saveCandles, fetchCandles, getWeight: store.weightFor, saveWeight: store.saveWeight, getModels: t => state.models[t] || null };
   const alerts = {};
   for (const item of items) {
     if (abort.signal.aborted) break;

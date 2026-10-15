@@ -6,11 +6,14 @@ FROM python:3.11-slim
 # The signal engine is the app's own JavaScript (copied into js/), run with Node.
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 
+# LightGBM needs the OpenMP runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY package.json main.py service.py engine.mjs sp500.csv generate_vapid_keys.py ./
+COPY package.json main.py service.py ml.py engine.mjs sp500.csv generate_vapid_keys.py ./
 COPY js ./js
 
 ENV DATA_DIR=/data

@@ -3,12 +3,13 @@
 // a symbol scores exactly the same on the server as on the phone.
 //
 // The Python service runs it as:  node engine.mjs < job.json > result.json
-// job: { mode: 'watch' | 'market', ... }  (see runWatch and runMarket below)
+// job: { mode: 'watch' | 'market' | 'dataset', ... }  (see runWatch, runMarket and runDataset below)
 
 import { TIMEFRAMES } from './js/candles.js';
 import { readFile } from 'node:fs/promises';
 import { fetchCandles, yahooCandles, fetchCryptoTop } from './js/data.js';
-import { analyze, signalAt, MIN_CANDLES } from './js/signals.js';
+import { analyze, signalAt, baseVotesAt, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
+import { featureNames, featureVector, sequence, label } from './js/ml.js';
 import { backtest } from './js/backtest.js';
 import { summarize, alertFor, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
@@ -46,16 +47,18 @@ async function candlesFor(item, tf, settings, deps) {
 }
 
 // Scores one symbol, re-learning its method weights from the backtest once a day.
-async function score(item, tf, settings, weightsCache, deps) {
+// `models` are this timeframe's ML models; new models mean new weights.
+async function score(item, tf, settings, weightsCache, deps, models) {
   const { candles } = await candlesFor(item, tf, settings, deps);
   if (candles.length < MIN_CANDLES) throw new Error(`Only ${candles.length} candles, ${MIN_CANDLES} needed`);
   const thresholds = { buy: settings.buyAt, sell: settings.sellAt };
-  const S = analyze(candles);
+  const S = analyze(candles, { models });
   const wKey = `${key(item)}:${tf}`;
+  const modelsAt = (models && models.trainedAt) || null;
   let w = weightsCache[wKey];
-  if (!w || deps.now() - w.at >= WEIGHTS_MAX_AGE_MS) {
+  if (!w || deps.now() - w.at >= WEIGHTS_MAX_AGE_MS || (w.modelsAt || null) !== modelsAt) {
     const bt = backtest(S, { thresholds, stopAtr: settings.stopAtr, takeAtr: settings.takeAtr });
-    w = { at: deps.now(), weights: bt ? bt.weights : null };
+    w = { at: deps.now(), modelsAt, weights: bt ? bt.weights : null };
     weightsCache[wKey] = w;
   }
   const sig = signalAt(S, candles.length - 1, {
@@ -91,7 +94,7 @@ export async function runWatch(job, deps = defaultDeps) {
   const alerts = [];
   await pool(job.items || [], 3, async item => {
     try {
-      signals[key(item)] = await score(item, tf, settings, weights, deps);
+      signals[key(item)] = await score(item, tf, settings, weights, deps, job.models);
     } catch (e) {
       errors[key(item)] = e.message;
     }
@@ -170,7 +173,7 @@ export async function runMarket(job, deps = defaultDeps) {
   const results = [];
   await pool([...crypto, ...stocks], 4, async item => {
     try {
-      results.push(await score(item, tf, settings, weights, deps));
+      results.push(await score(item, tf, settings, weights, deps, job.models));
     } catch (e) {
       errors[key(item)] = e.message;
     }
@@ -212,12 +215,78 @@ export async function runMarket(job, deps = defaultDeps) {
   };
 }
 
+// Your symbols plus a spread of S&P 500 stocks and top cryptos, so the models
+// learn from more than a handful of charts. `total` caps the list.
+async function trainingItems(job, deps) {
+  const out = [];
+  const seen = new Set();
+  const add = item => {
+    if (out.length < job.total && !seen.has(key(item))) {
+      seen.add(key(item));
+      out.push(item);
+    }
+  };
+  (job.items || []).forEach(add);
+  const room = job.total - out.length;
+  if (room > 0) {
+    let crypto = [];
+    try {
+      crypto = await deps.fetchCryptoTop(20);
+    } catch { /* stocks alone are enough */ }
+    crypto.slice(0, Math.ceil(room / 5)).forEach(add);
+    const stocks = parseSp500(await readFile(new URL('./sp500.csv', import.meta.url), 'utf8'));
+    const step = Math.max(1, Math.floor(stocks.length / (job.total - out.length || 1)));
+    stocks.filter((_, i) => i % step === 0).forEach(add);
+  }
+  return out;
+}
+
+// Training data for the ML models: one row per candle that has a known outcome.
+// job: { tf, items, settings, total }
+// result: { tf, features, symbols, rows: { key, t, x, seq, y, ret }[], errors }
+export async function runDataset(job, deps = defaultDeps) {
+  const { tf, settings } = job;
+  const names = featureNames(METHOD_IDS);
+  const rows = [];
+  const errors = {};
+  const items = job.total ? await trainingItems(job, deps) : job.items || [];
+  await pool(items, 4, async item => {
+    try {
+      const { candles } = await candlesFor(item, tf, settings, deps);
+      if (candles.length < MIN_CANDLES + 20) throw new Error(`Only ${candles.length} candles`);
+      const S = analyze(candles);
+      for (let i = MIN_CANDLES - 1; i < candles.length; i++) {
+        const y = label(S, i);
+        if (y === null) break;
+        const seq = sequence(S, i);
+        if (!seq) continue;
+        const x = featureVector(S, i, baseVotesAt(S, i), names).map(v => (Number.isFinite(v) ? Number(v.toFixed(5)) : null));
+        rows.push({ key: key(item), t: candles[i].time, x, seq: seq.map(r => r.map(v => Number(v.toFixed(4)))), y, ret: S.close[i + 10] / S.close[i] - 1 });
+      }
+    } catch (e) {
+      errors[key(item)] = e.message;
+    }
+  });
+  return { tf, features: names, symbols: items.length, rows, errors };
+}
+
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
-  const result = job.mode === 'market' ? await runMarket(job) : await runWatch(job);
-  process.stdout.write(JSON.stringify(result));
+  const run = { market: runMarket, dataset: runDataset }[job.mode] || runWatch;
+  const result = await run(job);
+  if (job.stream) {
+    // Training data is big: a header line, then one row per line, so Python
+    // can read it without holding the whole text at once.
+    const { rows, ...header } = result;
+    process.stdout.write(`${JSON.stringify(header)}\n`);
+    for (const row of rows) {
+      if (!process.stdout.write(`${JSON.stringify(row)}\n`)) await new Promise(r => process.stdout.once('drain', r));
+    }
+  } else {
+    process.stdout.write(JSON.stringify(result));
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

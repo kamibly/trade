@@ -38,7 +38,7 @@ export function summarize(item, sig, tf) {
   };
 }
 
-// deps: { getCandles, saveCandles, fetchCandles, getWeight?, saveWeight? } so tests can stub them.
+// deps: { getCandles, saveCandles, fetchCandles, getWeight?, saveWeight?, getModels? } so tests can stub them.
 export async function scanItem(item, tf, settings, thresholds, deps, signal) {
   let saved = deps.getCandles(item, tf);
   if (!isFresh(saved, tf)) {
@@ -52,7 +52,7 @@ export async function scanItem(item, tf, settings, thresholds, deps, signal) {
     }
   }
   if (saved.candles.length < MIN_CANDLES) return { error: `Only ${saved.candles.length} candles, ${MIN_CANDLES} needed` };
-  const S = analyze(saved.candles);
+  const S = analyze(saved.candles, { models: deps.getModels?.(tf) });
   let weights;
   if (deps.getWeight) {
     const w = deps.getWeight(item, tf);

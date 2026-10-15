@@ -106,6 +106,14 @@ export const savePaper = acc => write('paper', acc);
 export const getSyncMeta = () => read('sync', { changedAt: 0 });
 export const saveSyncMeta = meta => write('sync', meta);
 
+// Machine-learning models from the server per timeframe: { "1D": { cutoff, trainedAt, lgbm, lstm } }.
+// New models change the votes, so the learned method weights start over.
+export const getModels = () => read('models', {});
+export function saveModels(models) {
+  write('weights', {});
+  return write('models', models);
+}
+
 // The server's last market scan, so the Signals tab shows it offline.
 export const getMarket = () => read('market', null);
 export const saveMarket = m => write('market', m);

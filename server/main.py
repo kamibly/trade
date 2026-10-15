@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -72,6 +72,8 @@ def status(x_api_key: Optional[str] = Header(default=None)):
         "watchEveryMinutes": service.WATCH_EVERY.get((profile.get("settings") or {}).get("alertTf"), 15),
         "market": {"lastRunAt": market.get("at"), "scanned": market.get("scanned"), "error": market.get("error"), "nextAt": service.next_market_at()},
         "scanTimes": service.scan_times(),
+        "models": service.model_summaries(),
+        "training": {**(state.get("training") or {}), "nextAt": service.next_train_at()},
     }
 
 
@@ -94,14 +96,22 @@ def get_signals(x_api_key: Optional[str] = Header(default=None)):
     """Latest watchlist signals and the market scan, for the Signals tab."""
     check_api_key(x_api_key)
     state = service.load_state()
-    return {"signals": state["signals"], "market": state.get("market")}
+    models = {tf: s["trainedAt"] for tf, s in service.model_summaries().items()}
+    return {"signals": state["signals"], "market": state.get("market"), "modelsAt": models}
+
+
+@app.get("/models")
+def get_models(x_api_key: Optional[str] = Header(default=None)):
+    """The machine-learning models per timeframe, for the app to run on the phone."""
+    check_api_key(x_api_key)
+    return {"models": {tf: m for tf in sorted(service.TIMEFRAMES) if (m := service.load_models(tf))}}
 
 
 @app.post("/run")
 def post_run(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(default={})):
-    """Runs the watch or the market scan now, in the background."""
+    """Runs the watch, the market scan or model training now, in the background."""
     check_api_key(x_api_key)
-    what = "market" if payload.get("what") == "market" else "watch"
+    what = payload.get("what") if payload.get("what") in ("market", "train") else "watch"
     service.run_in_background(what)
     return {"ok": True, "started": what}
 
