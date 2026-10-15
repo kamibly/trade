@@ -2,7 +2,7 @@
 // Price APIs are other sites and pass straight through: a cached copy would
 // hide real errors and show stale prices as if they were live.
 
-const CACHE = 'trade-v1';
+const CACHE = 'trade-v2';
 const ASSETS = [
   './',
   './index.html',
@@ -12,14 +12,20 @@ const ASSETS = [
   './js/candles.js',
   './js/chart.js',
   './js/data.js',
+  './js/forecast.js',
   './js/format.js',
+  './js/indicators.js',
   './js/limiter.js',
+  './js/notify.js',
+  './js/scanner.js',
+  './js/signals.js',
   './js/storage.js',
   './vendor/lightweight-charts.standalone.production.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
   './icons/apple-touch-icon.png',
+  './icons/badge-96.png',
 ];
 
 self.addEventListener('install', event => {
@@ -63,4 +69,20 @@ self.addEventListener('fetch', event => {
   event.respondWith(
     caches.match(request, { ignoreSearch: true }).then(hit => hit || fetch(request)),
   );
+});
+
+// Tapping an alert opens the app on that symbol's chart.
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  const hash = (event.notification.data && event.notification.data.hash) || 'signals';
+  const url = new URL(`./#${hash}`, self.registration.scope).href;
+  event.waitUntil((async () => {
+    const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const open = windows.find(w => w.url.startsWith(self.registration.scope));
+    if (open) {
+      await open.focus();
+      return open.navigate(url);
+    }
+    return self.clients.openWindow(url);
+  })());
 });

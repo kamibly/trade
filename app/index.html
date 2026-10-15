@@ -15,12 +15,21 @@
 </head>
 <body>
   <header class="topbar">
-    <h1 id="title">Watchlist</h1>
+    <h1 id="title">Signals</h1>
     <span id="offline" class="pill warn" hidden>Offline</span>
   </header>
 
   <main>
-    <section id="view-watch" class="view" aria-labelledby="title">
+    <section id="view-signals" class="view" aria-labelledby="title">
+      <div class="toolbar">
+        <p id="scan-status" class="muted small" role="status"></p>
+        <button type="button" id="scan-btn" class="ghost">Scan now</button>
+      </div>
+      <p class="notice small">Signals combine 30 methods into one score. They support your decisions and are often wrong. Check the chart before acting.</p>
+      <div id="signals-body"></div>
+    </section>
+
+    <section id="view-watch" class="view" aria-labelledby="title" hidden>
       <div class="toolbar">
         <div class="seg" id="filter" role="group" aria-label="Show">
           <button type="button" data-filter="all" class="on">All</button>
@@ -55,8 +64,17 @@
         <button type="button" data-tf="1D">1D</button>
         <button type="button" data-tf="1W">1W</button>
       </div>
+      <div class="chips" id="overlay-chips" role="group" aria-label="Show on chart">
+        <button type="button" data-ov="ma">Averages</button>
+        <button type="button" data-ov="bands">Bollinger</button>
+        <button type="button" data-ov="cloud">Ichimoku</button>
+        <button type="button" data-ov="forecast">Forecast</button>
+        <button type="button" data-ov="markers">Buy/sell marks</button>
+      </div>
       <div id="chart" class="chart" role="img" aria-label="Price chart"></div>
       <p id="chart-status" class="muted small"></p>
+      <p class="muted small legend"><span class="key k20"></span>SMA 20 <span class="key k50"></span>SMA 50 <span class="key k200"></span>SMA 200 <span class="key kfc"></span>Forecast: median and 10–90% range of 500 simulated paths</p>
+      <div id="analysis"></div>
     </section>
 
     <section id="view-settings" class="view" hidden>
@@ -74,6 +92,31 @@
           <button type="button" id="key-show" class="ghost">Show</button>
         </div>
         <p id="key-status" class="small" role="status"></p>
+      </div>
+
+      <div class="card">
+        <h2>Signals and alerts</h2>
+        <label class="field">
+          <span>Signals use this chart</span>
+          <select id="alert-tf">
+            <option value="15m">15 minutes (day trading)</option>
+            <option value="1h">1 hour (swing)</option>
+            <option value="1D">1 day (swing)</option>
+            <option value="1W">1 week (long term)</option>
+          </select>
+        </label>
+        <div class="row two">
+          <label class="field"><span>Buy at score of at least</span><input id="buy-at" type="number" inputmode="numeric" min="10" max="100" step="5"></label>
+          <label class="field"><span>Sell at score of at most minus</span><input id="sell-at" type="number" inputmode="numeric" min="10" max="100" step="5"></label>
+        </div>
+        <p id="alert-status" class="small" role="status"></p>
+        <button type="button" id="notify-btn" class="primary">Turn on notifications</button>
+        <p id="notify-status" class="muted small"></p>
+        <label class="switch">
+          <input id="quiet-toggle" type="checkbox">
+          <span>Quiet hours, 22:00 to 07:00</span>
+        </label>
+        <p class="muted small">While the app is closed, alerts need the OCI server (stage 4). Phones may also pause apps left in the background.</p>
       </div>
 
       <div class="card">
@@ -117,7 +160,8 @@
   </main>
 
   <nav class="tabbar" aria-label="Sections">
-    <button type="button" data-view="watch" class="on"><span aria-hidden="true">☰</span>Watchlist</button>
+    <button type="button" data-view="signals" class="on"><span aria-hidden="true">⚡</span>Signals</button>
+    <button type="button" data-view="watch"><span aria-hidden="true">☰</span>Watchlist</button>
     <button type="button" data-view="chart"><span aria-hidden="true">📈</span>Chart</button>
     <button type="button" data-view="settings"><span aria-hidden="true">⚙</span>Settings</button>
   </nav>
