@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -72,6 +72,7 @@ def status(x_api_key: Optional[str] = Header(default=None)):
         "watchEveryMinutes": service.WATCH_EVERY.get((profile.get("settings") or {}).get("alertTf"), 15),
         "market": {"lastRunAt": market.get("at"), "scanned": market.get("scanned"), "error": market.get("error"), "nextAt": service.next_market_at()},
         "scanTimes": service.scan_times(),
+        "prices": {"lastRunAt": (state.get("prices") or {}).get("lastRunAt"), "everySeconds": service.PRICES_EVERY_MS // 1000},
         "models": service.model_summaries(),
         "training": {**(state.get("training") or {}), "nextAt": service.next_train_at()},
     }
@@ -98,6 +99,26 @@ def get_signals(x_api_key: Optional[str] = Header(default=None)):
     state = service.load_state()
     models = {tf: s["trainedAt"] for tf, s in service.model_summaries().items()}
     return {"signals": state["signals"], "market": state.get("market"), "modelsAt": models}
+
+
+@app.get("/paper")
+def get_paper(x_api_key: Optional[str] = Header(default=None)):
+    """The paper-trading account the server runs, with its latest trades."""
+    check_api_key(x_api_key)
+    state = service.load_state()
+    return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {})}
+
+
+@app.post("/paper/reset")
+def post_paper_reset(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(default={})):
+    check_api_key(x_api_key)
+    try:
+        start = float(payload["start"]) if payload.get("start") else None
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Starting amount must be a number")
+    if start is not None and not 100 <= start <= 10_000_000:
+        raise HTTPException(status_code=400, detail="Starting amount must be between $100 and $10,000,000")
+    return {"ok": True, "paper": service.reset_paper(start)}
 
 
 @app.get("/models")

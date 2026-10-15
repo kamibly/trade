@@ -125,6 +125,21 @@ export async function yahooCandles(item, tf) {
   return { candles: fromYahoo(json).slice(-500), source: 'Yahoo Finance' };
 }
 
+// The latest stock price from Yahoo Finance (server only), for the
+// every-minute stop-loss and target checks.
+export async function yahooPrice(item) {
+  const symbol = encodeURIComponent(item.symbol.replace(/\./g, '-'));
+  const json = await getJson(`https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1m&range=1d`, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36' },
+  });
+  const meta = json && json.chart && json.chart.result && json.chart.result[0] && json.chart.result[0].meta;
+  const price = meta && Number(meta.regularMarketPrice);
+  if (Number.isFinite(price) && price > 0) return price;
+  const candles = fromYahoo(json);
+  if (!candles.length) throw new DataError(`No price for ${item.symbol}`);
+  return candles.at(-1).close;
+}
+
 // ---- Public API -------------------------------------------------------------
 
 // `signal` drops a stock request still queued behind the rate limit, so

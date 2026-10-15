@@ -18,7 +18,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON } from './ml.js';
 
-export const APP_VERSION = '0.5.0 (stage 5)';
+export const APP_VERSION = '0.6.0 (server monitoring)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -54,6 +54,7 @@ const state = {
   signals: store.getSignals(),
   holdings: store.getHoldings(),
   paper: store.getPaper(),
+  serverPaper: store.getServerPaper(), // the server's paper account while connected
   pfTab: 'holdings',
   holdEditing: false,
   holdType: 'stock',
@@ -743,6 +744,7 @@ async function refreshMarket({ force = false } = {}) {
     store.saveMarket(state.market);
     if (state.view === 'signals') renderMarket();
     await refreshModels(modelsAt);
+    await refreshPaper();
   } catch (e) {
     console.warn('Market scan fetch failed', e);
   }
@@ -786,7 +788,8 @@ function renderServer() {
   info.textContent = [
     `Connected (version ${st.version}).`,
     st.pushEnabled ? `${st.devices} phone${st.devices === 1 ? '' : 's'} get alerts.` : 'Notification keys are not set on the server yet.',
-    w.lastRunAt ? `Watchlist and holdings checked ${timeAgo(w.lastRunAt)}, every ${st.watchEveryMinutes} minutes${errs ? `, ${errs} symbol${errs === 1 ? '' : 's'} failed` : ''}.` : 'Watchlist checks start once a phone turns on server alerts.',
+    w.lastRunAt ? `Watchlist and holdings checked ${timeAgo(w.lastRunAt)}, right after every candle closes and every ${st.watchEveryMinutes} minutes in between${errs ? `, ${errs} symbol${errs === 1 ? '' : 's'} failed` : ''}.` : 'Watchlist checks start within a few minutes.',
+    st.prices && st.prices.lastRunAt ? `Stop-losses and targets checked every minute, last ${timeAgo(st.prices.lastRunAt)}.` : '',
     st.market.lastRunAt ? `Market scan ${timeAgo(st.market.lastRunAt)}.` : '',
     st.market.nextAt ? `Next market scan ${new Date(st.market.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '',
     modelsLine(st),
@@ -1088,7 +1091,24 @@ async function submitHolding(e) {
 
 // ---- Portfolio: paper trading -------------------------------------------------
 
+// With your server connected, paper trading runs there around the clock and
+// the phone only shows it; otherwise the phone trades while the app is open.
+const serverPaperOn = () => serverOn() && !!(state.serverPaper && state.serverPaper.paper);
+
+async function refreshPaper() {
+  if (!serverOn() || !navigator.onLine) return;
+  try {
+    const r = await srv.serverFetch(state.settings, '/paper');
+    state.serverPaper = { ...r, fetchedAt: Date.now() };
+    store.saveServerPaper(state.serverPaper);
+    if (state.view === 'portfolio' && state.pfTab === 'paper') renderPaper();
+  } catch (e) {
+    console.warn('Paper account fetch failed', e);
+  }
+}
+
 function paperAccount() {
+  if (serverPaperOn()) return state.serverPaper.paper;
   if (!state.paper) {
     state.paper = paper.newAccount(state.settings.paperStart);
     store.savePaper(state.paper);
@@ -1097,6 +1117,7 @@ function paperAccount() {
 }
 
 function stepPaper(tf, alerts) {
+  if (serverOn()) return; // the server trades the paper account
   const signals = Object.fromEntries(Object.entries(state.signals).filter(([, s]) => s.tf === tf));
   const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct });
   store.savePaper(state.paper);
@@ -1109,12 +1130,18 @@ function stepPaper(tf, alerts) {
 
 function renderPaper() {
   const acc = paperAccount();
-  const prices = Object.fromEntries(acc.positions.map(p => [p.key, priceOf(p.key)]));
+  const onServer = serverPaperOn();
+  const serverPrices = (onServer && state.serverPaper.prices) || {};
+  const prices = Object.fromEntries(acc.positions.map(p => [p.key, Number.isFinite(priceOf(p.key)) ? priceOf(p.key) : serverPrices[p.key]]));
   const sum = paper.summary(acc, prices);
+  const events = onServer ? state.serverPaper.events || [] : [];
   const fmtTime = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
   $('paper-body').replaceChildren(
     el('div', { class: 'card' },
       el('div', { class: 'muted small', text: `Paper account, started ${fmtTime(acc.createdAt)} with ${formatMoney(acc.start)}` }),
+      el('p', { class: 'muted small', text: onServer
+        ? `Runs on your server around the clock: it checks for new signals right after every candle closes and checks stop-losses and targets every minute (stocks while the US market is open). Updated ${timeAgo(state.serverPaper.fetchedAt)}.`
+        : serverOn() ? 'Connecting to the paper account on your server…' : 'Trades only while the app is open. Connect your server in Settings to trade around the clock.' }),
       el('div', { class: 'big', text: formatMoney(sum.equity) }),
       el('dl', { class: 'stats' },
         stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
@@ -1135,6 +1162,9 @@ function renderPaper() {
           el('div', { class: 'sub', text: `Stop ${formatMoney(p.stop)} · Target ${formatMoney(p.take)} · since ${fmtTime(p.openedAt)}` }));
       }))
       : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
+    events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
+    events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 10).map(ev => el('li', { class: 'holding' },
+      el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` })))) : null,
     el('h2', { class: 'section', text: `Closed (${acc.trades.length})` }),
     acc.trades.length
       ? el('ul', { class: 'list compact' }, ...acc.trades.slice(-30).reverse().map(t => el('li', { class: 'holding' },
@@ -1146,8 +1176,19 @@ function renderPaper() {
   );
 }
 
-function resetPaper() {
+async function resetPaper() {
   if (!confirm(`Start the paper account over with ${formatMoney(state.settings.paperStart)}? Its trades will be deleted.`)) return;
+  if (serverOn()) {
+    try {
+      const { paper: acc } = await srv.serverFetch(state.settings, '/paper/reset', { method: 'POST', body: { start: state.settings.paperStart } });
+      state.serverPaper = { paper: acc, events: [], prices: {}, fetchedAt: Date.now() };
+      store.saveServerPaper(state.serverPaper);
+      renderPaper();
+    } catch (e) {
+      toast(e.message);
+    }
+    return;
+  }
   state.paper = paper.newAccount(state.settings.paperStart);
   store.savePaper(state.paper);
   renderPaper();
@@ -1317,7 +1358,7 @@ function bind() {
     });
   }
   $('scan-btn').addEventListener('click', () => runScan({ force: true }));
-  for (const b of document.querySelectorAll('#pf-seg button')) b.addEventListener('click', () => { state.pfTab = b.dataset.pf; renderPortfolio(); });
+  for (const b of document.querySelectorAll('#pf-seg button')) b.addEventListener('click', () => { state.pfTab = b.dataset.pf; renderPortfolio(); if (state.pfTab === 'paper') refreshPaper(); });
   $('hold-add').addEventListener('click', openHoldDialog);
   $('hold-edit').addEventListener('click', () => { state.holdEditing = !state.holdEditing; renderHoldings(); });
   for (const b of document.querySelectorAll('#hold-form [data-htype]')) b.addEventListener('click', () => setHoldType(b.dataset.htype));

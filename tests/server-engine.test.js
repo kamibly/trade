@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fromYahoo } from '../app/js/candles.js';
-import { runWatch, runMarket, parseSp500 } from '../server/engine.mjs';
+import { runWatch, runMarket, runPrices, parseSp500 } from '../server/engine.mjs';
+import { newAccount } from '../app/js/paper.js';
 
 function series(n, drift, vol = 0.02, seed = 42) {
   let s = seed;
@@ -128,4 +129,38 @@ test('server/js copies match app/js (run npm run sync-server if this fails)', as
     const copy = await readFile(new URL(`../server/js/${name}.js`, import.meta.url), 'utf8');
     assert.equal(copy, app, `server/js/${name}.js is out of date`);
   }
+});
+
+test('watch run trades the paper account on a new Buy signal', async () => {
+  const up = series(300, 0.006, 0.01, 3);
+  const items = [{ type: 'stock', symbol: 'UP' }];
+  const acc = newAccount(10000, 0);
+  const r = await runWatch({ tf: '1D', settings, items, holdings: [], prev: { 'stock:UP': { action: 'hold', tf: '1D' } }, weights: {}, paper: acc, riskPct: 1 }, deps({ UP: up }));
+  assert.deepEqual(r.changes, { 'stock:UP': 'buy' });
+  assert.equal(r.paper.positions.length, 1);
+  assert.equal(r.paperEvents[0].kind, 'open');
+  assert.match(r.paperEvents[0].text, /^Bought UP at/);
+  // No paper account sent: nothing traded.
+  const none = await runWatch({ tf: '1D', settings, items, holdings: [], prev: {}, weights: {} }, deps({ UP: up }));
+  assert.equal(none.paper, null);
+  assert.deepEqual(none.paperEvents, []);
+});
+
+test('minute price check: stop and target alerts once, paper exits at the stop', async () => {
+  const holdings = [
+    { id: 'h1', key: 'stock:AAPL', type: 'stock', symbol: 'AAPL', qty: 1, buyPrice: 100, stop: 90, take: 130, alerted: {} },
+    { id: 'h2', key: 'crypto:BTC', type: 'crypto', symbol: 'BTC', qty: 1, buyPrice: 100, stop: 50, take: 110, alerted: {} },
+  ];
+  const acc = { ...newAccount(1000, 0), cash: 900, positions: [{ key: 'crypto:BTC', symbol: 'BTC', type: 'crypto', qty: 1, entry: 100, stop: 120, take: 200, cost: 100.1, openedAt: 0 }] };
+  const d = deps({ BTC: [{ time: 0, open: 115, high: 116, low: 114, close: 115, volume: 1 }] }, { yahooPrice: async () => 89 });
+  const r = await runPrices({ settings, items: [{ type: 'stock', symbol: 'AAPL' }, { type: 'crypto', symbol: 'BTC' }], holdings, paper: acc }, d);
+  assert.deepEqual(r.prices, { 'stock:AAPL': 89, 'crypto:BTC': 115 });
+  assert.deepEqual(r.alerts.map(a => [a.kind, a.key, !!a.urgent]), [['stop', 'stock:AAPL', true], ['target', 'crypto:BTC', false]]);
+  assert.deepEqual(r.holdingsAlerted, { h1: { stop: true }, h2: { take: true } });
+  assert.equal(r.paper.positions.length, 0); // 115 is below the paper stop of 120
+  assert.match(r.paperEvents[0].text, /^Sold BTC at .* \(stop\)/);
+  const again = await runPrices({ settings, items: [{ type: 'stock', symbol: 'AAPL' }], holdings: [{ ...holdings[0], alerted: { stop: true } }], paper: null }, d);
+  assert.equal(again.alerts.length, 0);
+  const down = await runPrices({ settings, items: [{ type: 'stock', symbol: 'AAPL' }], holdings, paper: null }, deps({}, { yahooPrice: async () => { throw new Error('Yahoo down'); } }));
+  assert.match(down.errors['stock:AAPL'], /Yahoo down/);
 });

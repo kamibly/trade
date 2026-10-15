@@ -2,11 +2,15 @@
 
 The Trade app's helper on your OCI VM. It runs next to jobspy-service and:
 
-- checks your watchlist and holdings every 5 to 60 minutes (by your alert
-  timeframe) and sends app notifications for new Buy and Sell signals,
-  stop-loss hits and targets reached, even while the app is closed;
-- scans the S&P 500 and the top 50 crypto on the daily chart 4 times a day
-  and shows the best buy and sell ideas in the app's Signals tab;
+- checks your watchlist and holdings right after every candle of your alert
+  timeframe closes (and every 5 to 60 minutes in between), and sends app
+  notifications for new Buy and Sell signals, even while the app is closed;
+- checks your holdings' stop-loss and target every minute at the live price
+  (stocks while the US market is open, crypto around the clock);
+- runs the paper-trading account around the clock on the same signals;
+- scans the S&P 500 and the top 50 crypto on the daily chart every hour while
+  the US market is open, plus once in the evening, and shows the best buy and
+  sell ideas in the app's Signals tab;
 - trains two machine-learning models (LightGBM and an LSTM network) every
   week and shares them with the app;
 - keeps your watchlist, holdings and alert settings in sync between phones.
@@ -137,14 +141,20 @@ With server alerts on, the app stops showing its own system notifications
 | `ALLOWED_ORIGIN` | The app's web address | `https://kamibly.github.io` |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Notification keys from step 3 | none |
 | `TRADE_TZ` | Time zone for quiet hours and scan times | `America/Toronto` |
-| `MARKET_SCAN_TIMES` | When the S&P 500 and top-50 crypto scan runs | `09:45,12:30,15:45,20:00` |
+| `MARKET_SCAN_TIMES` | When the S&P 500 and top-50 crypto scan runs | `09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00` |
 | `TWELVE_DATA_KEY` | Backup for stocks Yahoo Finance can't serve | none |
 | `TRAIN_AT` | When the models retrain each week (day and local time) | `Sun 03:00` |
 | `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
 
-How often the watchlist and holdings are checked follows the alert timeframe
-in the app: 15m every 5 minutes, 1H and 1D every 15 minutes, 1W every hour.
-Checks only run while at least one phone has server alerts on.
+The watchlist and holdings are checked a minute after every candle of your
+alert timeframe closes (a new Buy or Sell can only appear then), and also every
+5 minutes (15m), 15 minutes (1H, 1D) or hour (1W) in between. Stop-losses and
+targets of holdings and paper trades are checked every minute. Checks run
+whether or not a phone has server alerts on, so paper trading never stops;
+alerts are only sent to phones that turned them on.
+
+Each check runs on its own, so an hourly market scan or the weekly training
+never delays the minute checks.
 
 Everything the service remembers (phones, synced holdings, last signals, scan
 results) is in `trade_folder/trade-data/trade.json` on the VM, and the models

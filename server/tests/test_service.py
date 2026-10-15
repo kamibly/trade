@@ -131,11 +131,25 @@ def test_watch_run_saves_signals_alerts_and_holding_flags(monkeypatch):
     assert service.watch_due(st, service.now_ms() + 16 * 60_000) is True
 
 
-def test_watch_needs_a_device_and_market_saves_results(client, monkeypatch):
+def test_watch_runs_without_a_device_and_market_saves_results(client, monkeypatch):
     called = []
     service.set_profile(PROFILE)
-    assert service.run_watch(engine=lambda j, t: called.append(j)) is None
-    assert called == []
+
+    def watch(job, timeout):
+        called.append(job)
+        return {"signals": {}, "alerts": [{"kind": "signal", "key": "k", "title": "Buy signal: K", "body": ""}], "holdingsAlerted": {}, "weights": {}, "errors": {},
+                "paper": {**job["paper"], "cash": 9000}, "paperEvents": [{"kind": "open", "text": "Bought K"}]}
+
+    sent = []
+    monkeypatch.setattr(service, "_send", lambda s, p: sent.append(p) or True)
+    service.run_watch(engine=watch)
+    # Signals and the paper account keep going with no phone signed up; nothing is pushed.
+    assert called[0]["paper"]["start"] == 10000 and called[0]["riskPct"] == 1
+    assert sent == []
+    st = service.load_state()
+    assert st["paper"]["cash"] == 9000 and st["paperEvents"][0]["text"] == "Bought K"
+    body = client.get("/paper", headers=KEY).json()
+    assert body["paper"]["cash"] == 9000 and body["events"][0]["text"] == "Bought K"
 
     def engine(job, timeout):
         assert job["mode"] == "market"

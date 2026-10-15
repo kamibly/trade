@@ -100,6 +100,9 @@ the learned models expect.
 - **Paper trading.** A pretend account ($10,000 by default) that buys on each
   new Buy signal, risking 1% of the account per trade with at most 20% in one
   symbol, and sells on the stop-loss, target or a Sell signal.
+  With your server connected it runs there around the clock (signals after
+  every candle close, stop-loss and target every minute); otherwise it trades
+  only while the app is open.
 
 Holdings and the paper account live on the phone and are in the backup file.
 With your server connected, the watchlist and holdings also sync to it.
@@ -108,7 +111,9 @@ With your server connected, the watchlist and holdings also sync to it.
 
 [`server/`](server/) is trade-service, a Docker container that runs next to
 jobspy-service. It sends alerts while the app is closed, scans the S&P 500 and
-top 50 crypto 4 times a day, trains the machine-learning models weekly, and
+top 50 crypto every hour while the US market is open, checks your holdings'
+stop-losses and targets every minute, runs paper trading around the clock,
+trains the machine-learning models weekly, and
 syncs your watchlist and holdings. It scores
 with copies of the app's own JavaScript (kept in step by `npm run sync-server`),
 so its signals match the phone's. Only that folder goes to the VM, as

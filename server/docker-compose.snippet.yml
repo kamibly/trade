@@ -24,7 +24,7 @@ services:
       # Quiet hours (22:00 to 07:00) and scan times use this time zone
       TRADE_TZ: "America/Toronto"
       # When the S&P 500 and top-50 crypto scan runs (local time)
-      MARKET_SCAN_TIMES: "09:45,12:30,15:45,20:00"
+      MARKET_SCAN_TIMES: "09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00"
       # Optional backup for stocks Yahoo Finance can't serve
       TWELVE_DATA_KEY: ""
       # When the machine-learning models retrain each week (local time)
