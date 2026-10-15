@@ -32,10 +32,31 @@ them to another phone.
 | Stage | What | Status |
 | --- | --- | --- |
 | 1 | Installable app, watchlist, live charts (15m, 1H, 1D, 1W), USD and CAD | Done |
-| 2 | Indicators, forecasts, combined score, signals, alerts while open | Next |
-| 3 | Backtest, portfolio, stop-loss and take-profit, paper trading | Planned |
+| 2 | Indicators, forecasts, combined score, signals, alerts while open | Done |
+| 3 | Backtest, portfolio, stop-loss and take-profit, paper trading | Next |
 | 4 | OCI alert service: notifications when the app is closed, scanner | Planned |
 | 5 | Machine learning (LightGBM, LSTM) on the server | Planned |
+
+## How signals work
+
+Every method votes between -1 (sell) and +1 (buy). Votes are averaged inside
+their group, then the six groups are averaged into a score from -100 to +100,
+so a group with many methods can't outvote the rest.
+
+| Group | Methods |
+| --- | --- |
+| Trend | SMA 20/50, EMA 50/200, price vs SMA 200, MACD, ADX, Ichimoku Cloud, Parabolic SAR, Supertrend |
+| Momentum | RSI, Stochastic, Williams %R, CCI, rate of change, RSI divergence |
+| Volatility | Bollinger Bands (and squeeze), Keltner Channels, Donchian breakout |
+| Volume | On-balance volume, VWAP, money flow index, volume spikes |
+| Price structure | Support and resistance, Fibonacci retracement, pivot points, candlestick patterns |
+| Statistical forecasts | Linear regression, Holt-Winters smoothing, ARIMA(3,1,0), Monte Carlo (GBM), Hurst exponent |
+
+A score of +40 or more is a buy and -40 or less a sell (both adjustable in
+Settings). On random-walk prices the score stays within ±30 99% of the time,
+while steady trends reach 35 to 50. Each signal suggests a stop-loss 2 × ATR
+and a target 3 × ATR from the entry. Volume methods drop out when a source
+has no volume (CoinGecko backup).
 
 ## Data sources
 

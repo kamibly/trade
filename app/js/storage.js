@@ -25,6 +25,12 @@ export const DEFAULT_SETTINGS = {
   twelveKey: '',
   timeframe: '1D',
   showCad: true,
+  alertTf: '1D',
+  buyAt: 40,
+  sellAt: -40,
+  notifications: false,
+  quietHours: true,
+  overlays: { ma: true, bands: false, cloud: false, forecast: true, markers: true },
 };
 
 function read(key, fallback) {
@@ -66,6 +72,10 @@ export function saveSettings(patch) {
 
 export const getQuotes = () => read('quotes', {});
 export const saveQuotes = quotes => write('quotes', quotes);
+
+// Latest signal per symbol on the alert timeframe: { "<type>:<symbol>": summary }.
+export const getSignals = () => read('signals', {});
+export const saveSignals = signals => write('signals', signals);
 
 export const getFx = () => read('fx', null);
 export const saveFx = fx => write('fx', fx);

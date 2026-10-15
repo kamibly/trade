@@ -5,8 +5,16 @@ import {
   fetchCandles, fetchQuotes, fetchCryptoTop, fetchUsdCad, checkStock, checkTwelveKey, twelveLimiter,
 } from './data.js';
 import { PriceChart } from './chart.js';
+import * as F from './forecast.js';
+import {
+  analyze, signalAt, scoreHistory, crossings, actionFor, GROUPS, MIN_CANDLES,
+} from './signals.js';
+import { scanItem, alertFor } from './scanner.js';
+import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
 
-export const APP_VERSION = '0.1.0 (stage 1)';
+export const APP_VERSION = '0.2.0 (stage 2)';
+const SCAN_EVERY_MS = 5 * 60_000;
+const FORECAST_STEPS = 20;
 
 const QUOTE_REFRESH_MS = 60_000;
 // Stock quotes cost one Twelve Data credit each (8 a minute free), so they
@@ -18,7 +26,7 @@ const TOP_MAX_AGE_MS = 24 * 3600_000;
 const $ = id => document.getElementById(id);
 
 const state = {
-  view: 'watch',
+  view: 'signals',
   filter: 'all',
   editing: false,
   watchlist: store.getWatchlist(),
@@ -35,6 +43,8 @@ const state = {
   stocksAt: 0,
   addType: 'stock',
   cryptoTop: store.getCryptoTop(),
+  signals: store.getSignals(),
+  scan: { busy: false, done: 0, total: 0, at: 0, errors: {}, abort: null },
 };
 
 // Small DOM helper: text always goes in as text, never as HTML.
@@ -62,19 +72,30 @@ function toast(message, action) {
 
 const changeClass = pct => (pct > 0 ? 'change up' : pct < 0 ? 'change down' : 'change');
 const cadRate = () => (state.settings.showCad && state.fx ? state.fx.rate : NaN);
+const thresholds = () => ({ buy: state.settings.buyAt, sell: state.settings.sellAt });
+const scoreClass = score => (score >= state.settings.buyAt ? 'up' : score <= state.settings.sellAt ? 'down' : 'flat');
+const ACTION_WORDS = { buy: 'Buy', sell: 'Sell', hold: 'Hold' };
+const findItem = key => state.watchlist.find(i => store.itemKey(i) === key);
 
 // ---- Views ------------------------------------------------------------------
 
-const TITLES = { watch: 'Watchlist', chart: 'Chart', settings: 'Settings' };
+const TITLES = { signals: 'Signals', watch: 'Watchlist', chart: 'Chart', settings: 'Settings' };
 
-function showView(view) {
-  if (!TITLES[view]) view = 'watch';
+// Hashes: #signals, #watch, #settings, #chart, or #chart/<type>/<symbol> from a notification.
+function showView(route) {
+  let [view, type, symbol] = String(route || '').split('/');
+  if (!TITLES[view]) view = 'signals';
+  if (view === 'chart' && type && symbol) {
+    const item = findItem(`${type}:${decodeURIComponent(symbol)}`);
+    if (item) { state.chartItem = item; state.chartTf = state.settings.alertTf; }
+  }
   state.view = view;
   for (const v of Object.keys(TITLES)) $(`view-${v}`).hidden = v !== view;
   for (const b of document.querySelectorAll('.tabbar button')) b.classList.toggle('on', b.dataset.view === view);
   $('title').textContent = TITLES[view];
   if (view === 'chart') openChart();
   if (view === 'settings') renderSettings();
+  if (view === 'signals') renderSignals();
   window.scrollTo(0, 0);
 }
 
@@ -331,11 +352,12 @@ async function loadChart() {
     const ref = candles.length ? candles.at(-1).close : 1;
     chart.setData(candles, { intraday: isIntraday(tf), key, decimals: priceDecimals(ref) });
     renderChartHead();
+    renderAnalysis();
   };
 
   const saved = store.getCandles(item, tf);
   if (saved && saved.candles.length) draw(saved.candles);
-  else { state.chartCandles = []; chart.clear(); renderChartHead(); }
+  else { state.chartCandles = []; chart.clear(); renderChartHead(); renderAnalysis(); }
 
   if (!navigator.onLine) {
     status.textContent = saved ? `Offline. Showing prices saved ${timeAgo(saved.savedAt)}.` : 'Offline, and no saved prices for this chart yet.';
@@ -366,6 +388,192 @@ function pickChartSymbol() {
   }, el('div', { class: 'info' }, el('div', { class: 'sym', text: item.symbol }), el('div', { class: 'name', text: item.name || '' })))));
 }
 
+// ---- Analysis under the chart ----------------------------------------------
+
+const fmtScore = v => `${v > 0 ? '+' : ''}${Math.round(v)}`;
+
+function scoreMeter(score) {
+  // A bar from the middle: right and green for buy, left and red for sell.
+  const pct = Math.min(50, Math.abs(score) / 2);
+  return el('div', { class: 'meter', 'aria-hidden': 'true' },
+    el('span', { class: `fill ${score >= 0 ? 'up' : 'down'}`, style: `${score >= 0 ? 'left' : 'right'}: 50%; width: ${pct}%` }));
+}
+
+function levelsLine(sig) {
+  const word = sig.score >= 0 ? 'Target' : 'Target (falling)';
+  return `Entry ${formatMoney(sig.entry)} · Stop ${formatMoney(sig.stop)} · ${word} ${formatMoney(sig.take)}`;
+}
+
+function chartOverlays(S, candles) {
+  const o = state.settings.overlays;
+  const n = candles.length;
+  const step = TIMEFRAMES[state.chartTf].seconds;
+  const last = candles[n - 1];
+  const timeAt = i => (i < n ? candles[i].time : last.time + (i - n + 1) * step);
+  const pts = arr => candles.map((c, i) => ({ time: c.time, value: arr[i] }));
+  const overlays = {};
+  if (o.ma) Object.assign(overlays, { sma20: pts(S.sma20), sma50: pts(S.sma50), sma200: pts(S.sma200) });
+  if (o.bands) Object.assign(overlays, { bbUpper: pts(S.bb.upper), bbLower: pts(S.bb.lower) });
+  if (o.cloud) {
+    // The cloud is drawn 26 candles ahead of the values that make it.
+    const { spanA, spanB, shift } = S.ichimoku;
+    overlays.spanA = spanA.map((v, i) => ({ time: timeAt(i + shift), value: v }));
+    overlays.spanB = spanB.map((v, i) => ({ time: timeAt(i + shift), value: v }));
+  }
+  if (o.forecast) {
+    const g = F.gbmParams(S.close, n - 1);
+    if (g) {
+      const mc = F.monteCarlo(last.close, g, FORECAST_STEPS);
+      const start = { time: last.time, value: last.close };
+      overlays.fc50 = [start, ...mc.map((m, k) => ({ time: timeAt(n + k), value: m.p50 }))];
+      overlays.fc10 = [start, ...mc.map((m, k) => ({ time: timeAt(n + k), value: m.p10 }))];
+      overlays.fc90 = [start, ...mc.map((m, k) => ({ time: timeAt(n + k), value: m.p90 }))];
+    }
+  }
+  let markers = [];
+  if (o.markers) {
+    const hist = scoreHistory(S, { from: Math.max(0, n - 250) });
+    markers = crossings(hist, thresholds()).map(x => ({ time: candles[x.i].time, action: x.action }));
+  }
+  return { overlays, markers };
+}
+
+function renderAnalysis() {
+  const panel = $('analysis');
+  const candles = state.chartCandles;
+  for (const b of document.querySelectorAll('#overlay-chips button')) b.classList.toggle('on', !!state.settings.overlays[b.dataset.ov]);
+  if (!state.chart) return;
+  if (candles.length < MIN_CANDLES) {
+    state.chart.setOverlays({}, []);
+    panel.replaceChildren(candles.length
+      ? el('p', { class: 'muted small', text: `Signals need at least ${MIN_CANDLES} candles; this chart has ${candles.length}.` })
+      : '');
+    return;
+  }
+  const S = analyze(candles);
+  const { overlays, markers } = chartOverlays(S, candles);
+  state.chart.setOverlays(overlays, markers);
+  const sig = signalAt(S, candles.length - 1, { thresholds: thresholds() });
+  if (!sig) { panel.replaceChildren(); return; }
+
+  const byGroup = {};
+  for (const v of sig.votes) (byGroup[v.group] ||= []).push(v);
+  panel.replaceChildren(
+    el('div', { class: 'card score-card' },
+      el('div', { class: 'score-row' },
+        el('div', {},
+          el('div', { class: 'muted small', text: `Combined score, ${TIMEFRAMES[state.chartTf].label} chart` }),
+          el('div', { class: `score ${scoreClass(sig.score)}`, text: fmtScore(sig.score) })),
+        el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
+      scoreMeter(sig.score),
+      el('p', { class: 'small', text: `${Math.round(sig.confidence * 100)}% of the methods with an opinion agree. Buy at ${fmtScore(state.settings.buyAt)} or more, sell at ${fmtScore(state.settings.sellAt)} or less.` }),
+      el('p', { class: 'small', text: levelsLine(sig) }),
+      el('p', { class: 'muted small', text: 'Stop is 2 × ATR and target 3 × ATR from the entry. Not financial advice: these methods are often wrong.' })),
+    ...Object.entries(GROUPS).filter(([g]) => byGroup[g]).map(([g, title]) => el('div', { class: 'card votes' },
+      el('h3', { text: title }),
+      el('ul', {}, ...byGroup[g].map(v => el('li', {},
+        el('div', { class: 'vote-name' }, el('span', { text: v.name }), el('span', { class: `vote-num ${v.vote > 0 ? 'good' : v.vote < 0 ? 'bad' : 'muted'}`, text: v.vote === 0 ? '0' : `${v.vote > 0 ? '+' : ''}${v.vote.toFixed(2)}` })),
+        el('div', { class: 'muted small', text: v.note }),
+        scoreMeter(v.vote * 100)))))),
+  );
+}
+
+// ---- Signals tab and scanner -----------------------------------------------
+
+function signalCard(sig) {
+  const item = findItem(sig.key);
+  return el('li', { class: 'signal', onclick: () => { state.chartTf = sig.tf; openChart(item, true); } },
+    el('div', { class: 'signal-top' },
+      el('div', { class: 'sym' }, sig.symbol, el('span', { class: 'badge', text: sig.type === 'stock' ? 'Stock' : 'Crypto' }),
+        el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
+      el('div', { class: `score ${scoreClass(sig.score)}`, text: fmtScore(sig.score) })),
+    scoreMeter(sig.score),
+    el('div', { class: 'sub', text: `${Math.round(sig.confidence * 100)}% agree · ${levelsLine(sig)}` }),
+    sig.top && sig.top.length ? el('div', { class: 'sub', text: `Led by ${sig.top.join(', ')}` }) : null);
+}
+
+function renderSignals() {
+  const tf = state.settings.alertTf;
+  const all = Object.values(state.signals).filter(s => findItem(s.key) && s.tf === tf);
+  const buys = all.filter(s => s.action === 'buy').sort((a, b) => b.score - a.score);
+  const sells = all.filter(s => s.action === 'sell').sort((a, b) => a.score - b.score);
+  const holds = all.filter(s => s.action === 'hold').sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
+  const { scan } = state;
+  const missingKey = !state.settings.twelveKey && state.watchlist.some(i => i.type === 'stock');
+  $('scan-status').textContent = scan.busy
+    ? `Scanning ${scan.done} of ${scan.total} on the ${TIMEFRAMES[tf].label} chart…`
+    : scan.at ? `Scanned ${timeAgo(scan.at)} on the ${TIMEFRAMES[tf].label} chart.${missingKey ? ' Stocks need your Twelve Data key in Settings.' : ''}`
+      : 'Not scanned yet.';
+  $('scan-btn').disabled = scan.busy;
+  const errors = Object.entries(scan.errors);
+  const section = (title, list, empty) => [
+    el('h2', { class: 'section', text: `${title} (${list.length})` }),
+    list.length ? el('ul', { class: 'list' }, ...list.map(signalCard)) : el('p', { class: 'muted small', text: empty }),
+  ];
+  $('signals-body').replaceChildren(
+    ...section('Buy ideas', buys, `No symbol is at ${fmtScore(state.settings.buyAt)} or above right now.`),
+    ...section('Sell ideas', sells, `No symbol is at ${fmtScore(state.settings.sellAt)} or below right now.`),
+    ...section('Watching', holds, 'Nothing else scanned yet.'),
+    errors.length ? el('p', { class: 'muted small', text: `Could not score: ${errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ')}` }) : '',
+  );
+}
+
+function sendAlert(sig) {
+  const word = ACTION_WORDS[sig.action];
+  const title = `${word} signal: ${sig.symbol}`;
+  const body = `Score ${fmtScore(sig.score)} on the ${TIMEFRAMES[sig.tf].label} chart. ${levelsLine(sig)}.${sig.top.length ? ` Led by ${sig.top.join(', ')}.` : ''}`;
+  toast(title, { label: 'View', run: () => { $('toast').hidden = true; state.chartTf = sig.tf; openChart(findItem(sig.key), true); } });
+  const quiet = state.settings.quietHours && inQuietHours(new Date());
+  if (state.settings.notifications && !quiet) notify(title, body, `chart/${sig.type}/${encodeURIComponent(sig.symbol)}`);
+}
+
+async function runScan({ force = false } = {}) {
+  if (state.scan.busy || !navigator.onLine) return;
+  if (!force && Date.now() - state.scan.at < SCAN_EVERY_MS) return;
+  const tf = state.settings.alertTf;
+  // Crypto first: it is free and fast, while stocks may wait for the Twelve Data limit.
+  const items = state.watchlist
+    .filter(i => i.type === 'crypto' || state.settings.twelveKey)
+    .sort((a, b) => (a.type === 'crypto' ? 0 : 1) - (b.type === 'crypto' ? 0 : 1));
+  const abort = new AbortController();
+  state.scan = { busy: true, done: 0, total: items.length, at: state.scan.at, errors: {}, abort };
+  renderSignals();
+  const deps = { getCandles: store.getCandles, saveCandles: store.saveCandles, fetchCandles };
+  for (const item of items) {
+    if (abort.signal.aborted) break;
+    const key = store.itemKey(item);
+    try {
+      const r = await scanItem(item, tf, state.settings, thresholds(), deps, abort.signal);
+      if (r.result) {
+        const prev = state.signals[key];
+        state.signals[key] = r.result;
+        // No alert the first time a symbol is scored, or after switching timeframe.
+        const alert = prev && prev.tf === tf ? alertFor(prev.action, r.result.action) : null;
+        if (alert) sendAlert(r.result);
+      } else {
+        state.scan.errors[key] = r.error;
+      }
+    } catch (e) {
+      if (e.name === 'AbortError') break;
+      state.scan.errors[key] = e.message;
+    }
+    state.scan.done++;
+    if (state.view === 'signals') renderSignals();
+  }
+  store.saveSignals(state.signals);
+  state.scan.busy = false;
+  if (!abort.signal.aborted) state.scan.at = Date.now();
+  renderSignals();
+}
+
+// New buy/sell levels change each symbol's action without a new scan (and without alerts).
+function rescoreSignals() {
+  for (const s of Object.values(state.signals)) s.action = actionFor(s.score, thresholds());
+  store.saveSignals(state.signals);
+  renderSignals();
+  if (state.view === 'chart') renderAnalysis();
+}
+
 // ---- Settings ---------------------------------------------------------------
 
 function renderSettings() {
@@ -376,6 +584,47 @@ function renderSettings() {
     ? `1 USD = ${state.fx.rate.toFixed(4)} CAD (${state.fx.source}, ${timeAgo(state.fx.at)})`
     : 'USD to CAD rate not loaded yet.';
   $('version').textContent = `Version ${APP_VERSION}`;
+  $('alert-tf').value = state.settings.alertTf;
+  $('buy-at').value = state.settings.buyAt;
+  $('sell-at').value = -state.settings.sellAt;
+  $('quiet-toggle').checked = state.settings.quietHours;
+  renderNotifyStatus();
+}
+
+function renderNotifyStatus() {
+  const supported = typeof Notification !== 'undefined';
+  const on = state.settings.notifications && canNotify();
+  $('notify-btn').textContent = on ? 'Turn off notifications' : 'Turn on notifications';
+  $('notify-btn').disabled = !supported;
+  $('notify-status').textContent = !supported ? 'This browser cannot show notifications. Install the app from Chrome first.'
+    : Notification.permission === 'denied' ? 'Notifications are blocked. Allow them in Chrome\'s site settings for this app.'
+      : on ? 'On. You get an alert when a watchlist symbol turns to Buy or Sell while the app is open or in the background.'
+        : 'Off.';
+}
+
+async function toggleNotifications() {
+  if (state.settings.notifications && canNotify()) {
+    state.settings = store.saveSettings({ notifications: false });
+  } else {
+    const result = await askPermission();
+    state.settings = store.saveSettings({ notifications: result === 'granted' });
+    if (result === 'granted') notify('Trade alerts are on', 'You will get Buy and Sell alerts here.', 'signals');
+  }
+  renderNotifyStatus();
+}
+
+function saveThresholds() {
+  const buy = Math.round(Number($('buy-at').value));
+  const sell = Math.round(Number($('sell-at').value));
+  const valid = v => Number.isFinite(v) && v >= 10 && v <= 100;
+  if (!valid(buy) || !valid(sell)) {
+    $('alert-status').textContent = 'Use whole numbers from 10 to 100.';
+    renderSettings();
+    return;
+  }
+  state.settings = store.saveSettings({ buyAt: buy, sellAt: -sell });
+  $('alert-status').textContent = 'Saved. Signals use the new levels from the next scan.';
+  rescoreSignals();
 }
 
 async function saveKey() {
@@ -395,6 +644,7 @@ async function saveKey() {
     status.textContent = 'Key saved and working.';
     status.className = 'small good';
     refreshQuotes({ force: true });
+    runScan({ force: true });
   } catch (e) {
     status.textContent = `Saved, but the test failed: ${e.message}`;
     status.className = 'small bad';
@@ -455,6 +705,23 @@ function bind() {
     b.addEventListener('click', () => { state.chartTf = b.dataset.tf; renderTfButtons(); loadChart(); });
   }
 
+  for (const b of document.querySelectorAll('#overlay-chips button')) {
+    b.addEventListener('click', () => {
+      state.settings = store.saveSettings({ overlays: { ...state.settings.overlays, [b.dataset.ov]: !state.settings.overlays[b.dataset.ov] } });
+      renderAnalysis();
+    });
+  }
+  $('scan-btn').addEventListener('click', () => runScan({ force: true }));
+  $('alert-tf').addEventListener('change', e => {
+    state.settings = store.saveSettings({ alertTf: e.target.value });
+    if (state.scan.abort) state.scan.abort.abort();
+    setTimeout(() => runScan({ force: true }), 0);
+  });
+  $('buy-at').addEventListener('change', saveThresholds);
+  $('sell-at').addEventListener('change', saveThresholds);
+  $('notify-btn').addEventListener('click', toggleNotifications);
+  $('quiet-toggle').addEventListener('change', e => { state.settings = store.saveSettings({ quietHours: e.target.checked }); });
+
   $('key-save').addEventListener('click', saveKey);
   $('key-show').addEventListener('click', () => {
     const input = $('key-input');
@@ -489,6 +756,7 @@ function bind() {
   setInterval(() => {
     if (document.hidden) return;
     refreshQuotes();
+    runScan();
     if (state.view === 'chart' && isIntraday(state.chartTf)) loadChart();
   }, QUOTE_REFRESH_MS);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshQuotes(); });
@@ -506,8 +774,9 @@ function registerServiceWorker() {
 function start() {
   bind();
   renderWatchlist();
-  showView(location.hash.slice(1) || 'watch');
+  showView(location.hash.slice(1) || 'signals');
   refreshQuotes();
+  runScan({ force: true });
   if (state.settings.showCad) refreshFx();
   registerServiceWorker();
 }
