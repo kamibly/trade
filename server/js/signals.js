@@ -5,6 +5,7 @@
 
 import * as I from './indicators.js';
 import * as F from './forecast.js';
+import { mlVotes } from './ml.js';
 
 export const GROUPS = {
   trend: 'Trend',
@@ -13,6 +14,7 @@ export const GROUPS = {
   volume: 'Volume',
   structure: 'Price structure',
   stats: 'Statistical forecasts',
+  ml: 'Machine learning',
 };
 
 // On random-walk prices the score stays within ±30 99% of the time, while
@@ -26,8 +28,9 @@ const clamp = (v, lo = -1, hi = 1) => (ok(v) ? Math.max(lo, Math.min(hi, v)) : 0
 const sign = v => (v > 0 ? 1 : v < 0 ? -1 : 0);
 const fmt = v => (Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toFixed(2) : v.toPrecision(3));
 
-// Everything that can be computed once for the whole series.
-export function analyze(candles) {
+// Everything that can be computed once for the whole series. `models` are the
+// machine-learning models for this timeframe from your server, if any.
+export function analyze(candles, { models } = {}) {
   const close = I.closes(candles);
   const hasVolume = candles.some(c => c.volume > 0);
   return {
@@ -57,6 +60,7 @@ export function analyze(candles) {
     mfi: hasVolume ? I.mfi(candles) : null,
     volAvg: hasVolume ? I.sma(candles.map(c => c.volume), 20) : null,
     holt: F.holt(close),
+    models: models || null,
   };
 }
 
@@ -289,9 +293,20 @@ const METHODS = [
   },
 ];
 
-export function votesAt(S, i) {
+// The ids of the 30 methods, in order (the ML features use them).
+export const METHOD_IDS = ['sma-cross', 'ema-cross', 'sma200', 'macd', 'adx', 'ichimoku', 'psar', 'supertrend',
+  'rsi', 'stoch', 'willr', 'cci', 'roc', 'rsi-div', 'bollinger', 'keltner', 'donchian',
+  'obv', 'vwap', 'mfi', 'vol-spike', 'sr', 'fib', 'pivots', 'candles', 'linreg', 'holt', 'arima', 'montecarlo', 'hurst'];
+
+// The 30 methods' votes, without machine learning.
+export function baseVotesAt(S, i) {
   if (i < MIN_CANDLES - 1 || i >= S.candles.length) return [];
   return METHODS.map(m => m(S, i)).filter(Boolean);
+}
+
+export function votesAt(S, i) {
+  const base = baseVotesAt(S, i);
+  return base.length && S.models ? [...base, ...mlVotes(S, i, base, S.models)] : base;
 }
 
 // `weights` (method id → weight) comes from the backtest; default 1.

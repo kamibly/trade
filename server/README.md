@@ -7,6 +7,8 @@ The Trade app's helper on your OCI VM. It runs next to jobspy-service and:
   stop-loss hits and targets reached, even while the app is closed;
 - scans the S&P 500 and the top 50 crypto on the daily chart 4 times a day
   and shows the best buy and sell ideas in the app's Signals tab;
+- trains two machine-learning models (LightGBM and an LSTM network) every
+  week and shares them with the app;
 - keeps your watchlist, holdings and alert settings in sync between phones.
 
 Scores come from the app's own JavaScript (`engine.mjs` runs copies of the
@@ -19,6 +21,21 @@ Crypto comes from Coinbase, Kraken and CoinGecko, as in the app.
 
 Quiet hours (22:00 to 07:00, your time zone) hold back every alert except
 stop-loss hits.
+
+## Machine learning
+
+Every week (`TRAIN_AT`, Sunday 03:00 by default), and soon after the first
+start or a change of alert timeframe, the service trains models for your alert
+timeframe and the daily chart. It learns from your watchlist and holdings plus
+a spread of S&P 500 stocks and top cryptos (`TRAIN_SYMBOLS`, 120 charts).
+The newest ~30% of that history tests the models; the app shows the result and
+only lets a model vote if it was right more than half the time on at least 200
+test calls. Models are saved in `trade_folder/trade-data/models/`.
+
+Training runs in its own process for a few minutes and needs up to about
+1 GB of memory while it runs, then gives it back. The compose snippet caps the
+container at 1.5 GB so jobspy-service always keeps room. The image grows by several
+hundred MB for the ML libraries (CPU-only PyTorch and LightGBM).
 
 ## 1. Copy this folder to the VM
 
@@ -122,13 +139,16 @@ With server alerts on, the app stops showing its own system notifications
 | `TRADE_TZ` | Time zone for quiet hours and scan times | `America/Toronto` |
 | `MARKET_SCAN_TIMES` | When the S&P 500 and top-50 crypto scan runs | `09:45,12:30,15:45,20:00` |
 | `TWELVE_DATA_KEY` | Backup for stocks Yahoo Finance can't serve | none |
+| `TRAIN_AT` | When the models retrain each week (day and local time) | `Sun 03:00` |
+| `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
 
 How often the watchlist and holdings are checked follows the alert timeframe
 in the app: 15m every 5 minutes, 1H and 1D every 15 minutes, 1W every hour.
 Checks only run while at least one phone has server alerts on.
 
 Everything the service remembers (phones, synced holdings, last signals, scan
-results) is in `trade_folder/trade-data/trade.json` on the VM.
+results) is in `trade_folder/trade-data/trade.json` on the VM, and the models
+are in `trade_folder/trade-data/models/`.
 
 ## Updating later
 
@@ -141,7 +161,8 @@ docker compose up -d --build trade-service
 
 ## For development
 
-`js/` holds copies of the app's modules from `app/js`. After changing any of
+`js/` holds copies of the app's modules from `app/js`, including `ml.js`,
+which runs the models. After changing any of
 them, run `npm run sync-server` from the project root; the tests fail while a
 copy is out of date.
 
@@ -155,7 +176,8 @@ All except `/health` need the `X-API-Key` header.
 | `GET /status` | What Settings shows: phones, last checks, next scan |
 | `GET /sync`, `PUT /sync` | Watchlist, holdings and alert settings |
 | `GET /signals` | Last watchlist signals and the market scan |
-| `POST /run` | Run now: `{"what": "watch"}` or `{"what": "market"}` |
+| `GET /models` | The trained models, which the app runs on the phone |
+| `POST /run` | Run now: `{"what": "watch"}`, `{"what": "market"}` or `{"what": "train"}` |
 | `POST /push/subscribe`, `/push/unsubscribe`, `/push/test` | App notifications |
 
 ## Limits
@@ -164,4 +186,6 @@ All except `/health` need the `X-API-Key` header.
   checks fail until it recovers; set `TWELVE_DATA_KEY` so the watchlist falls
   back to Twelve Data (8 symbols a minute, 800 a day on the free plan).
 - A full market scan fetches about 550 charts and takes a few minutes.
+- The models are only as good as their last test. Markets change, and a model
+  that tested well can still be wrong for weeks.
 - If the VM is down, no alerts arrive while the app is closed.

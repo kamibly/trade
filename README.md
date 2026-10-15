@@ -35,7 +35,7 @@ them to another phone.
 | 2 | Indicators, forecasts, combined score, signals, alerts while open | Done |
 | 3 | Backtest, portfolio, stop-loss and take-profit, paper trading | Done |
 | 4 | OCI alert service: notifications when the app is closed, scanner | Done |
-| 5 | Machine learning (LightGBM, LSTM) on the server | Next |
+| 5 | Machine learning (LightGBM, LSTM) on the server | Done |
 
 ## How signals work
 
@@ -57,6 +57,32 @@ Settings). On random-walk prices the score stays within ±30 99% of the time,
 while steady trends reach 35 to 50. Each signal suggests a stop-loss 2 × ATR
 and a target 3 × ATR from the entry. Volume methods drop out when a source
 has no volume (CoinGecko backup).
+
+## Machine learning
+
+With your server connected, a seventh group joins the vote: two models your
+server trains every week (Sunday 03:00 by default) on your symbols plus a
+spread of S&P 500 stocks and top cryptos, about 120 charts:
+
+- **LightGBM** (gradient-boosted trees) reads the 30 method votes and a few
+  indicator values (recent returns, ATR, RSI, ADX, distance from the 50 and
+  200 SMA, Bollinger width, volume).
+- **LSTM** (a small neural network) reads the last 32 candles' moves and
+  volume changes.
+
+Both predict whether the price is higher after fees 10 candles later. The
+oldest ~70% of the history trains them and the newest ~30% tests them; a model
+votes only if it was right more than half the time on at least 200 clear test
+calls, and only on candles after its training period, so its backtest is out of
+sample too. The phone downloads the models and runs them itself, so charts
+and the in-app scanner use them as well. The chart's "Machine-learning models"
+card shows each model's test result and whether it votes.
+
+The **ML** chip on the chart draws an orange line to where the price went on
+average, 10 candles later, after similar predictions in the models' test period,
+with the share of those cases that rose after fees. Next to the Forecast fan
+(which only extends the chart's own recent drift and volatility), it shows what
+the learned models expect.
 
 ## Backtest, holdings and paper trading
 
@@ -82,7 +108,8 @@ With your server connected, the watchlist and holdings also sync to it.
 
 [`server/`](server/) is trade-service, a Docker container that runs next to
 jobspy-service. It sends alerts while the app is closed, scans the S&P 500 and
-top 50 crypto 4 times a day, and syncs your watchlist and holdings. It scores
+top 50 crypto 4 times a day, trains the machine-learning models weekly, and
+syncs your watchlist and holdings. It scores
 with copies of the app's own JavaScript (kept in step by `npm run sync-server`),
 so its signals match the phone's. Only that folder goes to the VM, as
 `trade_folder`, on host port 8898 (8004 inside the container). Setup steps are in

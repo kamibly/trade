@@ -11,11 +11,14 @@ Environment variables:
     MARKET_SCAN_TIMES  - when the S&P 500 and top-50 crypto scan runs, default "09:45,12:30,15:45,20:00"
     TWELVE_DATA_KEY    - optional; backup for stocks Yahoo Finance can't serve
     DATA_DIR           - where trade.json is kept, default /data
+    TRAIN_AT           - when the machine-learning models retrain each week, default "Sun 03:00"
+    TRAIN_SYMBOLS      - how many charts the models learn from, default 120
 """
 import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timedelta
@@ -34,6 +37,10 @@ DATA_DIR = os.environ.get("DATA_DIR", "/data")
 STATE_FILE = os.path.join(DATA_DIR, "trade.json")
 ENGINE = os.environ.get("ENGINE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.mjs"))
 NODE = os.environ.get("NODE_BIN", "node")
+ML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml.py")
+TRAIN_AT = os.environ.get("TRAIN_AT", "Sun 03:00")
+TRAIN_SYMBOLS = int(os.environ.get("TRAIN_SYMBOLS", "120") or 120)
+DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 # How often the watchlist and holdings are checked, by alert timeframe (minutes).
 WATCH_EVERY = {"15m": 5, "1h": 15, "1D": 15, "1W": 60}
@@ -41,7 +48,7 @@ QUIET_START, QUIET_END = 22, 7
 TIMEFRAMES = set(WATCH_EVERY)
 
 _lock = threading.RLock()
-_run_locks = {"watch": threading.Lock(), "market": threading.Lock()}
+_run_locks = {"watch": threading.Lock(), "market": threading.Lock(), "train": threading.Lock()}
 
 
 def tz() -> ZoneInfo:
@@ -74,6 +81,8 @@ def _empty_state() -> dict:
         "marketWeights": {},
         "watch": {"lastRunAt": None, "errors": {}, "lastAlerts": []},
         "lastMarketSlot": None,
+        "training": {"lastRunAt": None, "results": {}},  # last model training per timeframe
+        "lastTrainSlot": None,
     }
 
 
@@ -322,6 +331,7 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
             "holdings": profile["holdings"],
             "prev": state["signals"],
             "weights": {k: v for k, v in state["weights"].items() if k in keys},
+            "models": load_models(tf),
         }
         try:
             result = engine(job, 600)
@@ -362,7 +372,7 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
         profile = state.get("profile")
         if not profile:
             return None
-        job = {"mode": "market", "settings": engine_settings(profile), "prev": state["marketActions"], "weights": state["marketWeights"]}
+        job = {"mode": "market", "settings": engine_settings(profile), "prev": state["marketActions"], "weights": state["marketWeights"], "models": load_models("1D")}
         try:
             result = engine(job, 3000)
         except Exception as e:
@@ -384,8 +394,107 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
         lock.release()
 
 
+# ---------------------------------------------------------------------------
+# Machine learning (ml.py does the training in its own process)
+# ---------------------------------------------------------------------------
+
+def load_models(tf: str) -> Optional[dict]:
+    import ml
+    return ml.load_models(tf)
+
+
+def model_summaries() -> Dict[str, dict]:
+    import ml
+    out = {}
+    for tf in sorted(TIMEFRAMES):
+        s = ml.summary(load_models(tf))
+        if s:
+            out[tf] = s
+    return out
+
+
+def train_timeframes(profile: dict) -> List[str]:
+    """The alert timeframe and the daily chart the market scan uses."""
+    return sorted({profile["settings"]["alertTf"], "1D"})
+
+
+def run_ml(job: dict, timeout: int) -> dict:
+    proc = subprocess.run([sys.executable, ML], input=json.dumps(job), capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or "training failed").strip().splitlines()[-1][:300])
+    return json.loads(proc.stdout)
+
+
+def run_train(reason: str = "schedule", trainer: Callable[[dict, int], dict] = run_ml) -> Optional[dict]:
+    lock = _run_locks["train"]
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        profile = load_state().get("profile")
+        if not profile:
+            return None
+        results = {}
+        for tf in train_timeframes(profile):
+            job = {"tf": tf, "items": watch_items(profile), "settings": engine_settings(profile), "total": TRAIN_SYMBOLS}
+            try:
+                results[tf] = {**trainer(job, 3600), "at": now_ms()}
+            except Exception as e:
+                logger.exception("Training %s failed", tf)
+                results[tf] = {"error": str(e), "at": now_ms()}
+
+        def apply(st):
+            st["training"] = {"lastRunAt": now_ms(), "reason": reason, "results": {**st["training"].get("results", {}), **results}}
+            # New models change the votes, so method weights are learned again.
+            st["weights"], st["marketWeights"] = {}, {}
+
+        update_state(apply)
+        return results
+    finally:
+        lock.release()
+
+
+def train_schedule():
+    """(weekday 0-6, hour, minute) from TRAIN_AT like "Sun 03:00"."""
+    try:
+        day, at = TRAIN_AT.strip().lower().split()
+        h, m = (int(x) for x in at.split(":"))
+        if day[:3] in DAYS and 0 <= h < 24 and 0 <= m < 60:
+            return DAYS.index(day[:3]), h, m
+    except ValueError:
+        pass
+    return 6, 3, 0
+
+
+def train_slot(now: datetime) -> datetime:
+    """The latest weekly training time at or before `now`."""
+    day, h, m = train_schedule()
+    slot = now.replace(hour=h, minute=m, second=0, microsecond=0) - timedelta(days=(now.weekday() - day) % 7)
+    return slot if slot <= now else slot - timedelta(days=7)
+
+
+def next_train_at(now: Optional[datetime] = None) -> str:
+    now = now or datetime.now(tz())
+    return (train_slot(now) + timedelta(days=7)).isoformat()
+
+
+def train_due(state: dict, now: datetime) -> Optional[str]:
+    """A slot id when training should run: the weekly time passed, or a timeframe has no models yet."""
+    profile = state.get("profile")
+    if not profile:
+        return None
+    slot = train_slot(now).isoformat()
+    if state.get("lastTrainSlot") != slot:
+        return slot
+    missing = [tf for tf in train_timeframes(profile) if not os.path.exists(os.path.join(DATA_DIR, "models", f"{tf}.json"))]
+    last = (state.get("training") or {}).get("lastRunAt") or 0
+    # After a failed training, wait 6 hours before trying again.
+    if missing and now_ms() - last >= 6 * 3600_000:
+        return slot
+    return None
+
+
 def run_in_background(what: str) -> None:
-    target = run_market if what == "market" else run_watch
+    target = {"market": run_market, "train": run_train}.get(what, run_watch)
     threading.Thread(target=target, args=("manual",), daemon=True).start()
 
 
@@ -448,6 +557,10 @@ def start_scheduler() -> None:
                 if slot:
                     update_state(lambda st: st.update(lastMarketSlot=slot))
                     run_market()
+                train = train_due(load_state(), datetime.now(tz()))
+                if train:
+                    update_state(lambda st: st.update(lastTrainSlot=train))
+                    run_train()
             except Exception:
                 logger.exception("Scheduler step failed")
             time.sleep(30)

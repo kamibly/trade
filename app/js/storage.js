@@ -37,7 +37,7 @@ export const DEFAULT_SETTINGS = {
   serverUrl: '',
   serverKey: '',
   serverPush: false,
-  overlays: { ma: true, bands: false, cloud: false, forecast: true, markers: true },
+  overlays: { ma: true, bands: false, cloud: false, forecast: true, ml: true, markers: true },
 };
 
 function read(key, fallback) {
@@ -68,7 +68,9 @@ export function getWatchlist() {
 export const saveWatchlist = list => write('watchlist', list);
 
 export function getSettings() {
-  return { ...DEFAULT_SETTINGS, ...read('settings', {}) };
+  const saved = read('settings', {});
+  // New chart overlays start with their default when older settings lack them.
+  return { ...DEFAULT_SETTINGS, ...saved, overlays: { ...DEFAULT_SETTINGS.overlays, ...(saved.overlays || {}) } };
 }
 
 export function saveSettings(patch) {
@@ -105,6 +107,14 @@ export const savePaper = acc => write('paper', acc);
 // When the watchlist, holdings or synced settings last changed on this phone.
 export const getSyncMeta = () => read('sync', { changedAt: 0 });
 export const saveSyncMeta = meta => write('sync', meta);
+
+// Machine-learning models from the server per timeframe: { "1D": { cutoff, trainedAt, lgbm, lstm } }.
+// New models change the votes, so the learned method weights start over.
+export const getModels = () => read('models', {});
+export function saveModels(models) {
+  write('weights', {});
+  return write('models', models);
+}
 
 // The server's last market scan, so the Signals tab shows it offline.
 export const getMarket = () => read('market', null);

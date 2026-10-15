@@ -2,7 +2,7 @@
 // Price APIs are other sites and pass straight through: a cached copy would
 // hide real errors and show stale prices as if they were live.
 
-const CACHE = 'trade-v4';
+const CACHE = 'trade-v6';
 const ASSETS = [
   './',
   './index.html',
@@ -22,6 +22,7 @@ const ASSETS = [
   './js/portfolio.js',
   './js/scanner.js',
   './js/server.js',
+  './js/ml.js',
   './js/signals.js',
   './js/storage.js',
   './vendor/lightweight-charts.standalone.production.js',

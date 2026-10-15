@@ -19,6 +19,7 @@ const LINES = {
   fc50: { color: '#4c9aff', lineWidth: 2, lineStyle: 2 },
   fc10: { color: 'rgba(76,154,255,0.55)', lineWidth: 1, lineStyle: 2 },
   fc90: { color: 'rgba(76,154,255,0.55)', lineWidth: 1, lineStyle: 2 },
+  ml: { color: '#ff9f43', lineWidth: 3, lineStyle: 0, lastValueVisible: true },
 };
 
 export class PriceChart {
@@ -30,7 +31,7 @@ export class PriceChart {
       layout: { background: { type: 'solid', color: '#161b22' }, textColor: '#c9d1d9', fontSize: 12 },
       grid: { vertLines: { color: '#222a35' }, horzLines: { color: '#222a35' } },
       rightPriceScale: { borderColor: '#2a313c' },
-      timeScale: { borderColor: '#2a313c', rightOffset: 4 },
+      timeScale: { borderColor: '#2a313c', rightOffset: 12 },
       crosshair: { mode: LW.CrosshairMode.Normal },
       handleScroll: { vertTouchDrag: false },
     });
@@ -47,7 +48,7 @@ export class PriceChart {
   line(name) {
     if (!this.lines[name]) {
       this.lines[name] = this.chart.addLineSeries({
-        ...LINES[name], priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false,
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...LINES[name],
       });
     }
     return this.lines[name];
@@ -69,17 +70,18 @@ export class PriceChart {
     if (key !== this.key) {
       this.key = key;
       const bars = Math.min(candles.length, 120);
-      if (candles.length) this.chart.timeScale().setVisibleLogicalRange({ from: candles.length - bars, to: candles.length + 3 });
+      if (candles.length) this.chart.timeScale().setVisibleLogicalRange({ from: candles.length - bars, to: candles.length + 12 });
     }
   }
 
-  // overlays: { name: [{ time, value }] | null }, markers: [{ time, action }]
-  setOverlays(overlays, markers = []) {
+  // overlays: { name: [{ time, value }] | null }, markers: [{ time, action }],
+  // titles: { name: label shown with the line's last value on the price scale }
+  setOverlays(overlays, markers = [], titles = {}) {
     for (const name of Object.keys(LINES)) {
       const points = overlays[name];
       if (!points && !this.lines[name]) continue;
       const series = this.line(name);
-      series.applyOptions({ priceFormat: this.priceFormat });
+      series.applyOptions({ priceFormat: this.priceFormat, title: titles[name] || '' });
       series.setData(points ? points.filter(p => Number.isFinite(p.value)).map(p => ({ time: this.shift(p.time), value: p.value })) : []);
     }
     this.candles.setMarkers(markers.map(m => ({

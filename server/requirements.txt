@@ -2,3 +2,9 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pywebpush>=2.0.0
 tzdata>=2024.1
+# Machine learning (ml.py). The extra index gives the CPU-only build of torch,
+# which is far smaller than the default GPU one.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy>=1.26
+lightgbm>=4.3
+torch>=2.3

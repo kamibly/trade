@@ -27,6 +27,10 @@ services:
       MARKET_SCAN_TIMES: "09:45,12:30,15:45,20:00"
       # Optional backup for stocks Yahoo Finance can't serve
       TWELVE_DATA_KEY: ""
+      # When the machine-learning models retrain each week (local time)
+      TRAIN_AT: "Sun 03:00"
+    # Training briefly needs about 1 GB; this keeps it from starving jobspy-service.
+    mem_limit: 1500m
     volumes:
-      # Keeps devices, synced holdings and scan results across restarts
+      # Keeps devices, synced holdings, scan results and models across restarts
       - ./trade_folder/trade-data:/data

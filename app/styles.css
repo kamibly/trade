@@ -259,6 +259,7 @@ h3 { font-size: 15px; margin: 0 0 8px; }
 .key.k50 { background: #4c9aff; }
 .key.k200 { background: #c77dff; }
 .key.kfc { background: repeating-linear-gradient(90deg, #4c9aff 0 4px, transparent 4px 7px); }
+.key.kml { background: #ff9f43; }
 
 .meter { position: relative; height: 6px; margin: 8px 0; border-radius: 3px; background: var(--panel-2); overflow: hidden; }
 .meter::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--muted); }
