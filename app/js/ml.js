@@ -163,6 +163,35 @@ export function voteFor(p, m) {
 const pct = v => `${Math.round(v * 100)}%`;
 const describe = (p, m) => `${pct(p)} chance higher after fees in ${HORIZON} candles${Number.isFinite(m.center) ? ` (usually ${pct(m.center)})` : ''} · right ${pct(m.test.hit)} in its test`;
 
+// The ML line on the chart: for each model that passed its test, today's vote
+// is looked up in its outcome table (what followed similar votes in the test
+// period), and the models are combined by how many cases back each answer.
+// result: { ret, up, n, models } or null when no model can say.
+export function mlOutlook(S, i, baseVotes, models) {
+  if (!models || !(S.candles[i].time > models.cutoff)) return null;
+  const parts = [];
+  const add = (name, m, p) => {
+    if (!Array.isArray(m.outcomes)) return;
+    const v = voteFor(p, m);
+    const bin = m.outcomes.find((b, k) => v >= b.lo && (v < b.hi || (k === m.outcomes.length - 1 && v <= b.hi)));
+    if (bin && bin.n >= 30) parts.push({ name, p, vote: v, ...bin });
+  };
+  const { lgbm, lstm } = models;
+  if (usable(lgbm)) add('LightGBM', lgbm, lgbmProbability(lgbm, featureVector(S, i, baseVotes, lgbm.features)));
+  if (usable(lstm)) {
+    const seq = sequence(S, i);
+    if (seq) add('LSTM', lstm, lstmProbability(lstm, seq));
+  }
+  if (!parts.length) return null;
+  const n = parts.reduce((a, b) => a + b.n, 0);
+  return {
+    ret: parts.reduce((a, b) => a + b.ret * b.n, 0) / n,
+    up: parts.reduce((a, b) => a + b.up * b.n, 0) / n,
+    n,
+    models: parts,
+  };
+}
+
 // models: { cutoff, lgbm, lstm } for this timeframe. Only candles after the
 // cutoff get votes: earlier ones were used for training, so votes there would
 // flatter the backtest.

@@ -70,11 +70,13 @@
         <button type="button" data-ov="bands">Bollinger</button>
         <button type="button" data-ov="cloud">Ichimoku</button>
         <button type="button" data-ov="forecast">Forecast</button>
+        <button type="button" data-ov="ml">ML</button>
         <button type="button" data-ov="markers">Buy/sell marks</button>
       </div>
       <div id="chart" class="chart" role="img" aria-label="Price chart"></div>
       <p id="chart-status" class="muted small"></p>
-      <p class="muted small legend"><span class="key k20"></span>SMA 20 <span class="key k50"></span>SMA 50 <span class="key k200"></span>SMA 200 <span class="key kfc"></span>Forecast: median and 10–90% range of 500 simulated paths</p>
+      <p class="muted small legend"><span class="key k20"></span>SMA 20 <span class="key k50"></span>SMA 50 <span class="key k200"></span>SMA 200 <span class="key kfc"></span>Forecast: median and 10–90% range of 500 simulated paths <span class="key kml"></span>ML: average move after similar predictions</p>
+      <p id="ml-line" class="small" hidden></p>
       <div id="analysis"></div>
     </section>
 

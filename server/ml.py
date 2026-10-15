@@ -185,6 +185,28 @@ def hit_rate(probs, ret, cal: Optional[dict] = None) -> dict:
     return {"hit": round(hits / n, 4) if n else 0, "n": n, "rows": int(len(ret)), "upShare": round(up, 4)}
 
 
+# Vote ranges for the outcome table: strong down, down, neutral, up, strong up.
+BINS = [-1.0, -0.6, -0.2, 0.2, 0.6, 1.0]
+
+
+def outcomes(probs, ret, cal: dict) -> List[dict]:
+    """What actually happened in the test period after each range of votes.
+
+    The chart's ML line uses it: for today's vote it draws the average move
+    that followed similar votes, and the share of those that rose after fees.
+    """
+    import numpy as np
+    v, ret = votes_of(probs, cal), np.asarray(ret, dtype=np.float64)
+    out = []
+    for k, (lo, hi) in enumerate(zip(BINS, BINS[1:])):
+        inside = (v >= lo) & ((v < hi) if k < len(BINS) - 2 else (v <= hi))
+        r = ret[inside]
+        out.append({"lo": lo, "hi": hi, "n": int(len(r)),
+                    "ret": round(float(r.mean()), 5) if len(r) else 0,
+                    "up": round(float((r > 2 * FEE).mean()), 4) if len(r) else 0})
+    return out
+
+
 def usable(test: dict) -> bool:
     return test["hit"] > MIN_HIT and test["n"] >= MIN_N
 
@@ -340,12 +362,16 @@ def train_models(data: Data, features: List[str], tf: str, symbols: Optional[int
     _, valid = valid_split(train)
     booster, best, lgbm = train_lgbm(train, features)
     lgbm.update(calibrate(booster.predict(valid.x, num_iteration=best)))
-    lgbm["test"] = hit_rate(booster.predict(test.x, num_iteration=best), test.ret, lgbm)
+    p_test = booster.predict(test.x, num_iteration=best)
+    lgbm["test"] = hit_rate(p_test, test.ret, lgbm)
+    lgbm["outcomes"] = outcomes(p_test, test.ret, lgbm)
     del booster
 
     net, lstm = train_lstm(train)
     lstm.update(calibrate(lstm_probs(net, valid.seq)))
-    lstm["test"] = hit_rate(lstm_probs(net, test.seq), test.ret, lstm)
+    p_test = lstm_probs(net, test.seq)
+    lstm["test"] = hit_rate(p_test, test.ret, lstm)
+    lstm["outcomes"] = outcomes(p_test, test.ret, lstm)
 
     for m in (lgbm, lstm):
         m["test"]["usable"] = usable(m["test"])

@@ -7,7 +7,7 @@ import {
 import { PriceChart } from './chart.js';
 import * as F from './forecast.js';
 import {
-  analyze, signalAt, scoreVotes, crossings, actionFor, GROUPS, MIN_CANDLES,
+  analyze, signalAt, scoreVotes, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
 } from './signals.js';
 import { scanItem, alertFor } from './scanner.js';
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
@@ -16,7 +16,7 @@ import * as paper from './paper.js';
 import * as pf from './portfolio.js';
 import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
-import { usable as modelUsable, HORIZON as ML_HORIZON } from './ml.js';
+import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON } from './ml.js';
 
 export const APP_VERSION = '0.5.0 (stage 5)';
 const MARKET_REFRESH_MS = 10 * 60_000;
@@ -484,12 +484,33 @@ function chartOverlays(S, candles, scores) {
       overlays.fc90 = [start, ...mc.map((m, k) => ({ time: timeAt(n + k), value: m.p90 }))];
     }
   }
+  // ML: a straight line to where the price went on average after similar
+  // predictions in the models' test period, ML_HORIZON candles ahead.
+  const titles = {};
+  const outlook = mlOutlook(S, n - 1, baseVotesAt(S, n - 1), S.models);
+  if (o.ml && outlook) {
+    overlays.ml = [{ time: last.time, value: last.close }, { time: timeAt(n + ML_HORIZON - 1), value: last.close * (1 + outlook.ret) }];
+    titles.ml = `ML ${fmtPct(outlook.ret)}`;
+  }
   let markers = [];
   if (o.markers) {
     const hist = scores.map((v, i) => (i < n - 250 ? NaN : v));
     markers = crossings(hist, thresholds()).map(x => ({ time: candles[x.i].time, action: x.action }));
   }
-  return { overlays, markers };
+  return { overlays, markers, titles, outlook };
+}
+
+// The sentence under the chart that goes with the ML line.
+function mlLineText(outlook, models) {
+  if (!models) return '';
+  if (!outlook) {
+    const hasTable = ['lgbm', 'lstm'].some(k => models[k] && Array.isArray(models[k].outcomes));
+    return hasTable
+      ? 'ML line: no model passed its test for this timeframe, so there is no ML prediction.'
+      : 'ML line: retrain the models on your server to get the prediction line.';
+  }
+  const who = outlook.models.map(m => m.name).join(' and ');
+  return `ML: ${Math.round(outlook.up * 100)}% chance higher after fees in ${ML_HORIZON} candles, average move ${fmtPct(outlook.ret)}. That's what followed ${outlook.n} similar ${who} predictions in data the models never trained on.`;
 }
 
 function renderAnalysis() {
@@ -499,6 +520,7 @@ function renderAnalysis() {
   if (!state.chart) return;
   if (candles.length < MIN_CANDLES) {
     state.chart.setOverlays({}, []);
+    $('ml-line').hidden = true;
     panel.replaceChildren(candles.length
       ? el('p', { class: 'muted small', text: `Signals need at least ${MIN_CANDLES} candles; this chart has ${candles.length}.` })
       : '');
@@ -518,8 +540,11 @@ function renderAnalysis() {
   const { S, votes, bt } = state.analysis;
   const weights = bt ? bt.weights : undefined;
   const scores = votes.map(v => (v.length ? scoreVotes(v, weights) : NaN));
-  const { overlays, markers } = chartOverlays(S, candles, scores);
-  state.chart.setOverlays(overlays, markers);
+  const { overlays, markers, titles, outlook } = chartOverlays(S, candles, scores);
+  state.chart.setOverlays(overlays, markers, titles);
+  const mlText = state.settings.overlays.ml ? mlLineText(outlook, S.models) : '';
+  $('ml-line').textContent = mlText;
+  $('ml-line').hidden = !mlText;
   const sig = signalAt(S, candles.length - 1, { ...opts, weights });
   if (!sig) { panel.replaceChildren(); return; }
 

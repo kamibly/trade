@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyze, votesAt, baseVotesAt, signalAt, METHOD_IDS } from '../app/js/signals.js';
-import { featureNames, featureVector, sequence, label, lgbmProbability, lstmProbability, usable, mlVotes, voteFor, SEQ_LEN, HORIZON } from '../app/js/ml.js';
+import { featureNames, featureVector, sequence, label, lgbmProbability, lstmProbability, usable, mlVotes, mlOutlook, voteFor, SEQ_LEN, HORIZON } from '../app/js/ml.js';
 import { backtest } from '../app/js/backtest.js';
 import { scanItem } from '../app/js/scanner.js';
 
@@ -108,4 +108,19 @@ test('votes are measured from the model\'s usual prediction', () => {
   assert.ok(Math.abs(voteFor(0.46, m) - 0.5) < 1e-12);
   assert.equal(voteFor(0.40, m), -1);
   assert.equal(voteFor(0.45, m), 0);
+});
+
+test('the chart outlook uses what followed similar votes, weighted by cases', () => {
+  const candles = series(300, 0.002);
+  const S = analyze(candles);
+  const table = (ret, up) => [-1, -0.6, -0.2, 0.2, 0.6].map((lo, k) => ({ lo, hi: [-0.6, -0.2, 0.2, 0.6, 1][k], n: 100, ret: k === 4 ? ret : 0, up: k === 4 ? up : 0.4 }));
+  // A constant, very bullish tree model: vote +1, the "strong up" row.
+  const lgbm = { features: [], trees: [{ nodes: [], leaves: [3] }], center: 0.5, scale: 0.1, test: good, outcomes: table(0.02, 0.7) };
+  const out = mlOutlook(S, 299, baseVotesAt(S, 299), { cutoff: 0, lgbm });
+  assert.equal(out.ret, 0.02);
+  assert.equal(out.up, 0.7);
+  assert.deepEqual(out.models.map(m => m.name), ['LightGBM']);
+  assert.equal(mlOutlook(S, 299, [], { cutoff: 0, lgbm: { ...lgbm, test: { hit: 0.4, n: 999 } } }), null); // failed its test
+  assert.equal(mlOutlook(S, 299, [], { cutoff: 0, lgbm: { ...lgbm, outcomes: undefined } }), null); // older models
+  assert.equal(mlOutlook(S, 299, [], { cutoff: candles[299].time, lgbm }), null); // inside the training period
 });

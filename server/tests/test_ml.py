@@ -81,6 +81,9 @@ def test_hit_rate_counts_clear_calls_after_fees():
     near = ml.hit_rate([0.47, 0.43, 0.45], [0.01, -0.01, 0.05], cal)
     assert near["n"] == 2 and near["hit"] == 1
     assert ml.hit_rate([0.47, 0.43], [0.01, -0.01])["n"] == 0  # a fixed 50% midpoint sees no clear calls
+    table = ml.outcomes([0.47, 0.43, 0.45, 0.46], [0.01, -0.02, 0.05, 0.03], cal)
+    assert [b["n"] for b in table] == [1, 0, 1, 1, 1]
+    assert table[0]["ret"] == -0.02 and table[4]["up"] == 1 and sum(b["n"] for b in table) == 4
     assert ml.usable({"hit": 0.55, "n": 200}) and not ml.usable({"hit": 0.55, "n": 199}) and not ml.usable({"hit": 0.5, "n": 999})
 
 
@@ -94,6 +97,7 @@ def test_training_scores_the_test_period_and_js_predicts_the_same(dataset):
         t = models[name]["test"]
         assert t["rows"] == models["testRows"] and 0 <= t["hit"] <= 1 and "usable" in t
         assert 0 < models[name]["center"] < 1 and models[name]["scale"] > 0 and t["n"] > 0
+        assert sum(b["n"] for b in models[name]["outcomes"]) == t["rows"]
     assert models["lgbm"]["features"] == dataset["features"] and models["lgbm"]["trees"]
     # The trending series are learnable: the trees should beat a coin flip.
     assert models["lgbm"]["test"]["hit"] > 0.5

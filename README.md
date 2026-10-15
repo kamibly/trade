@@ -78,6 +78,12 @@ sample too. The phone downloads the models and runs them itself, so charts
 and the in-app scanner use them as well. The chart's "Machine-learning models"
 card shows each model's test result and whether it votes.
 
+The **ML** chip on the chart draws an orange line to where the price went on
+average, 10 candles later, after similar predictions in the models' test period,
+with the share of those cases that rose after fees. Next to the Forecast fan
+(which only extends the chart's own recent drift and volatility), it shows what
+the learned models expect.
+
 ## Backtest, holdings and paper trading
 
 - **Backtest.** Each chart splits its history: the older 60% measures how often
