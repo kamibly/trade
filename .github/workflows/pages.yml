@@ -29,7 +29,9 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: test
     runs-on: ubuntu-latest
+    # Job permissions replace the workflow's, so checkout needs contents: read here too.
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
