@@ -1,17 +1,18 @@
-// The server's signal engine. It reuses the app's own modules from app/js, so
+// The server's signal engine. It runs copies of the app's own modules (js/,
+// copied from app/js by `npm run sync-server`), so
 // a symbol scores exactly the same on the server as on the phone.
 //
 // The Python service runs it as:  node engine.mjs < job.json > result.json
 // job: { mode: 'watch' | 'market', ... }  (see runWatch and runMarket below)
 
-import { TIMEFRAMES } from '../app/js/candles.js';
+import { TIMEFRAMES } from './js/candles.js';
 import { readFile } from 'node:fs/promises';
-import { fetchCandles, yahooCandles, fetchCryptoTop } from '../app/js/data.js';
-import { analyze, signalAt, MIN_CANDLES } from '../app/js/signals.js';
-import { backtest } from '../app/js/backtest.js';
-import { summarize, alertFor, WEIGHTS_MAX_AGE_MS } from '../app/js/scanner.js';
-import { checkHolding } from '../app/js/portfolio.js';
-import { formatMoney } from '../app/js/format.js';
+import { fetchCandles, yahooCandles, fetchCryptoTop } from './js/data.js';
+import { analyze, signalAt, MIN_CANDLES } from './js/signals.js';
+import { backtest } from './js/backtest.js';
+import { summarize, alertFor, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
+import { checkHolding } from './js/portfolio.js';
+import { formatMoney } from './js/format.js';
 
 const SP500_CSV = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv';
 const fmtScore = v => `${v > 0 ? '+' : ''}${Math.round(v)}`;

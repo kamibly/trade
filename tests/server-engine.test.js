@@ -119,3 +119,13 @@ test('app sync helpers: direction, merge and profile', async () => {
   assert.equal(srv.cleanUrl('my.host:8898/'), 'https://my.host:8898');
   assert.equal(srv.cleanUrl(''), '');
 });
+
+test('server/js copies match app/js (run npm run sync-server if this fails)', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const { SHARED } = await import('../scripts/sync-server-js.mjs');
+  for (const name of SHARED) {
+    const app = await readFile(new URL(`../app/js/${name}.js`, import.meta.url), 'utf8');
+    const copy = await readFile(new URL(`../server/js/${name}.js`, import.meta.url), 'utf8');
+    assert.equal(copy, app, `server/js/${name}.js is out of date`);
+  }
+});

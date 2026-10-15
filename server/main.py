@@ -3,7 +3,7 @@ trade-service: background alerts, the market scanner and holdings sync for
 the Trade app (https://kamibly.github.io/Trade/).
 
 Run with:
-    uvicorn main:app --host 0.0.0.0 --port 8003
+    uvicorn main:app --host 0.0.0.0 --port 8004
 
 Required environment variables:
     TRADE_API_KEY   - shared secret the app sends as X-API-Key

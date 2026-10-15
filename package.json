@@ -5,6 +5,7 @@
   "description": "Stock and crypto signals app for the phone",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "serve": "python3 -m http.server 8080 --directory app"
+    "serve": "python3 -m http.server 8080 --directory app",
+    "sync-server": "node scripts/sync-server-js.mjs"
   }
 }

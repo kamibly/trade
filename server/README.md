@@ -9,21 +9,44 @@ The Trade app's helper on your OCI VM. It runs next to jobspy-service and:
   and shows the best buy and sell ideas in the app's Signals tab;
 - keeps your watchlist, holdings and alert settings in sync between phones.
 
-Scores come from the app's own JavaScript (`engine.mjs` runs `app/js` with
-Node), so the server and the phone always agree. Stock prices come from
-Yahoo Finance, which needs no key; a Twelve Data key is an optional backup.
+Scores come from the app's own JavaScript (`engine.mjs` runs copies of the
+app's modules in `js/` with Node), so the server and the phone always agree.
+The folder works on its own: it needs nothing else from the project.
+
+Stock prices come from Yahoo Finance, which needs no key; a Twelve Data key is
+an optional backup.
 Crypto comes from Coinbase, Kraken and CoinGecko, as in the app.
 
 Quiet hours (22:00 to 07:00, your time zone) hold back every alert except
 stop-loss hits.
 
-## 1. Get the code onto the VM
+## 1. Copy this folder to the VM
 
-In the folder that has your `docker-compose.yml` (the one with jobspy-service):
+Only this `server` folder goes to the VM, not the whole project. Put it next to
+your `docker-compose.yml` (the one with jobspy-service) and name it
+`trade_folder`:
+
+```
+docker-compose.yml
+jobspy-service/
+trade_folder/        <- this server folder
+  Dockerfile
+  main.py
+  service.py
+  engine.mjs
+  js/
+  ...
+```
+
+From your computer, for example:
 
 ```bash
-git clone https://github.com/kamibly/Trade.git trade-src
+git clone https://github.com/kamibly/Trade.git
+scp -r Trade/server ubuntu@your-vm:~/your-stack/trade_folder
 ```
+
+(Use your own user, host and stack folder.) You can leave out `tests/`; the
+service doesn't need it.
 
 ## 2. Add the service to your stack
 
@@ -39,7 +62,7 @@ Start it and check it answers:
 
 ```bash
 docker compose up -d --build trade-service
-curl http://localhost:8898/health
+curl http://localhost:8004/health
 ```
 
 ## 3. Create the notification keys
@@ -65,21 +88,21 @@ The same way as jobspy-service:
 
 1. OCI Console → Networking → Load Balancers → your load balancer.
 2. **Backend Sets** → create one (for example `trade-backend`) pointing at the
-   VM's private IP, port `8898` (the host port from the compose file). Health
-   check: HTTP, port `8898`, path `/health`, method GET, status `200`.
+   VM's private IP, port `8004`. Health check: HTTP, port `8004`, path
+   `/health`, method GET, status `200`.
    `/health` needs no key, so the load balancer can check it.
-3. **Listeners** → create one on a free port (for example `8898`), protocol
+3. **Listeners** → create one on port `8004`, protocol
    HTTPS, with the same SSL certificate as your other listeners, forwarding to
    `trade-backend`.
-4. **Security Lists / Network Security Groups** → allow ingress on that port.
+4. **Security Lists / Network Security Groups** → allow ingress on port `8004`.
 
-Then check from a browser: `https://your-name.duckdns.org:8898/health`.
+Then check from a browser: `https://your-name.duckdns.org:8004/health`.
 
 ## 5. Connect the app
 
 In the app: Settings → **Your server**.
 
-1. Enter the address (`https://your-name.duckdns.org:8898`) and your
+1. Enter the address (`https://your-name.duckdns.org:8004`) and your
    `TRADE_API_KEY`, then tap **Save and connect**. Your watchlist and holdings
    upload to the server.
 2. Tap **Turn on server alerts** and allow notifications.
@@ -104,14 +127,22 @@ in the app: 15m every 5 minutes, 1H and 1D every 15 minutes, 1W every hour.
 Checks only run while at least one phone has server alerts on.
 
 Everything the service remembers (phones, synced holdings, last signals, scan
-results) is in `./trade-data/trade.json` on the VM.
+results) is in `trade_folder/trade-data/trade.json` on the VM.
 
 ## Updating later
 
+Copy the new `server` folder over `trade_folder` (keep `trade_folder/trade-data`),
+then rebuild:
+
 ```bash
-cd trade-src && git pull && cd ..
 docker compose up -d --build trade-service
 ```
+
+## For development
+
+`js/` holds copies of the app's modules from `app/js`. After changing any of
+them, run `npm run sync-server` from the project root; the tests fail while a
+copy is out of date.
 
 ## Endpoints
 
