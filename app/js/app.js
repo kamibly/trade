@@ -18,7 +18,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON } from './ml.js';
 
-export const APP_VERSION = '0.6.0 (server monitoring)';
+export const APP_VERSION = '0.6.1 (server monitoring)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1136,7 +1136,8 @@ function renderPaper() {
   const sum = paper.summary(acc, prices);
   const events = onServer ? state.serverPaper.events || [] : [];
   const fmtTime = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  $('paper-body').replaceChildren(
+  // replaceChildren() writes a null child as the text "null", so drop the empty sections.
+  $('paper-body').replaceChildren(...[
     el('div', { class: 'card' },
       el('div', { class: 'muted small', text: `Paper account, started ${fmtTime(acc.createdAt)} with ${formatMoney(acc.start)}` }),
       el('p', { class: 'muted small', text: onServer
@@ -1173,7 +1174,7 @@ function renderPaper() {
           el('span', { class: changeClass(t.pnl), text: `${t.pnl >= 0 ? '+' : ''}${formatMoney(t.pnl)} (${fmtPct(t.ret)})` })),
         el('div', { class: 'sub', text: `${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }))))
       : el('p', { class: 'muted small', text: 'No closed paper trades yet.' }),
-  );
+  ].filter(Boolean));
 }
 
 async function resetPaper() {
