@@ -33,8 +33,8 @@ them to another phone.
 | --- | --- | --- |
 | 1 | Installable app, watchlist, live charts (15m, 1H, 1D, 1W), USD and CAD | Done |
 | 2 | Indicators, forecasts, combined score, signals, alerts while open | Done |
-| 3 | Backtest, portfolio, stop-loss and take-profit, paper trading | Next |
-| 4 | OCI alert service: notifications when the app is closed, scanner | Planned |
+| 3 | Backtest, portfolio, stop-loss and take-profit, paper trading | Done |
+| 4 | OCI alert service: notifications when the app is closed, scanner | Next |
 | 5 | Machine learning (LightGBM, LSTM) on the server | Planned |
 
 ## How signals work
@@ -57,6 +57,26 @@ Settings). On random-walk prices the score stays within ±30 99% of the time,
 while steady trends reach 35 to 50. Each signal suggests a stop-loss 2 × ATR
 and a target 3 × ATR from the entry. Volume methods drop out when a source
 has no volume (CoinGecko backup).
+
+## Backtest, holdings and paper trading
+
+- **Backtest.** Each chart splits its history: the older 60% measures how often
+  each method's clear votes (|vote| ≥ 0.3) matched the move over the next 10
+  candles, after 0.1% fees. A method right 50% of the time keeps weight 1, 60%
+  doubles it, 40% or worse drops it to 0, and methods with few votes stay near 1.
+  The newer 40% then trades the weighted score (long only, stop-loss, target or
+  Sell score to exit) and is compared with equal weights and buy-and-hold.
+  The scanner re-learns weights once a day per symbol.
+- **My holdings.** What you own, with a stop-loss and target (from the Risk
+  settings in ATRs if left empty). Alerts fire once when a stop or target is
+  reached or a Sell signal appears. Held symbols are priced and scanned even if
+  they are not on the watchlist.
+- **Paper trading.** A pretend account ($10,000 by default) that buys on each
+  new Buy signal, risking 1% of the account per trade with at most 20% in one
+  symbol, and sells on the stop-loss, target or a Sell signal.
+
+Holdings and the paper account live on the phone and are in the backup file.
+Syncing them to the OCI server comes with stage 4.
 
 ## Data sources
 

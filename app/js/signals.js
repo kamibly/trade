@@ -1,7 +1,7 @@
 // Turns every method into a vote between -1 (sell) and +1 (buy), then into one
 // score from -100 to +100. Votes are first averaged inside their group, then
 // the groups are averaged, so six trend indicators don't outvote one volume
-// signal. Stage 3 will weight methods by how well each backtests.
+// signal. Methods can be weighted by how well each backtests (backtest.js).
 
 import * as I from './indicators.js';
 import * as F from './forecast.js';
@@ -294,7 +294,7 @@ export function votesAt(S, i) {
   return METHODS.map(m => m(S, i)).filter(Boolean);
 }
 
-// `weights` (method id → weight) comes from the backtest in stage 3; default 1.
+// `weights` (method id → weight) comes from the backtest; default 1.
 export function scoreVotes(votes, weights = {}) {
   const groups = {};
   for (const v of votes) {

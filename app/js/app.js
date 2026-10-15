@@ -7,12 +7,16 @@ import {
 import { PriceChart } from './chart.js';
 import * as F from './forecast.js';
 import {
-  analyze, signalAt, scoreHistory, crossings, actionFor, GROUPS, MIN_CANDLES,
+  analyze, signalAt, scoreVotes, crossings, actionFor, GROUPS, MIN_CANDLES,
 } from './signals.js';
 import { scanItem, alertFor } from './scanner.js';
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
+import { voteMatrix, backtest } from './backtest.js';
+import * as paper from './paper.js';
+import * as pf from './portfolio.js';
+import { atr as atrSeries } from './indicators.js';
 
-export const APP_VERSION = '0.2.0 (stage 2)';
+export const APP_VERSION = '0.3.0 (stage 3)';
 const SCAN_EVERY_MS = 5 * 60_000;
 const FORECAST_STEPS = 20;
 
@@ -44,6 +48,12 @@ const state = {
   addType: 'stock',
   cryptoTop: store.getCryptoTop(),
   signals: store.getSignals(),
+  holdings: store.getHoldings(),
+  paper: store.getPaper(),
+  pfTab: 'holdings',
+  holdEditing: false,
+  holdType: 'stock',
+  analysis: null, // { id, S, votes, bt } for the chart on screen
   scan: { busy: false, done: 0, total: 0, at: 0, errors: {}, abort: null },
 };
 
@@ -75,11 +85,30 @@ const cadRate = () => (state.settings.showCad && state.fx ? state.fx.rate : NaN)
 const thresholds = () => ({ buy: state.settings.buyAt, sell: state.settings.sellAt });
 const scoreClass = score => (score >= state.settings.buyAt ? 'up' : score <= state.settings.sellAt ? 'down' : 'flat');
 const ACTION_WORDS = { buy: 'Buy', sell: 'Sell', hold: 'Hold' };
-const findItem = key => state.watchlist.find(i => store.itemKey(i) === key);
+// Everything that needs prices and signals: the watchlist plus held symbols.
+function trackedItems() {
+  const items = [...state.watchlist];
+  const have = new Set(items.map(store.itemKey));
+  for (const h of state.holdings) {
+    if (have.has(h.key)) continue;
+    have.add(h.key);
+    items.push({ type: h.type, symbol: h.symbol, name: h.name, ...(h.geckoId ? { geckoId: h.geckoId } : {}) });
+  }
+  return items;
+}
+const findItem = key => trackedItems().find(i => store.itemKey(i) === key);
+const riskOpts = () => ({ stopAtr: state.settings.stopAtr, takeAtr: state.settings.takeAtr });
+const fmtPct = v => (Number.isFinite(v) ? `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}%` : '–');
+const priceOf = key => {
+  const q = state.quotes[key];
+  if (q && Number.isFinite(q.price)) return q.price;
+  const s = state.signals[key];
+  return s ? s.entry : NaN;
+};
 
 // ---- Views ------------------------------------------------------------------
 
-const TITLES = { signals: 'Signals', watch: 'Watchlist', chart: 'Chart', settings: 'Settings' };
+const TITLES = { signals: 'Signals', watch: 'Watchlist', chart: 'Chart', portfolio: 'Portfolio', settings: 'Settings' };
 
 // Hashes: #signals, #watch, #settings, #chart, or #chart/<type>/<symbol> from a notification.
 function showView(route) {
@@ -96,6 +125,7 @@ function showView(route) {
   if (view === 'chart') openChart();
   if (view === 'settings') renderSettings();
   if (view === 'signals') renderSignals();
+  if (view === 'portfolio') renderPortfolio();
   window.scrollTo(0, 0);
 }
 
@@ -172,7 +202,7 @@ async function refreshQuotes({ force = false } = {}) {
   const withStocks = force || Date.now() - state.stocksAt >= STOCK_REFRESH_MS;
   if (withStocks) state.stocksAt = Date.now();
   try {
-    const fresh = await fetchQuotes(state.watchlist, state.settings, { withStocks });
+    const fresh = await fetchQuotes(trackedItems(), state.settings, { withStocks });
     // Keep the last good price when a refresh fails, but remember the error.
     for (const [k, q] of Object.entries(fresh)) {
       const old = state.quotes[k];
@@ -185,6 +215,8 @@ async function refreshQuotes({ force = false } = {}) {
     state.quotesBusy = false;
     renderWatchlist();
     if (state.view === 'chart') renderChartHead();
+    checkHoldings();
+    if (state.view === 'portfolio') renderPortfolio();
   }
 }
 
@@ -233,6 +265,18 @@ function openAddDialog() {
   loadCryptoTop().then(fillCryptoOptions).catch(() => {});
 }
 
+async function resolveItem(type, symbol) {
+  if (type === 'stock') {
+    if (!state.settings.twelveKey) throw new Error('Add your Twelve Data key in Settings first.');
+    const name = await checkStock(symbol, state.settings.twelveKey);
+    return { type: 'stock', symbol, name };
+  }
+  const top = await loadCryptoTop().catch(() => []);
+  const known = top.find(c => c.symbol === symbol);
+  // Coins outside the top list still work through Coinbase or Kraken.
+  return known ? { ...known } : { type: 'crypto', symbol, name: symbol };
+}
+
 async function submitAdd(e) {
   e.preventDefault();
   const symbol = $('add-input').value.trim().toUpperCase().replace(/\s+/g, '');
@@ -245,17 +289,7 @@ async function submitAdd(e) {
   ok.disabled = true;
   err.textContent = 'Checking…';
   try {
-    let item;
-    if (state.addType === 'stock') {
-      if (!state.settings.twelveKey) throw new Error('Add your Twelve Data key in Settings first.');
-      const name = await checkStock(symbol, state.settings.twelveKey);
-      item = { type: 'stock', symbol, name };
-    } else {
-      const top = await loadCryptoTop().catch(() => []);
-      const known = top.find(c => c.symbol === symbol);
-      // Coins outside the top list still work through Coinbase or Kraken.
-      item = known ? { ...known } : { type: 'crypto', symbol, name: symbol };
-    }
+    const item = await resolveItem(state.addType, symbol);
     if (addItem(item)) $('add-dialog').close();
     err.textContent = '';
   } catch (ex) {
@@ -383,7 +417,7 @@ async function loadChart() {
 }
 
 function pickChartSymbol() {
-  showList('Open chart', state.watchlist.map(item => el('li', {
+  showList('Open chart', trackedItems().map(item => el('li', {
     onclick: () => { $('list-dialog').close(); openChart(item); },
   }, el('div', { class: 'info' }, el('div', { class: 'sym', text: item.symbol }), el('div', { class: 'name', text: item.name || '' })))));
 }
@@ -404,7 +438,7 @@ function levelsLine(sig) {
   return `Entry ${formatMoney(sig.entry)} · Stop ${formatMoney(sig.stop)} · ${word} ${formatMoney(sig.take)}`;
 }
 
-function chartOverlays(S, candles) {
+function chartOverlays(S, candles, scores) {
   const o = state.settings.overlays;
   const n = candles.length;
   const step = TIMEFRAMES[state.chartTf].seconds;
@@ -432,7 +466,7 @@ function chartOverlays(S, candles) {
   }
   let markers = [];
   if (o.markers) {
-    const hist = scoreHistory(S, { from: Math.max(0, n - 250) });
+    const hist = scores.map((v, i) => (i < n - 250 ? NaN : v));
     markers = crossings(hist, thresholds()).map(x => ({ time: candles[x.i].time, action: x.action }));
   }
   return { overlays, markers };
@@ -450,10 +484,22 @@ function renderAnalysis() {
       : '');
     return;
   }
-  const S = analyze(candles);
-  const { overlays, markers } = chartOverlays(S, candles);
+  // The votes and backtest take a moment on a phone, so they are kept until the candles change.
+  const id = `${store.itemKey(state.chartItem)}:${state.chartTf}:${candles.length}:${candles.at(-1).time}:${candles.at(-1).close}`;
+  const opts = { thresholds: thresholds(), ...riskOpts() };
+  if (!state.analysis || state.analysis.id !== id || state.analysis.opts !== JSON.stringify(opts)) {
+    const S = analyze(candles);
+    const votes = voteMatrix(S);
+    const bt = backtest(S, { ...opts, votes });
+    if (bt) store.saveWeight(state.chartItem, state.chartTf, bt.weights);
+    state.analysis = { id, opts: JSON.stringify(opts), S, votes, bt };
+  }
+  const { S, votes, bt } = state.analysis;
+  const weights = bt ? bt.weights : undefined;
+  const scores = votes.map(v => (v.length ? scoreVotes(v, weights) : NaN));
+  const { overlays, markers } = chartOverlays(S, candles, scores);
   state.chart.setOverlays(overlays, markers);
-  const sig = signalAt(S, candles.length - 1, { thresholds: thresholds() });
+  const sig = signalAt(S, candles.length - 1, { ...opts, weights });
   if (!sig) { panel.replaceChildren(); return; }
 
   const byGroup = {};
@@ -468,14 +514,40 @@ function renderAnalysis() {
       scoreMeter(sig.score),
       el('p', { class: 'small', text: `${Math.round(sig.confidence * 100)}% of the methods with an opinion agree. Buy at ${fmtScore(state.settings.buyAt)} or more, sell at ${fmtScore(state.settings.sellAt)} or less.` }),
       el('p', { class: 'small', text: levelsLine(sig) }),
-      el('p', { class: 'muted small', text: 'Stop is 2 × ATR and target 3 × ATR from the entry. Not financial advice: these methods are often wrong.' })),
+      el('p', { class: 'muted small', text: `Stop is ${state.settings.stopAtr} × ATR and target ${state.settings.takeAtr} × ATR from the entry. ${bt ? 'Methods are weighted by how often they were right in the backtest below.' : 'Methods count equally until there is enough history to backtest.'} Not financial advice: these methods are often wrong.` })),
+    bt ? backtestCard(bt) : el('p', { class: 'muted small', text: 'The backtest needs about 180 candles; this chart has fewer.' }),
     ...Object.entries(GROUPS).filter(([g]) => byGroup[g]).map(([g, title]) => el('div', { class: 'card votes' },
       el('h3', { text: title }),
       el('ul', {}, ...byGroup[g].map(v => el('li', {},
         el('div', { class: 'vote-name' }, el('span', { text: v.name }), el('span', { class: `vote-num ${v.vote > 0 ? 'good' : v.vote < 0 ? 'bad' : 'muted'}`, text: v.vote === 0 ? '0' : `${v.vote > 0 ? '+' : ''}${v.vote.toFixed(2)}` })),
-        el('div', { class: 'muted small', text: v.note }),
+        el('div', { class: 'muted small', text: methodNote(v, bt) }),
         scoreMeter(v.vote * 100)))))),
   );
+}
+
+function methodNote(v, bt) {
+  const s = bt && bt.stats[v.id];
+  if (!s || !s.n) return v.note;
+  return `${v.note} · right ${Math.round(s.hit * 100)}% of ${s.n} times · weight ${bt.weights[v.id].toFixed(2)}`;
+}
+
+function backtestCard(bt) {
+  const fmtDate = t => new Date(t * 1000).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+  const line = (label, r) => el('div', { class: 'bt-row' },
+    el('span', { text: label }),
+    el('span', {
+      class: r.totalReturn > 0 ? 'good' : r.totalReturn < 0 ? 'bad' : '',
+      text: `${fmtPct(r.totalReturn)} · ${r.trades.length} trade${r.trades.length === 1 ? '' : 's'}${r.trades.length ? ` · ${Math.round(r.winRate * 100)}% won` : ''} · worst drop ${fmtPct(-r.maxDrawdown)}`,
+    }));
+  const w = bt.weighted;
+  return el('div', { class: 'card' },
+    el('h3', { text: 'Backtest' }),
+    el('p', { class: 'muted small', text: `Weights learned from ${fmtDate(bt.trainFrom)} to ${fmtDate(bt.testFrom)}, then tested on the ${bt.testCandles} newer candles they never saw. Long only, buying on a new Buy score and selling on the stop-loss, target or a Sell score, with 0.1% fees.` }),
+    line('Weighted methods', w),
+    line('All methods equal', bt.equal),
+    el('div', { class: 'bt-row' }, el('span', { text: 'Buy and hold' }), el('span', { class: w.buyHold > 0 ? 'good' : 'bad', text: fmtPct(w.buyHold) })),
+    w.open ? el('p', { class: 'small', text: `A test trade is still open from ${formatMoney(w.open.entry)}, counted at today's price.` }) : null,
+    el('p', { class: 'muted small', text: 'Past results do not predict future ones, and a short test can be luck.' }));
 }
 
 // ---- Signals tab and scanner -----------------------------------------------
@@ -520,7 +592,8 @@ function renderSignals() {
 
 function sendAlert(sig) {
   const word = ACTION_WORDS[sig.action];
-  const title = `${word} signal: ${sig.symbol}`;
+  const held = sig.action === 'sell' && state.holdings.some(h => h.key === sig.key);
+  const title = `${word} signal: ${sig.symbol}${held ? ' (you hold it)' : ''}`;
   const body = `Score ${fmtScore(sig.score)} on the ${TIMEFRAMES[sig.tf].label} chart. ${levelsLine(sig)}.${sig.top.length ? ` Led by ${sig.top.join(', ')}.` : ''}`;
   toast(title, { label: 'View', run: () => { $('toast').hidden = true; state.chartTf = sig.tf; openChart(findItem(sig.key), true); } });
   const quiet = state.settings.quietHours && inQuietHours(new Date());
@@ -532,13 +605,14 @@ async function runScan({ force = false } = {}) {
   if (!force && Date.now() - state.scan.at < SCAN_EVERY_MS) return;
   const tf = state.settings.alertTf;
   // Crypto first: it is free and fast, while stocks may wait for the Twelve Data limit.
-  const items = state.watchlist
+  const items = trackedItems()
     .filter(i => i.type === 'crypto' || state.settings.twelveKey)
     .sort((a, b) => (a.type === 'crypto' ? 0 : 1) - (b.type === 'crypto' ? 0 : 1));
   const abort = new AbortController();
   state.scan = { busy: true, done: 0, total: items.length, at: state.scan.at, errors: {}, abort };
   renderSignals();
-  const deps = { getCandles: store.getCandles, saveCandles: store.saveCandles, fetchCandles };
+  const deps = { getCandles: store.getCandles, saveCandles: store.saveCandles, fetchCandles, getWeight: store.weightFor, saveWeight: store.saveWeight };
+  const alerts = {};
   for (const item of items) {
     if (abort.signal.aborted) break;
     const key = store.itemKey(item);
@@ -549,7 +623,7 @@ async function runScan({ force = false } = {}) {
         state.signals[key] = r.result;
         // No alert the first time a symbol is scored, or after switching timeframe.
         const alert = prev && prev.tf === tf ? alertFor(prev.action, r.result.action) : null;
-        if (alert) sendAlert(r.result);
+        if (alert) { alerts[key] = alert; sendAlert(r.result); }
       } else {
         state.scan.errors[key] = r.error;
       }
@@ -562,8 +636,13 @@ async function runScan({ force = false } = {}) {
   }
   store.saveSignals(state.signals);
   state.scan.busy = false;
-  if (!abort.signal.aborted) state.scan.at = Date.now();
+  if (!abort.signal.aborted) {
+    state.scan.at = Date.now();
+    stepPaper(tf, alerts);
+  }
+  checkHoldings(new Set(Object.keys(alerts)));
   renderSignals();
+  if (state.view === 'portfolio') renderPortfolio();
 }
 
 // New buy/sell levels change each symbol's action without a new scan (and without alerts).
@@ -572,6 +651,216 @@ function rescoreSignals() {
   store.saveSignals(state.signals);
   renderSignals();
   if (state.view === 'chart') renderAnalysis();
+}
+
+// ---- Portfolio: holdings ------------------------------------------------------
+
+function saveHoldings() {
+  store.saveHoldings(state.holdings);
+}
+
+// Stop-loss, target and sell alerts for real holdings. `skipSell` holds keys
+// that already got a Sell signal alert this scan.
+function checkHoldings(skipSell = new Set()) {
+  let changed = false;
+  for (const h of state.holdings) {
+    const price = priceOf(h.key);
+    const sig = state.signals[h.key];
+    const action = sig && sig.tf === state.settings.alertTf ? sig.action : null;
+    const { alerts, alerted } = pf.checkHolding(h, price, action);
+    if (JSON.stringify(alerted) !== JSON.stringify(h.alerted || {})) { h.alerted = alerted; changed = true; }
+    for (const a of alerts) {
+      if (a === 'sell' && skipSell.has(h.key)) continue;
+      const title = a === 'stop' ? `Stop-loss hit: ${h.symbol}` : a === 'target' ? `Target reached: ${h.symbol}` : `Sell signal on your ${h.symbol}`;
+      const body = a === 'stop' ? `${formatMoney(price)} is at or below your stop of ${formatMoney(h.stop)}. Consider selling.`
+        : a === 'target' ? `${formatMoney(price)} is at or above your target of ${formatMoney(h.take)}. Consider taking profit.`
+          : `Score ${fmtScore(sig.score)} on the ${TIMEFRAMES[sig.tf].label} chart. You hold ${h.qty}.`;
+      toast(title, { label: 'View', run: () => { $('toast').hidden = true; go('portfolio'); } });
+      const quiet = state.settings.quietHours && inQuietHours(new Date());
+      if (state.settings.notifications && !quiet) notify(title, body, 'portfolio');
+    }
+  }
+  if (changed) saveHoldings();
+}
+
+function renderPortfolio() {
+  for (const b of document.querySelectorAll('#pf-seg button')) b.classList.toggle('on', b.dataset.pf === state.pfTab);
+  $('pf-holdings').hidden = state.pfTab !== 'holdings';
+  $('pf-paper').hidden = state.pfTab !== 'paper';
+  if (state.pfTab === 'holdings') renderHoldings();
+  else renderPaper();
+}
+
+const stat = (label, value, cls = '') => el('div', {}, el('dt', { text: label }), el('dd', { class: cls, text: value }));
+const upDown = v => (v > 0 ? 'good' : v < 0 ? 'bad' : '');
+
+function renderHoldings() {
+  const prices = Object.fromEntries(state.holdings.map(h => [h.key, priceOf(h.key)]));
+  const t = pf.totals(state.holdings, prices);
+  const rate = cadRate();
+  $('holdings-total').replaceChildren(state.holdings.length ? el('div', { class: 'card' },
+    el('div', { class: 'muted small', text: 'Total value' }),
+    el('div', { class: 'big', text: formatMoney(t.value) }),
+    Number.isFinite(rate) ? el('div', { class: 'muted small', text: formatMoney(toCad(t.value, rate), 'CAD') }) : null,
+    el('dl', { class: 'stats' },
+      stat('Paid', formatMoney(t.cost)),
+      stat('Profit or loss', `${formatMoney(t.pnl)} (${fmtPct(t.pct)})`, upDown(t.pnl)),
+      Number.isFinite(rate) ? stat('Profit or loss, CAD', formatMoney(toCad(t.pnl, rate), 'CAD'), upDown(t.pnl)) : null)) : '');
+  $('hold-edit').hidden = !state.holdings.length;
+  $('hold-edit').textContent = state.holdEditing ? 'Done' : 'Edit';
+  const list = $('holdings-list');
+  list.replaceChildren(...state.holdings.map(h => {
+    const price = prices[h.key];
+    const v = pf.value(h, price);
+    const sig = state.signals[h.key];
+    const lvl = pf.levelState(h, price);
+    return el('li', { class: 'holding', onclick: () => { const item = findItem(h.key); if (item) openChart(item, true); } },
+      el('div', { class: 'signal-top' },
+        el('div', { class: 'sym' }, h.symbol, el('span', { class: 'badge', text: h.type === 'stock' ? 'Stock' : 'Crypto' }),
+          sig ? el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] }) : null),
+        state.holdEditing
+          ? el('button', { type: 'button', class: 'remove ghost', text: 'Remove', onclick: e => { e.stopPropagation(); removeHolding(h); } })
+          : el('div', { class: 'quote' },
+            el('div', { class: 'price', text: formatMoney(v.value) }),
+            el('span', { class: changeClass(v.pct), text: fmtPct(v.pct) }))),
+      el('div', { class: 'sub', text: `${h.qty} at ${formatMoney(h.buyPrice)} · now ${formatMoney(price)} · ${v.pnl >= 0 ? '+' : ''}${formatMoney(v.pnl)}` }),
+      el('div', { class: 'sub' },
+        `Stop ${h.stop != null ? formatMoney(h.stop) : 'not set'} · Target ${h.take != null ? formatMoney(h.take) : 'not set'} `,
+        lvl === 'stop' ? el('span', { class: 'level stop', text: 'Stop hit' }) : lvl === 'target' ? el('span', { class: 'level target', text: 'Target reached' }) : null));
+  }));
+  if (!state.holdings.length) list.append(el('p', { class: 'muted center', text: 'Add what you own to get stop-loss, target and sell alerts.' }));
+}
+
+function removeHolding(h) {
+  state.holdings = state.holdings.filter(x => x.id !== h.id);
+  saveHoldings();
+  renderHoldings();
+}
+
+function setHoldType(type) {
+  state.holdType = type;
+  for (const b of document.querySelectorAll('#hold-form [data-htype]')) b.classList.toggle('on', b.dataset.htype === type);
+  $('hold-error').textContent = '';
+}
+
+function openHoldDialog() {
+  setHoldType(state.holdType);
+  for (const id of ['hold-symbol', 'hold-qty', 'hold-price', 'hold-stop', 'hold-take']) $(id).value = '';
+  $('hold-dialog').showModal();
+  $('hold-symbol').focus();
+}
+
+// The latest ATR for a symbol, from saved candles or the last scan.
+function latestAtr(item) {
+  const saved = store.getCandles(item, state.settings.alertTf);
+  if (saved && saved.candles.length > 20) {
+    const a = atrSeries(saved.candles).at(-1);
+    if (Number.isFinite(a)) return a;
+  }
+  const sig = state.signals[store.itemKey(item)];
+  return sig && Number.isFinite(sig.atr) ? sig.atr : NaN;
+}
+
+async function submitHolding(e) {
+  e.preventDefault();
+  const symbol = $('hold-symbol').value.trim().toUpperCase().replace(/\s+/g, '');
+  const err = $('hold-error');
+  if (!/^[A-Z0-9.\-]{1,12}$/.test(symbol)) { err.textContent = 'Enter a ticker such as AAPL or BTC.'; return; }
+  $('hold-ok').disabled = true;
+  err.textContent = 'Checking…';
+  try {
+    const key = `${state.holdType}:${symbol}`;
+    const item = findItem(key) || await resolveItem(state.holdType, symbol);
+    const h = pf.makeHolding({
+      ...item,
+      qty: $('hold-qty').value,
+      buyPrice: $('hold-price').value,
+      stop: $('hold-stop').value,
+      take: $('hold-take').value,
+      atr: latestAtr(item),
+      ...riskOpts(),
+    });
+    if (item.geckoId) h.geckoId = item.geckoId;
+    state.holdings.push(h);
+    saveHoldings();
+    $('hold-dialog').close();
+    err.textContent = '';
+    renderHoldings();
+    toast(h.stop == null ? `Added ${symbol}. No price history yet, so set a stop-loss to get stop alerts.` : `Added ${symbol}`);
+    checkHoldings();
+    refreshQuotes({ force: true });
+  } catch (ex) {
+    err.textContent = ex.message;
+  } finally {
+    $('hold-ok').disabled = false;
+  }
+}
+
+// ---- Portfolio: paper trading -------------------------------------------------
+
+function paperAccount() {
+  if (!state.paper) {
+    state.paper = paper.newAccount(state.settings.paperStart);
+    store.savePaper(state.paper);
+  }
+  return state.paper;
+}
+
+function stepPaper(tf, alerts) {
+  const signals = Object.fromEntries(Object.entries(state.signals).filter(([, s]) => s.tf === tf));
+  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct });
+  store.savePaper(state.paper);
+  for (const ev of events) {
+    toast(ev.kind === 'open'
+      ? `Paper trade: bought ${ev.symbol} for ${formatMoney(ev.cost)}`
+      : `Paper trade: sold ${ev.symbol} (${ev.reason}), ${ev.pnl >= 0 ? '+' : ''}${formatMoney(ev.pnl)}`);
+  }
+}
+
+function renderPaper() {
+  const acc = paperAccount();
+  const prices = Object.fromEntries(acc.positions.map(p => [p.key, priceOf(p.key)]));
+  const sum = paper.summary(acc, prices);
+  const fmtTime = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  $('paper-body').replaceChildren(
+    el('div', { class: 'card' },
+      el('div', { class: 'muted small', text: `Paper account, started ${fmtTime(acc.createdAt)} with ${formatMoney(acc.start)}` }),
+      el('div', { class: 'big', text: formatMoney(sum.equity) }),
+      el('dl', { class: 'stats' },
+        stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
+        stat('Cash', formatMoney(acc.cash)),
+        stat('Closed trades', String(sum.trades)),
+        stat('Won', sum.trades ? `${Math.round(sum.winRate * 100)}%` : '–'),
+        stat('Worst drop', fmtPct(-sum.maxDrawdown)))),
+    el('h2', { class: 'section', text: `Open (${acc.positions.length})` }),
+    acc.positions.length
+      ? el('ul', { class: 'list' }, ...acc.positions.map(p => {
+        const price = prices[p.key];
+        const pnl = Number.isFinite(price) ? p.qty * price - p.cost : NaN;
+        return el('li', { class: 'holding', onclick: () => { const item = findItem(p.key); if (item) openChart(item, true); } },
+          el('div', { class: 'signal-top' },
+            el('div', { class: 'sym', text: p.symbol }),
+            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? `${pnl >= 0 ? '+' : ''}${formatMoney(pnl)}` : '–' })),
+          el('div', { class: 'sub', text: `${Number(p.qty.toPrecision(6))} at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
+          el('div', { class: 'sub', text: `Stop ${formatMoney(p.stop)} · Target ${formatMoney(p.take)} · since ${fmtTime(p.openedAt)}` }));
+      }))
+      : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
+    el('h2', { class: 'section', text: `Closed (${acc.trades.length})` }),
+    acc.trades.length
+      ? el('ul', { class: 'list compact' }, ...acc.trades.slice(-30).reverse().map(t => el('li', { class: 'holding' },
+        el('div', { class: 'signal-top' },
+          el('div', { class: 'sym', text: t.symbol }),
+          el('span', { class: changeClass(t.pnl), text: `${t.pnl >= 0 ? '+' : ''}${formatMoney(t.pnl)} (${fmtPct(t.ret)})` })),
+        el('div', { class: 'sub', text: `${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }))))
+      : el('p', { class: 'muted small', text: 'No closed paper trades yet.' }),
+  );
+}
+
+function resetPaper() {
+  if (!confirm(`Start the paper account over with ${formatMoney(state.settings.paperStart)}? Its trades will be deleted.`)) return;
+  state.paper = paper.newAccount(state.settings.paperStart);
+  store.savePaper(state.paper);
+  renderPaper();
 }
 
 // ---- Settings ---------------------------------------------------------------
@@ -588,7 +877,24 @@ function renderSettings() {
   $('buy-at').value = state.settings.buyAt;
   $('sell-at').value = -state.settings.sellAt;
   $('quiet-toggle').checked = state.settings.quietHours;
+  $('stop-atr').value = state.settings.stopAtr;
+  $('take-atr').value = state.settings.takeAtr;
+  $('risk-pct').value = state.settings.riskPct;
+  $('paper-start').value = state.settings.paperStart;
   renderNotifyStatus();
+}
+
+function saveRisk() {
+  const v = id => Number($(id).value);
+  const next = { stopAtr: v('stop-atr'), takeAtr: v('take-atr'), riskPct: v('risk-pct'), paperStart: Math.round(v('paper-start')) };
+  const inRange = (x, lo, hi) => Number.isFinite(x) && x >= lo && x <= hi;
+  if (!inRange(next.stopAtr, 0.5, 10) || !inRange(next.takeAtr, 0.5, 20) || !inRange(next.riskPct, 0.1, 5) || !inRange(next.paperStart, 100, 10_000_000)) {
+    $('risk-status').textContent = 'Stop-loss 0.5 to 10, target 0.5 to 20, risk 0.1 to 5%, account 100 to 10,000,000.';
+    renderSettings();
+    return;
+  }
+  state.settings = store.saveSettings(next);
+  $('risk-status').textContent = 'Saved. New signals and holdings use these levels.';
 }
 
 function renderNotifyStatus() {
@@ -669,7 +975,9 @@ async function loadBackup(file) {
     renderSettings();
     renderWatchlist();
     refreshQuotes({ force: true });
-    status.textContent = `Restored ${count} symbols and your settings.`;
+    state.holdings = store.getHoldings();
+    state.paper = store.getPaper();
+    status.textContent = `Restored ${count} symbols, ${state.holdings.length} holdings and your settings.`;
   } catch (e) {
     status.textContent = e instanceof SyntaxError ? 'That file is not a backup.' : e.message;
   }
@@ -712,6 +1020,14 @@ function bind() {
     });
   }
   $('scan-btn').addEventListener('click', () => runScan({ force: true }));
+  for (const b of document.querySelectorAll('#pf-seg button')) b.addEventListener('click', () => { state.pfTab = b.dataset.pf; renderPortfolio(); });
+  $('hold-add').addEventListener('click', openHoldDialog);
+  $('hold-edit').addEventListener('click', () => { state.holdEditing = !state.holdEditing; renderHoldings(); });
+  for (const b of document.querySelectorAll('#hold-form [data-htype]')) b.addEventListener('click', () => setHoldType(b.dataset.htype));
+  $('hold-form').addEventListener('submit', submitHolding);
+  $('hold-cancel').addEventListener('click', () => $('hold-dialog').close());
+  $('paper-reset').addEventListener('click', resetPaper);
+  for (const id of ['stop-atr', 'take-atr', 'risk-pct', 'paper-start']) $(id).addEventListener('change', saveRisk);
   $('alert-tf').addEventListener('change', e => {
     state.settings = store.saveSettings({ alertTf: e.target.value });
     if (state.scan.abort) state.scan.abort.abort();

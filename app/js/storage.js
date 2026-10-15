@@ -30,6 +30,10 @@ export const DEFAULT_SETTINGS = {
   sellAt: -40,
   notifications: false,
   quietHours: true,
+  riskPct: 1,
+  paperStart: 10000,
+  stopAtr: 2,
+  takeAtr: 3,
   overlays: { ma: true, bands: false, cloud: false, forecast: true, markers: true },
 };
 
@@ -76,6 +80,24 @@ export const saveQuotes = quotes => write('quotes', quotes);
 // Latest signal per symbol on the alert timeframe: { "<type>:<symbol>": summary }.
 export const getSignals = () => read('signals', {});
 export const saveSignals = signals => write('signals', signals);
+
+// Method weights from the backtest per symbol and timeframe: { "<key>:<tf>": { at, weights } }.
+export const getWeights = () => read('weights', {});
+export function saveWeight(item, tf, weights) {
+  const all = getWeights();
+  all[`${itemKey(item)}:${tf}`] = { at: Date.now(), weights };
+  write('weights', all);
+}
+export const weightFor = (item, tf) => getWeights()[`${itemKey(item)}:${tf}`] || null;
+
+// Real holdings (alerts only) and the paper-trading account.
+export const getHoldings = () => {
+  const h = read('holdings', []);
+  return Array.isArray(h) ? h : [];
+};
+export const saveHoldings = list => write('holdings', list);
+export const getPaper = () => read('paper', null);
+export const savePaper = acc => write('paper', acc);
 
 export const getFx = () => read('fx', null);
 export const saveFx = fx => write('fx', fx);
@@ -128,9 +150,13 @@ export function clearCachedPrices() {
   write('quotes', {});
 }
 
-// Backup: watchlist and settings (including the data key) as one JSON file.
+// Backup: watchlist, settings (including the data key), holdings and the
+// paper account as one JSON file.
 export function exportBackup() {
-  return { app: 'trade', version: 1, exportedAt: new Date().toISOString(), watchlist: getWatchlist(), settings: getSettings() };
+  return {
+    app: 'trade', version: 2, exportedAt: new Date().toISOString(),
+    watchlist: getWatchlist(), settings: getSettings(), holdings: getHoldings(), paper: getPaper(),
+  };
 }
 
 export function importBackup(data) {
@@ -140,5 +166,7 @@ export function importBackup(data) {
   const settings = Object.fromEntries(Object.keys(DEFAULT_SETTINGS).map(k => [k, k in given ? given[k] : DEFAULT_SETTINGS[k]]));
   saveWatchlist(list);
   saveSettings(settings);
+  if (Array.isArray(data.holdings)) saveHoldings(data.holdings.filter(h => h && typeof h.key === 'string' && h.qty > 0 && h.buyPrice > 0));
+  if (data.paper && Array.isArray(data.paper.positions) && Number.isFinite(data.paper.cash)) savePaper(data.paper);
   return list.length;
 }
