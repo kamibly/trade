@@ -15,8 +15,11 @@ import { voteMatrix, backtest } from './backtest.js';
 import * as paper from './paper.js';
 import * as pf from './portfolio.js';
 import { atr as atrSeries } from './indicators.js';
+import * as srv from './server.js';
 
-export const APP_VERSION = '0.3.0 (stage 3)';
+export const APP_VERSION = '0.4.0 (stage 4)';
+const MARKET_REFRESH_MS = 10 * 60_000;
+const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
 const FORECAST_STEPS = 20;
 
@@ -54,6 +57,10 @@ const state = {
   holdEditing: false,
   holdType: 'stock',
   analysis: null, // { id, S, votes, bt } for the chart on screen
+  market: store.getMarket(), // { at, fetchedAt, buys, sells, ... } from the server's scan
+  syncMeta: store.getSyncMeta(),
+  syncTimer: null,
+  serverStatus: null,
   scan: { busy: false, done: 0, total: 0, at: 0, errors: {}, abort: null },
 };
 
@@ -96,7 +103,16 @@ function trackedItems() {
   }
   return items;
 }
-const findItem = key => trackedItems().find(i => store.itemKey(i) === key);
+function findItem(key) {
+  const own = trackedItems().find(i => store.itemKey(i) === key);
+  if (own) return own;
+  // Symbols from the server's market scan open as charts too.
+  const m = state.market && [...(state.market.buys || []), ...(state.market.sells || [])].find(x => x.key === key);
+  return m ? { type: m.type, symbol: m.symbol, name: m.name } : undefined;
+}
+const serverOn = () => !!(state.settings.serverUrl && state.settings.serverKey);
+// With server alerts on, the server notifies; the open app only shows a toast.
+const phoneNotifies = () => state.settings.notifications && !state.settings.serverPush;
 const riskOpts = () => ({ stopAtr: state.settings.stopAtr, takeAtr: state.settings.takeAtr });
 const fmtPct = v => (Number.isFinite(v) ? `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}%` : '–');
 const priceOf = key => {
@@ -179,6 +195,7 @@ function renderWatchNotice() {
 function removeItem(item) {
   state.watchlist = state.watchlist.filter(i => store.itemKey(i) !== store.itemKey(item));
   store.saveWatchlist(state.watchlist);
+  markChanged();
   if (state.chartItem && store.itemKey(state.chartItem) === store.itemKey(item)) state.chartItem = null;
   renderWatchlist();
 }
@@ -190,6 +207,7 @@ function addItem(item) {
   }
   state.watchlist.push(item);
   store.saveWatchlist(state.watchlist);
+  markChanged();
   renderWatchlist();
   refreshQuotes({ force: true });
   toast(`Added ${item.symbol}`);
@@ -588,6 +606,193 @@ function renderSignals() {
     ...section('Watching', holds, 'Nothing else scanned yet.'),
     errors.length ? el('p', { class: 'muted small', text: `Could not score: ${errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ')}` }) : '',
   );
+  renderMarket();
+}
+
+function renderMarket() {
+  const m = state.market;
+  const body = $('market-body');
+  if (!serverOn()) {
+    body.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server in Settings to see buy and sell ideas from the whole S&P 500 and the top 50 crypto.' }));
+    return;
+  }
+  if (!m || !m.at) {
+    body.replaceChildren(el('h2', { class: 'section', text: 'Market scan' }),
+      el('p', { class: 'muted small', text: m && m.error ? `The last market scan failed: ${m.error}` : 'Your server has not finished a market scan yet. It runs at the scan times shown in Settings.' }));
+    return;
+  }
+  const fresh = new Set([...(m.newBuys || []), ...(m.newSells || [])]);
+  const card = sig => {
+    const li = signalCard(sig);
+    if (fresh.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge', text: 'New' }));
+    return li;
+  };
+  const list = (title, rows, empty) => [
+    el('h3', { class: 'market-title', text: `${title} (${rows.length})` }),
+    rows.length ? el('ul', { class: 'list' }, ...rows.slice(0, 10).map(card)) : el('p', { class: 'muted small', text: empty }),
+  ];
+  body.replaceChildren(
+    el('h2', { class: 'section', text: 'Market scan' }),
+    el('p', { class: 'muted small', text: `${m.scanned} of ${m.total} symbols from the S&P 500 and top 50 crypto on the daily chart, scanned ${timeAgo(m.at)} by your server.` }),
+    ...list('Buy ideas', m.buys || [], 'No buy ideas in the last scan.'),
+    ...list('Sell ideas', m.sells || [], 'No sell ideas in the last scan.'),
+  );
+}
+
+// ---- Your server ---------------------------------------------------------------
+
+function markChanged() {
+  state.syncMeta = { ...state.syncMeta, changedAt: Date.now() };
+  store.saveSyncMeta(state.syncMeta);
+  if (!serverOn()) return;
+  clearTimeout(state.syncTimer);
+  state.syncTimer = setTimeout(() => syncNow(), SYNC_DELAY_MS);
+}
+
+// The newer side wins: this phone's edits go up, or another phone's come down.
+async function syncNow() {
+  if (!serverOn() || !navigator.onLine) return;
+  try {
+    const { profile } = await srv.serverFetch(state.settings, '/sync');
+    const dir = srv.syncDirection(state.syncMeta.changedAt, profile);
+    if (dir === 'pull') {
+      state.watchlist = profile.watchlist;
+      store.saveWatchlist(state.watchlist);
+      state.holdings = srv.mergeHoldings(state.holdings, profile.holdings);
+      saveHoldings();
+      state.settings = store.saveSettings(Object.fromEntries(srv.SYNCED_SETTINGS.map(k => [k, profile.settings[k]])));
+      renderWatchlist();
+      if (state.view === 'portfolio') renderPortfolio();
+      if (state.view === 'signals') renderSignals();
+    } else if (dir === 'push') {
+      await srv.serverFetch(state.settings, '/sync', {
+        method: 'PUT',
+        body: srv.buildProfile({ watchlist: state.watchlist, holdings: state.holdings, settings: state.settings, changedAt: state.syncMeta.changedAt || Date.now() }),
+      });
+    }
+    state.syncMeta = { changedAt: dir === 'pull' ? profile.updatedAt : state.syncMeta.changedAt || Date.now(), syncedAt: Date.now() };
+    store.saveSyncMeta(state.syncMeta);
+  } catch (e) {
+    console.warn('Sync failed', e);
+  }
+}
+
+async function refreshMarket({ force = false } = {}) {
+  if (!serverOn() || !navigator.onLine) return;
+  if (!force && state.market && Date.now() - (state.market.fetchedAt || 0) < MARKET_REFRESH_MS) return;
+  try {
+    const { market } = await srv.serverFetch(state.settings, '/signals');
+    state.market = market ? { ...market, fetchedAt: Date.now() } : { fetchedAt: Date.now() };
+    store.saveMarket(state.market);
+    if (state.view === 'signals') renderMarket();
+  } catch (e) {
+    console.warn('Market scan fetch failed', e);
+  }
+}
+
+async function loadServerStatus() {
+  try {
+    state.serverStatus = await srv.serverFetch(state.settings, '/status');
+  } catch (e) {
+    state.serverStatus = { error: e.message };
+  }
+  renderServer();
+}
+
+function renderServer() {
+  const st = state.serverStatus;
+  $('server-push').textContent = state.settings.serverPush ? 'Turn off server alerts' : 'Turn on server alerts';
+  $('server-push').disabled = !serverOn();
+  $('server-test').hidden = !state.settings.serverPush;
+  const info = $('server-info');
+  if (!serverOn()) { info.textContent = 'Not connected.'; return; }
+  if (!st) { info.textContent = 'Checking your server…'; return; }
+  if (st.error) { info.textContent = st.error; return; }
+  const w = st.watch || {};
+  const errs = Object.keys(w.errors || {}).length;
+  info.textContent = [
+    `Connected (version ${st.version}).`,
+    st.pushEnabled ? `${st.devices} phone${st.devices === 1 ? '' : 's'} get alerts.` : 'Notification keys are not set on the server yet.',
+    w.lastRunAt ? `Watchlist and holdings checked ${timeAgo(w.lastRunAt)}, every ${st.watchEveryMinutes} minutes${errs ? `, ${errs} symbol${errs === 1 ? '' : 's'} failed` : ''}.` : 'Watchlist checks start once a phone turns on server alerts.',
+    st.market.lastRunAt ? `Market scan ${timeAgo(st.market.lastRunAt)}.` : '',
+    st.market.nextAt ? `Next market scan ${new Date(st.market.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '',
+  ].filter(Boolean).join(' ');
+}
+
+async function saveServer() {
+  const status = $('server-status');
+  let url;
+  try {
+    url = srv.cleanUrl($('server-url').value);
+  } catch (e) {
+    status.textContent = e.message;
+    status.className = 'small bad';
+    return;
+  }
+  const key = $('server-key').value.trim();
+  const changed = url !== state.settings.serverUrl || key !== state.settings.serverKey;
+  state.settings = store.saveSettings({ serverUrl: url, serverKey: key, ...(changed ? { serverPush: false } : {}) });
+  $('server-url').value = url;
+  if (!url || !key) {
+    status.textContent = url || key ? 'Add both the address and the key.' : 'Server disconnected.';
+    status.className = 'small';
+    state.serverStatus = null;
+    renderServer();
+    return;
+  }
+  status.textContent = 'Connecting…';
+  status.className = 'small';
+  await loadServerStatus();
+  if (state.serverStatus.error) {
+    status.textContent = `Saved, but ${state.serverStatus.error[0].toLowerCase()}${state.serverStatus.error.slice(1)}`;
+    status.className = 'small bad';
+    return;
+  }
+  status.textContent = 'Connected. Your watchlist and holdings now sync with the server.';
+  status.className = 'small good';
+  await syncNow();
+  refreshMarket({ force: true });
+}
+
+async function toggleServerPush() {
+  const status = $('server-status');
+  status.className = 'small';
+  try {
+    if (state.settings.serverPush) {
+      await srv.unsubscribePush(state.settings);
+      state.settings = store.saveSettings({ serverPush: false });
+      status.textContent = 'Server alerts are off on this phone.';
+    } else {
+      if (!state.serverStatus || state.serverStatus.error) await loadServerStatus();
+      const st = state.serverStatus;
+      if (st.error) throw new Error(st.error);
+      if (!st.pushEnabled || !st.publicKey) throw new Error('Notification keys are not set on the server yet. See the server README, step 3.');
+      if ((await askPermission()) !== 'granted') throw new Error('Allow notifications for this app in Chrome first.');
+      status.textContent = 'Turning on…';
+      await syncNow();
+      await srv.subscribePush(state.settings, st.publicKey);
+      state.settings = store.saveSettings({ serverPush: true, notifications: true });
+      status.textContent = 'Server alerts are on. Tap Send a test alert to check.';
+      status.className = 'small good';
+    }
+  } catch (e) {
+    status.textContent = e.message;
+    status.className = 'small bad';
+  }
+  renderNotifyStatus();
+  loadServerStatus();
+}
+
+async function testServerPush() {
+  const status = $('server-status');
+  try {
+    await srv.serverFetch(state.settings, '/push/test', { method: 'POST', body: { endpoint: await srv.currentEndpoint() } });
+    status.textContent = 'Test alert sent. It should arrive in a few seconds.';
+    status.className = 'small good';
+  } catch (e) {
+    status.textContent = e.message;
+    status.className = 'small bad';
+  }
 }
 
 function sendAlert(sig) {
@@ -597,7 +802,7 @@ function sendAlert(sig) {
   const body = `Score ${fmtScore(sig.score)} on the ${TIMEFRAMES[sig.tf].label} chart. ${levelsLine(sig)}.${sig.top.length ? ` Led by ${sig.top.join(', ')}.` : ''}`;
   toast(title, { label: 'View', run: () => { $('toast').hidden = true; state.chartTf = sig.tf; openChart(findItem(sig.key), true); } });
   const quiet = state.settings.quietHours && inQuietHours(new Date());
-  if (state.settings.notifications && !quiet) notify(title, body, `chart/${sig.type}/${encodeURIComponent(sig.symbol)}`);
+  if (phoneNotifies() && !quiet) notify(title, body, `chart/${sig.type}/${encodeURIComponent(sig.symbol)}`);
 }
 
 async function runScan({ force = false } = {}) {
@@ -677,7 +882,7 @@ function checkHoldings(skipSell = new Set()) {
           : `Score ${fmtScore(sig.score)} on the ${TIMEFRAMES[sig.tf].label} chart. You hold ${h.qty}.`;
       toast(title, { label: 'View', run: () => { $('toast').hidden = true; go('portfolio'); } });
       const quiet = state.settings.quietHours && inQuietHours(new Date());
-      if (state.settings.notifications && !quiet) notify(title, body, 'portfolio');
+      if (phoneNotifies() && !quiet) notify(title, body, 'portfolio');
     }
   }
   if (changed) saveHoldings();
@@ -734,6 +939,7 @@ function renderHoldings() {
 function removeHolding(h) {
   state.holdings = state.holdings.filter(x => x.id !== h.id);
   saveHoldings();
+  markChanged();
   renderHoldings();
 }
 
@@ -783,6 +989,7 @@ async function submitHolding(e) {
     if (item.geckoId) h.geckoId = item.geckoId;
     state.holdings.push(h);
     saveHoldings();
+    markChanged();
     $('hold-dialog').close();
     err.textContent = '';
     renderHoldings();
@@ -881,7 +1088,11 @@ function renderSettings() {
   $('take-atr').value = state.settings.takeAtr;
   $('risk-pct').value = state.settings.riskPct;
   $('paper-start').value = state.settings.paperStart;
+  $('server-url').value = state.settings.serverUrl;
+  $('server-key').value = state.settings.serverKey;
   renderNotifyStatus();
+  renderServer();
+  if (serverOn()) loadServerStatus();
 }
 
 function saveRisk() {
@@ -894,6 +1105,7 @@ function saveRisk() {
     return;
   }
   state.settings = store.saveSettings(next);
+  markChanged();
   $('risk-status').textContent = 'Saved. New signals and holdings use these levels.';
 }
 
@@ -904,7 +1116,8 @@ function renderNotifyStatus() {
   $('notify-btn').disabled = !supported;
   $('notify-status').textContent = !supported ? 'This browser cannot show notifications. Install the app from Chrome first.'
     : Notification.permission === 'denied' ? 'Notifications are blocked. Allow them in Chrome\'s site settings for this app.'
-      : on ? 'On. You get an alert when a watchlist symbol turns to Buy or Sell while the app is open or in the background.'
+      : on && state.settings.serverPush ? 'On. Your server sends the alerts, even while the app is closed.'
+        : on ? 'On while the app is open or in the background. Turn on server alerts below to get them when it is closed.'
         : 'Off.';
 }
 
@@ -929,6 +1142,7 @@ function saveThresholds() {
     return;
   }
   state.settings = store.saveSettings({ buyAt: buy, sellAt: -sell });
+  markChanged();
   $('alert-status').textContent = 'Saved. Signals use the new levels from the next scan.';
   rescoreSignals();
 }
@@ -1030,13 +1244,17 @@ function bind() {
   for (const id of ['stop-atr', 'take-atr', 'risk-pct', 'paper-start']) $(id).addEventListener('change', saveRisk);
   $('alert-tf').addEventListener('change', e => {
     state.settings = store.saveSettings({ alertTf: e.target.value });
+    markChanged();
     if (state.scan.abort) state.scan.abort.abort();
     setTimeout(() => runScan({ force: true }), 0);
   });
   $('buy-at').addEventListener('change', saveThresholds);
   $('sell-at').addEventListener('change', saveThresholds);
   $('notify-btn').addEventListener('click', toggleNotifications);
-  $('quiet-toggle').addEventListener('change', e => { state.settings = store.saveSettings({ quietHours: e.target.checked }); });
+  $('quiet-toggle').addEventListener('change', e => { state.settings = store.saveSettings({ quietHours: e.target.checked }); markChanged(); });
+  $('server-save').addEventListener('click', saveServer);
+  $('server-push').addEventListener('click', toggleServerPush);
+  $('server-test').addEventListener('click', testServerPush);
 
   $('key-save').addEventListener('click', saveKey);
   $('key-show').addEventListener('click', () => {
@@ -1073,9 +1291,15 @@ function bind() {
     if (document.hidden) return;
     refreshQuotes();
     runScan();
+    refreshMarket();
     if (state.view === 'chart' && isIntraday(state.chartTf)) loadChart();
   }, QUOTE_REFRESH_MS);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshQuotes(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    refreshQuotes();
+    syncNow();
+    refreshMarket();
+  });
 }
 
 function registerServiceWorker() {
@@ -1093,6 +1317,8 @@ function start() {
   showView(location.hash.slice(1) || 'signals');
   refreshQuotes();
   runScan({ force: true });
+  syncNow();
+  refreshMarket({ force: true });
   if (state.settings.showCad) refreshFx();
   registerServiceWorker();
 }

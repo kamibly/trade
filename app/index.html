@@ -27,6 +27,7 @@
       </div>
       <p class="notice small">Signals combine 30 methods into one score. They support your decisions and are often wrong. Check the chart before acting.</p>
       <div id="signals-body"></div>
+      <div id="market-body"></div>
     </section>
 
     <section id="view-watch" class="view" aria-labelledby="title" hidden>
@@ -137,7 +138,27 @@
           <input id="quiet-toggle" type="checkbox">
           <span>Quiet hours, 22:00 to 07:00</span>
         </label>
-        <p class="muted small">While the app is closed, alerts need the OCI server (stage 4). Phones may also pause apps left in the background.</p>
+        <p class="muted small">While the app is closed, alerts come from your server (see Your server below). With server alerts on, the app shows its own alerts on screen only, so you don't get each one twice.</p>
+      </div>
+
+      <div class="card">
+        <h2>Your server</h2>
+        <p class="muted small">Your trade-service on OCI sends alerts while the app is closed, scans the S&amp;P 500 and top 50 crypto, and keeps your watchlist and holdings in sync between phones. The README in the repo's server folder shows how to set it up.</p>
+        <label class="field">
+          <span>Server address</span>
+          <input id="server-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://your-server:8898">
+        </label>
+        <label class="field">
+          <span>Server key (TRADE_API_KEY)</span>
+          <input id="server-key" type="password" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="row">
+          <button type="button" id="server-save" class="primary">Save and connect</button>
+          <button type="button" id="server-push">Turn on server alerts</button>
+          <button type="button" id="server-test" class="ghost">Send a test alert</button>
+        </div>
+        <p id="server-status" class="small" role="status"></p>
+        <p id="server-info" class="muted small"></p>
       </div>
 
       <div class="card">
@@ -174,7 +195,7 @@
 
       <div class="card">
         <h2>Backup</h2>
-        <p class="muted small">Your watchlist and settings live only on this phone. Save a backup file to move them to another phone.</p>
+        <p class="muted small">Your watchlist, holdings, paper account and settings live on this phone (and on your server once it is connected). Save a backup file to keep a copy or move them to another phone.</p>
         <div class="row">
           <button type="button" id="backup-save">Save backup</button>
           <button type="button" id="backup-load">Restore backup</button>

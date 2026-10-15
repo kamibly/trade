@@ -3,11 +3,11 @@
 // seconds (UTC) and the array sorted oldest first.
 
 export const TIMEFRAMES = {
-  '15m': { label: '15m', seconds: 900, coinbase: 900, kraken: 15, twelve: '15min', geckoDays: 1 },
-  '1h': { label: '1H', seconds: 3600, coinbase: 3600, kraken: 60, twelve: '1h', geckoDays: 14 },
-  '1D': { label: '1D', seconds: 86400, coinbase: 86400, kraken: 1440, twelve: '1day', geckoDays: 365 },
+  '15m': { label: '15m', seconds: 900, coinbase: 900, kraken: 15, twelve: '15min', geckoDays: 1, yahoo: ['15m', '1mo'] },
+  '1h': { label: '1H', seconds: 3600, coinbase: 3600, kraken: 60, twelve: '1h', geckoDays: 14, yahoo: ['60m', '6mo'] },
+  '1D': { label: '1D', seconds: 86400, coinbase: 86400, kraken: 1440, twelve: '1day', geckoDays: 365, yahoo: ['1d', '2y'] },
   // Coinbase has no weekly candles, so weekly crypto is built from daily ones.
-  '1W': { label: '1W', seconds: 604800, coinbase: null, kraken: 10080, twelve: '1week', geckoDays: 'max' },
+  '1W': { label: '1W', seconds: 604800, coinbase: null, kraken: 10080, twelve: '1week', geckoDays: 'max', yahoo: ['1wk', '10y'] },
 };
 
 export const isIntraday = tf => TIMEFRAMES[tf].seconds < 86400;
@@ -67,6 +67,17 @@ export function fromTwelve(json) {
     throw err;
   }
   return cleanCandles((json.values || []).map(v => ({ ...v, time: parseUtcDateTime(v.datetime) })));
+}
+
+// Yahoo Finance /v8/finance/chart (server only: it does not allow browser calls).
+// { chart: { result: [{ timestamp: [...], indicators: { quote: [{ open, high, low, close, volume }] } }], error } }
+export function fromYahoo(json) {
+  const r = json && json.chart && json.chart.result && json.chart.result[0];
+  if (!r) throw new Error(`Yahoo Finance: ${(json && json.chart && json.chart.error && json.chart.error.description) || 'no data'}`);
+  const q = (r.indicators && r.indicators.quote && r.indicators.quote[0]) || {};
+  return cleanCandles((r.timestamp || []).map((time, i) => ({
+    time, open: q.open?.[i], high: q.high?.[i], low: q.low?.[i], close: q.close?.[i], volume: q.volume?.[i],
+  })));
 }
 
 export function twelveErrorMessage(json) {

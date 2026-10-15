@@ -1,0 +1,32 @@
+# Add this service block to the docker-compose.yml on the OCI VM (the same file
+# that runs jobspy-service). It builds from the trade_folder folder next to
+# docker-compose.yml (a copy of this server folder), then run:
+#   docker compose up -d --build trade-service
+#
+# Host port 8898 is what the OCI load balancer and the app use; 8004 is the
+# port inside the container.
+
+services:
+  trade-service:
+    build: ./trade_folder
+    container_name: trade-service
+    restart: unless-stopped
+    ports:
+      - "8898:8004"
+    environment:
+      TRADE_API_KEY: "REPLACE_WITH_A_LONG_RANDOM_SECRET"
+      ALLOWED_ORIGIN: "https://kamibly.github.io"
+      # App notifications. Generate the two keys with:
+      #   docker compose run --rm trade-service python generate_vapid_keys.py
+      VAPID_PUBLIC_KEY: ""
+      VAPID_PRIVATE_KEY: ""
+      VAPID_SUBJECT: "mailto:you@example.com"
+      # Quiet hours (22:00 to 07:00) and scan times use this time zone
+      TRADE_TZ: "America/Toronto"
+      # When the S&P 500 and top-50 crypto scan runs (local time)
+      MARKET_SCAN_TIMES: "09:45,12:30,15:45,20:00"
+      # Optional backup for stocks Yahoo Finance can't serve
+      TWELVE_DATA_KEY: ""
+    volumes:
+      # Keeps devices, synced holdings and scan results across restarts
+      - ./trade_folder/trade-data:/data

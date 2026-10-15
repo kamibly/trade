@@ -34,8 +34,8 @@ them to another phone.
 | 1 | Installable app, watchlist, live charts (15m, 1H, 1D, 1W), USD and CAD | Done |
 | 2 | Indicators, forecasts, combined score, signals, alerts while open | Done |
 | 3 | Backtest, portfolio, stop-loss and take-profit, paper trading | Done |
-| 4 | OCI alert service: notifications when the app is closed, scanner | Next |
-| 5 | Machine learning (LightGBM, LSTM) on the server | Planned |
+| 4 | OCI alert service: notifications when the app is closed, scanner | Done |
+| 5 | Machine learning (LightGBM, LSTM) on the server | Next |
 
 ## How signals work
 
@@ -76,7 +76,17 @@ has no volume (CoinGecko backup).
   symbol, and sells on the stop-loss, target or a Sell signal.
 
 Holdings and the paper account live on the phone and are in the backup file.
-Syncing them to the OCI server comes with stage 4.
+With your server connected, the watchlist and holdings also sync to it.
+
+## Your OCI server
+
+[`server/`](server/) is trade-service, a Docker container that runs next to
+jobspy-service. It sends alerts while the app is closed, scans the S&P 500 and
+top 50 crypto 4 times a day, and syncs your watchlist and holdings. It scores
+with copies of the app's own JavaScript (kept in step by `npm run sync-server`),
+so its signals match the phone's. Only that folder goes to the VM, as
+`trade_folder`, on host port 8898 (8004 inside the container). Setup steps are in
+[server/README.md](server/README.md).
 
 ## Data sources
 
