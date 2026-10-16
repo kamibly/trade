@@ -96,7 +96,8 @@ def test_crypto_scan_covers_the_coin_list_keeps_stock_results_and_rescores_fast_
     service.update_state(lambda st: st.update(
         marketActions={"stock:MMM": "buy", "crypto:OLD": "hold"}, marketWeights={"stock:MMM:1D": {"w": 1}},
         buyStarts={"stock:MMM": {"at": 1, "entry": 50}, "crypto:OLD": {"at": 1, "entry": 3}},
-        scans={"stocks": {"at": 5, "scanned": 500, "total": 503, "buys": [{"key": "stock:MMM", "score": 60}], "sells": []}}))
+        scans={"stocks": {"at": 5, "scanned": 500, "total": 503, "buys": [{"key": "stock:MMM", "score": 60}], "sells": [],
+                           "paperBuys": [{"id": "scan:stock:MMM:1", "setup": "scan", "key": "stock:MMM", "ev": 0.3}]}}))
     jobs = []
 
     def engine(job, timeout):
@@ -124,11 +125,14 @@ def test_crypto_scan_covers_the_coin_list_keeps_stock_results_and_rescores_fast_
     m = st["market"]
     assert m["scanned"] == 502 and [b["key"] for b in m["buys"]] == ["stock:MMM", "crypto:BTC"]
     assert m["stocksAt"] == 5 and m["cryptoAt"] == 7 and m["records"]["crowd"]["n"] == 10
+    # The paper account is offered both markets' current ideas, not just this scan's.
+    assert jobs[1]["mode"] == "paper" and [b["key"] for b in jobs[1]["scanBuys"]] == ["stock:MMM"]
 
     # SOL jumps 4 ATR: the minute watch scores just SOL, and the paper account buys it.
     moved = service.run_pulse(fetch=lambda: {"SOL": {"price": 170}, "BTC": {"price": 101}}, engine=engine)
     assert moved == ["crypto:SOL"]
-    assert jobs[1]["only"] == ["crypto:SOL"] and jobs[2]["mode"] == "paper" and jobs[2]["scanBuys"][0]["key"] == "crypto:SOL"
+    assert jobs[2]["only"] == ["crypto:SOL"] and jobs[3]["mode"] == "paper"
+    assert [b["key"] for b in jobs[3]["scanBuys"]] == ["crypto:SOL", "stock:MMM"]
     st = service.load_state()
     assert [b["key"] for b in st["market"]["buys"]] == ["stock:MMM", "crypto:SOL", "crypto:BTC"]
     assert st["scans"]["crypto"]["scanned"] == 2  # still the full scan's numbers
@@ -147,3 +151,14 @@ def test_run_now_starts_both_scans(monkeypatch):
     monkeypatch.setattr(threading, "Thread", lambda target, args, daemon: type("T", (), {"start": lambda self: target(*args)})())
     service.run_in_background("market")
     assert sorted(started) == ["crypto", "stocks"]
+
+
+def test_a_reset_account_buys_the_current_ideas_right_away(monkeypatch):
+    service.set_profile(PROFILE)
+    buy = {"id": "scan:crypto:SOL:9", "setup": "scan", "key": "crypto:SOL", "ev": 0.5}
+    service.update_state(lambda st: st.update(scans={"crypto": {"at": 1, "paperBuys": [buy]}}, market={"opportunities": [{"id": "o", "key": "stock:AAPL"}]}))
+    monkeypatch.setattr(service, "_spawn", lambda fn: fn())
+    offered = []
+    monkeypatch.setattr(service, "paper_opportunities", lambda opps, engine, buys, sells: offered.append((opps, buys)))
+    service.reset_paper()
+    assert offered == [([{"id": "o", "key": "stock:AAPL"}], [buy])]

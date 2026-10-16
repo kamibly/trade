@@ -498,7 +498,9 @@ def reset_paper(start: Optional[float] = None) -> dict:
         st["paper"], st["paperEvents"] = acc, []
 
     with _run_locks["watch"]:  # not while a check is changing the account
-        return update_state(apply)["paper"]
+        acc = update_state(apply)["paper"]
+    _spawn(offer_ideas)
+    return acc
 
 
 def us_market_open(now: Optional[datetime] = None) -> bool:
@@ -639,19 +641,35 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
                     st["cryptoLevels"] = levels
             result["reason"] = reason
             view = {k: v for k, v in result.items() if k not in ("scanBuys", "scanSells")}
+            view["paperBuys"] = result.get("scanBuys") or []
             scans = st.setdefault("scans", {})
             scans[scope] = rescored(scans.get(scope), view, only) if only else view
             st["market"] = merged_market(scans)
             remember(st, new_ids)
 
         update_state(apply)
-        # Both markets' opportunities, so an idea missed earlier (the account
-        # was busy or short of cash) is tried again on the next scan of either.
-        opps = (load_state().get("market") or {}).get("opportunities") or result.get("opportunities") or []
-        paper_opportunities(opps, engine, result.get("scanBuys") or [], result.get("scanSells") or [])
+        # Both markets' current ideas, so one missed earlier (the account was
+        # busy, short of cash or just reset) is tried again on every scan.
+        opps, buys = current_ideas(load_state())
+        paper_opportunities(opps, engine, buys, result.get("scanSells") or [])
         return result
     finally:
         lock.release()
+
+
+def current_ideas(state: dict):
+    """The opportunities and buy ideas (within 1 ATR of their start) of the
+    latest stock and crypto scans, for the paper account."""
+    scans = state.get("scans") or {}
+    opps = (state.get("market") or {}).get("opportunities") or []
+    buys = sorted((b for x in scans.values() for b in ((x or {}).get("paperBuys") or [])), key=lambda b: -(b.get("ev") or 0))
+    return opps, buys
+
+
+def offer_ideas(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """Right after a reset: buy the current ideas without waiting for a scan."""
+    opps, buys = current_ideas(load_state())
+    return paper_opportunities(opps, engine, buys, [])
 
 
 def run_crypto(reason: str = "schedule", engine: Callable[[dict, int], dict] = run_engine, only: Optional[List[str]] = None) -> Optional[dict]:
@@ -667,6 +685,7 @@ def rescored(old: Optional[dict], new: dict, only: List[str]) -> dict:
     out["buys"] = sorted([r for r in old.get("buys", []) if r["key"] not in keys] + new.get("buys", []), key=lambda r: -(r.get("score") or 0))[:100]
     out["sells"] = sorted([r for r in old.get("sells", []) if r["key"] not in keys] + new.get("sells", []), key=lambda r: r.get("score") or 0)[:100]
     out["newBuys"], out["newSells"] = new.get("newBuys", []), new.get("newSells", [])
+    out["paperBuys"] = [b for b in old.get("paperBuys", []) if b["key"] not in keys] + new.get("paperBuys", [])
     out["rescoredAt"] = new.get("at")
     return out
 
