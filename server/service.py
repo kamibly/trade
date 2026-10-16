@@ -14,6 +14,8 @@ Environment variables:
     DATA_DIR           - where trade.json is kept, default /data
     TRAIN_AT           - when the machine-learning models retrain each week, default "Sun 03:00"
     TRAIN_SYMBOLS      - how many charts the models learn from, default 120
+    SEC_CONTACT        - your email, which the SEC asks for in its requests; insider buying
+                         and earnings dates load only once it is set (see events.py)
 """
 import json
 import logging
@@ -55,7 +57,11 @@ QUIET_START, QUIET_END = 22, 7
 TIMEFRAMES = set(WATCH_EVERY)
 
 _lock = threading.RLock()
-_run_locks = {"watch": threading.Lock(), "market": threading.Lock(), "train": threading.Lock()}
+_run_locks = {"watch": threading.Lock(), "market": threading.Lock(), "train": threading.Lock(), "events": threading.Lock()}
+SP500_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500.csv")
+SETUP_IDS = ("insider", "earnings", "ranking", "crowd")
+EVENTS_EVERY_MS = 3600_000   # outside data for the setups (insiders, earnings, crowd)
+MUTE_VOTES, MUTE_AT = 10, 7  # "Not useful" on 7 of the last 10 ratings mutes a setup's alerts
 
 
 def tz() -> ZoneInfo:
@@ -94,6 +100,9 @@ def _empty_state() -> dict:
         "paperEvents": [],        # its latest buys and sells
         "prices": {"lastRunAt": None, "values": {}, "errors": {}},
         "watchSoonAt": None,      # a check asked for after a settings or watchlist change
+        "events": {"lastRunAt": None},  # last refresh of the setups' outside data
+        "announced": [],          # opportunity and warning ids already sent
+        "feedback": {},           # setup -> your latest ratings, True for useful
     }
 
 
@@ -196,6 +205,7 @@ def clean_profile(raw: dict) -> dict:
             "quietHours": bool(s.get("quietHours", True)),
             "riskPct": _num(s.get("riskPct"), 1, 0.1, 5),
             "paperStart": round(_num(s.get("paperStart"), 10000, 100, 10_000_000)),
+            "setups": {k: bool((s.get("setups") or {}).get(k, True)) if isinstance(s.get("setups"), dict) else True for k in SETUP_IDS},
         },
         "updatedAt": int(_num(raw.get("updatedAt"), now_ms(), 0, 1e15)),
     }
@@ -297,16 +307,74 @@ def in_quiet_hours(when: datetime) -> bool:
     return when.hour >= QUIET_START or when.hour < QUIET_END
 
 
-def deliver(alerts: List[dict], quiet: bool, when: Optional[datetime] = None) -> int:
-    """Sends alerts; during quiet hours only urgent ones (stop-loss hits)."""
+def deliver(alerts: List[dict], quiet: bool, when: Optional[datetime] = None, muted: Optional[set] = None) -> int:
+    """Sends alerts; during quiet hours only urgent ones (stop-loss hits).
+    Alerts from setups you muted are skipped. Setup alerts carry the
+    Useful and Not useful buttons."""
     when = when or datetime.now(tz())
+    muted = muted or set()
     sent = 0
     for a in alerts:
         if quiet and in_quiet_hours(when) and not a.get("urgent"):
             continue
+        setups = a.get("setups") or []
+        if setups and all(x in muted for x in setups):
+            continue
         payload = {"title": a["title"], "body": a["body"], "tag": f"{a.get('kind')}:{a.get('key', '')}", "hash": a.get("hash", "signals")}
+        if setups:
+            payload["feedback"] = {"setups": setups, "id": a.get("id") or ",".join(a.get("ids") or []) or payload["tag"]}
         sent += send_to_all(payload)
     return sent
+
+
+# ---------------------------------------------------------------------------
+# Your ratings of alerts
+# ---------------------------------------------------------------------------
+
+def muted_setups(state: dict) -> set:
+    """Setups whose alerts you rated "Not useful" 7 or more times of the last 10."""
+    out = set()
+    for setup, votes in (state.get("feedback") or {}).items():
+        last = votes[-MUTE_VOTES:]
+        if sum(1 for v in last if not v) >= MUTE_AT:
+            out.add(setup)
+    return out
+
+
+FEEDBACK_SETUPS = SETUP_IDS + ("signal",)
+
+
+def add_feedback(setups: List[str], useful: bool) -> dict:
+    setups = [x for x in dict.fromkeys(setups or []) if x in FEEDBACK_SETUPS]
+    if not setups:
+        raise ValueError("Unknown alert type")
+
+    def apply(st):
+        fb = st.setdefault("feedback", {})
+        for x in setups:
+            fb[x] = (fb.get(x, []) + [bool(useful)])[-MUTE_VOTES:]
+
+    return setups_info(update_state(apply))
+
+
+def unmute(setup: str) -> dict:
+    """Turns a muted setup's alerts back on, starting its ratings over."""
+    if setup not in FEEDBACK_SETUPS:
+        raise ValueError("Unknown alert type")
+    return setups_info(update_state(lambda st: st.setdefault("feedback", {}).pop(setup, None)))
+
+
+def setups_info(state: dict) -> dict:
+    """For the app: your ratings, what is muted and whether each data source loaded."""
+    import events
+    fb = state.get("feedback") or {}
+    return {
+        "votes": {k: {"useful": sum(1 for v in fb[k] if v), "notUseful": sum(1 for v in fb[k] if not v)} for k in fb},
+        "muted": sorted(muted_setups(state)),
+        "sources": events.statuses(events_dir()),
+        "secContact": bool(events.SEC_CONTACT),
+        "eventsAt": (state.get("events") or {}).get("lastRunAt"),
+    }
 
 
 def send_test(endpoint: Optional[str]) -> int:
@@ -374,7 +442,7 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
                 clear_watch_soon(st, started)
             update_state(failed)
             return None
-        sent = deliver(result["alerts"], profile["settings"]["quietHours"])
+        sent = deliver(result["alerts"], profile["settings"]["quietHours"], muted=muted_setups(state))
 
         def apply(st):
             st["signals"].update(result["signals"])
@@ -498,26 +566,115 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
         profile = state.get("profile")
         if not profile:
             return None
-        job = {"mode": "market", "settings": engine_settings(profile), "prev": state["marketActions"], "weights": state["marketWeights"], "models": load_models("1D")}
+        import events
+        muted = muted_setups(state)
+        job = {
+            "mode": "market", "settings": engine_settings(profile), "prev": state["marketActions"], "weights": state["marketWeights"], "models": load_models("1D"),
+            "events": events.load_events(events_dir()),
+            "enabled": profile["settings"].get("setups") or {},
+            "held": sorted(held_keys(state)),
+            "announced": state.get("announced", []),
+            "muted": sorted(muted),
+        }
         try:
             result = engine(job, 3000)
         except Exception as e:
             logger.exception("Market scan failed")
             update_state(lambda st: st.update(market={**(st.get("market") or {}), "error": str(e), "failedAt": now_ms()}))
             return None
-        if result.get("alert") and state["subscriptions"]:
-            deliver([result["alert"]], profile["settings"]["quietHours"])
+        announced = set(state.get("announced", []))
+        warnings = [w for w in result.get("warnings", []) if w["id"] not in announced]
+        push = [a for a in [result.get("alert"), result.get("digest")] + warnings if a]
+        if push and state["subscriptions"]:
+            deliver(push, profile["settings"]["quietHours"], muted=muted)
+        new_ids = (result["digest"]["ids"] if result.get("digest") else []) + [w["id"] for w in warnings]
 
         def apply(st):
             st["marketActions"] = result.pop("actions", {})
             st["marketWeights"] = result.pop("weights", {})
             result["reason"] = reason
             st["market"] = result
+            remember(st, new_ids)
 
         update_state(apply)
+        paper_opportunities(result.get("opportunities") or [], engine)
         return result
     finally:
         lock.release()
+
+
+def events_dir() -> str:
+    return os.path.join(DATA_DIR, "events")
+
+
+def held_keys(state: dict) -> set:
+    """What you hold and what the paper account holds."""
+    profile = state.get("profile") or {}
+    return {h["key"] for h in profile.get("holdings", [])} | {p["key"] for p in (state.get("paper") or {}).get("positions", [])}
+
+
+def remember(st: dict, ids: List[str]) -> None:
+    """Ids of alerts sent, so each opportunity or warning goes out once."""
+    if ids:
+        st["announced"] = (st.get("announced", []) + [i for i in ids if i not in st.get("announced", [])])[-500:]
+
+
+def paper_opportunities(opportunities: List[dict], engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """The paper account takes the scan's opportunities (in the watch lock,
+    since watch runs change the same account)."""
+    if not opportunities:
+        return None
+    lock = _run_locks["watch"]
+    if not lock.acquire(timeout=900):
+        logger.warning("Paper account busy; the opportunities wait for the next scan")
+        return None
+    try:
+        state = load_state()
+        profile = state.get("profile")
+        if not profile:
+            return None
+        job = {"mode": "paper", "paper": state.get("paper") or new_paper(profile), "opportunities": opportunities, "riskPct": profile["settings"].get("riskPct", 1)}
+        try:
+            result = engine(job, 120)
+        except Exception:
+            logger.exception("Paper opportunities failed")
+            return None
+        update_state(lambda st: save_paper(st, result))
+        return result
+    finally:
+        lock.release()
+
+
+def run_events(reason: str = "schedule", refresher: Optional[Callable] = None) -> Optional[dict]:
+    """Hourly: the setups' outside data, then earnings warnings for what you hold."""
+    import events
+    lock = _run_locks["events"]
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        update_state(lambda st: st.update(events={**(st.get("events") or {}), "lastRunAt": now_ms()}))
+        try:
+            status = (refresher or events.refresh)(events_dir(), events.sp500_ciks(SP500_FILE))
+        except Exception as e:
+            logger.exception("Event data refresh failed")
+            status = {"error": str(e)}
+        state = load_state()
+        profile = state.get("profile")
+        if not profile:
+            return status
+        today = datetime.now(NEW_YORK).date()
+        announced = set(state.get("announced", []))
+        warnings = [w for w in events.earnings_warnings(events.next_earnings(events_dir()), held_keys(state), today) if w["id"] not in announced]
+        if warnings and state["subscriptions"]:
+            deliver(warnings, profile["settings"]["quietHours"])
+        update_state(lambda st: remember(st, [w["id"] for w in warnings]))
+        return {**status, "warnings": warnings}
+    finally:
+        lock.release()
+
+
+def events_due(state: dict, now: int) -> bool:
+    return bool(state.get("profile")) and now - ((state.get("events") or {}).get("lastRunAt") or 0) >= EVENTS_EVERY_MS
 
 
 # ---------------------------------------------------------------------------
@@ -622,7 +779,7 @@ def train_due(state: dict, now: datetime) -> Optional[str]:
 
 
 def run_in_background(what: str) -> None:
-    target = {"market": run_market, "train": run_train}.get(what, run_watch)
+    target = {"market": run_market, "train": run_train, "events": run_events}.get(what, run_watch)
     threading.Thread(target=target, args=("manual",), daemon=True).start()
 
 
@@ -716,6 +873,8 @@ def start_scheduler() -> None:
                 if slot:
                     update_state(lambda st: st.update(lastMarketSlot=slot))
                     _spawn(run_market)
+                if events_due(state, now):
+                    _spawn(run_events)
                 train = train_due(state, datetime.now(tz()))
                 if train:
                     update_state(lambda st: st.update(lastTrainSlot=train))

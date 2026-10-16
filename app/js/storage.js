@@ -40,6 +40,7 @@ export const DEFAULT_SETTINGS = {
   serverKey: '',
   serverPush: false,
   overlays: { ma: true, bands: false, cloud: false, forecast: true, ml: true, markers: true },
+  setups: { insider: true, earnings: true, ranking: true, crowd: true }, // opportunity setups the server looks for
 };
 
 function read(key, fallback) {
@@ -72,7 +73,7 @@ export const saveWatchlist = list => write('watchlist', list);
 export function getSettings() {
   const saved = read('settings', {});
   // New chart overlays start with their default when older settings lack them.
-  return { ...DEFAULT_SETTINGS, ...saved, overlays: { ...DEFAULT_SETTINGS.overlays, ...(saved.overlays || {}) } };
+  return { ...DEFAULT_SETTINGS, ...saved, overlays: { ...DEFAULT_SETTINGS.overlays, ...(saved.overlays || {}) }, setups: { ...DEFAULT_SETTINGS.setups, ...(saved.setups || {}) } };
 }
 
 export function saveSettings(patch) {

@@ -147,6 +147,14 @@ With server alerts on, the app stops showing its own system notifications
 | `TWELVE_DATA_KEY` | Backup for stocks Yahoo Finance can't serve | none |
 | `TRAIN_AT` | When the models retrain each week (day and local time) | `Sun 03:00` |
 | `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
+| `SEC_CONTACT` | Your email, which the SEC asks every program to send with its requests. Insider buying and earnings dates load only once it is set; it is sent only to the SEC | none |
+
+The opportunity setups' outside data refreshes every hour (Fear & Greed,
+Kraken funding, new SEC Form 4 filings) and once a day (each company's earnings
+filings, the Nasdaq calendar). The first start downloads two years of the
+SEC's quarterly insider data sets (about 20 MB each, reduced to a small file).
+It is kept in `trade_folder/trade-data/events/`. SEC requests stay under its
+limit of 10 a second.
 
 The watchlist and holdings are checked a minute after every candle of your
 alert timeframe closes (a new Buy or Sell can only appear then), and also every
@@ -190,7 +198,9 @@ All except `/health` need the `X-API-Key` header.
 | `GET /sync`, `PUT /sync` | Watchlist, holdings and alert settings |
 | `GET /signals` | Last watchlist signals and the market scan |
 | `GET /models` | The trained models, which the app runs on the phone |
-| `POST /run` | Run now: `{"what": "watch"}`, `{"what": "market"}` or `{"what": "train"}` |
+| `POST /run` | Run now: `{"what": "watch"}`, `{"what": "market"}`, `{"what": "train"}` or `{"what": "events"}` |
+| `POST /feedback` | Rate an alert: `{"setups": ["insider"], "useful": false}` |
+| `POST /setups/unmute` | Turn a muted setup's alerts back on: `{"setup": "insider"}` |
 | `POST /push/subscribe`, `/push/unsubscribe`, `/push/test` | App notifications |
 
 ## Limits

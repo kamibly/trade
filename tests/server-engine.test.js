@@ -97,6 +97,9 @@ test('market scan uses the saved S&P list offline and only announces new ideas',
   assert.equal(first.scanned, first.total);
   assert.ok(first.buys.some(b => b.key === 'stock:MMM'));
   assert.equal(first.alert, null); // nothing was scanned before
+  // The opportunity setups run on the same charts and report their records.
+  assert.deepEqual(Object.keys(first.records).sort(), ['crowd', 'earnings', 'insider', 'ranking']);
+  assert.ok(Array.isArray(first.opportunities) && Array.isArray(first.warnings));
 
   const prev = { ...first.actions, 'stock:MMM': 'hold', 'crypto:BTC': 'buy' };
   const second = await runMarket({ settings, prev, weights: first.weights }, d);

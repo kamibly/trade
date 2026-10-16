@@ -29,6 +29,10 @@ services:
       TWELVE_DATA_KEY: ""
       # When the machine-learning models retrain each week (local time)
       TRAIN_AT: "Sun 03:00"
+      # Your email address. The SEC asks every program that reads its filings to
+      # name a contact; insider buying and earnings dates load once it is set.
+      # It stays on your server and is only sent to the SEC.
+      SEC_CONTACT: ""
     # Training briefly needs about 1 GB; this keeps it from starving jobspy-service.
     mem_limit: 1500m
     volumes:

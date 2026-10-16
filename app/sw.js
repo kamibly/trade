@@ -2,7 +2,7 @@
 // Price APIs are other sites and pass straight through: a cached copy would
 // hide real errors and show stale prices as if they were live.
 
-const CACHE = 'trade-v9';
+const CACHE = 'trade-v10';
 const ASSETS = [
   './',
   './index.html',
@@ -22,6 +22,7 @@ const ASSETS = [
   './js/portfolio.js',
   './js/scanner.js',
   './js/server.js',
+  './js/setups.js',
   './js/ml.js',
   './js/signals.js',
   './js/storage.js',
@@ -85,13 +86,35 @@ self.addEventListener('push', event => {
     icon: 'icons/icon-192.png',
     badge: 'icons/badge-96.png',
     tag: data.tag || data.hash || 'trade',
-    data: { hash: data.hash || 'signals' },
+    data: { hash: data.hash || 'signals', feedback: data.feedback || null },
+    // Rate setup alerts right from the notification.
+    actions: data.feedback ? [{ action: 'useful', title: 'Useful' }, { action: 'not-useful', title: 'Not useful' }] : [],
   }));
 });
 
-// Tapping an alert opens the app on that symbol's chart.
+// Sends a rating to your server with the address and key the app saved.
+async function sendRating(feedback, useful) {
+  try {
+    const cache = await caches.open('config-trade');
+    const hit = await cache.match('./server-config');
+    const cfg = hit ? await hit.json() : null;
+    if (!cfg || !cfg.serverUrl || !cfg.serverKey) return;
+    await fetch(`${cfg.serverUrl}/feedback`, {
+      method: 'POST',
+      headers: { 'X-API-Key': cfg.serverKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ setups: feedback.setups, id: feedback.id, useful }),
+    });
+  } catch { /* offline: the rating is lost, nothing else breaks */ }
+}
+
+// Tapping an alert opens the app on that symbol's chart; the buttons rate it.
 self.addEventListener('notificationclick', event => {
   event.notification.close();
+  const feedback = event.notification.data && event.notification.data.feedback;
+  if (feedback && (event.action === 'useful' || event.action === 'not-useful')) {
+    event.waitUntil(sendRating(feedback, event.action === 'useful'));
+    return;
+  }
   const hash = (event.notification.data && event.notification.data.hash) || 'signals';
   const url = new URL(`./#${hash}`, self.registration.scope).href;
   event.waitUntil((async () => {

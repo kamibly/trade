@@ -9,7 +9,8 @@ import * as F from './forecast.js';
 import {
   analyze, signalAt, scoreVotes, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
 } from './signals.js';
-import { scanItem, alertFor, manualRule, autoTune, learnKey, backtestOptions, learnedFrom, ruleOf } from './scanner.js';
+import { scanItem, alertFor, manualRule, autoTune, learnKey, backtestOptions, learnedFrom, ruleOf, tradeRecordLine } from './scanner.js';
+import { SETUPS, recordLine, proven as setupProven, MIN_PROVEN } from './setups.js';
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
 import { voteMatrix, backtest } from './backtest.js';
 import * as paper from './paper.js';
@@ -18,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.7.0 (tuned signals)';
+export const APP_VERSION = '0.8.0 (opportunities)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -65,6 +66,7 @@ const state = {
   syncTimer: null,
   serverStatus: null,
   scan: { busy: false, done: 0, total: 0, at: 0, errors: {}, abort: null },
+  rated: {}, // opportunity id -> true (useful) or false, rated on this phone
 };
 
 // Small DOM helper: text always goes in as text, never as HTML.
@@ -117,7 +119,7 @@ function findItem(key) {
   const own = trackedItems().find(i => store.itemKey(i) === key);
   if (own) return own;
   // Symbols from the server's market scan open as charts too.
-  const m = state.market && [...(state.market.buys || []), ...(state.market.sells || [])].find(x => x.key === key);
+  const m = state.market && [...(state.market.buys || []), ...(state.market.sells || []), ...(state.market.opportunities || [])].find(x => x.key === key);
   return m ? { type: m.type, symbol: m.symbol, name: m.name } : undefined;
 }
 const serverOn = () => !!(state.settings.serverUrl && state.settings.serverKey);
@@ -662,6 +664,7 @@ function signalCard(sig) {
     scoreMeter(sig.score),
     el('div', { class: 'sub', text: `${Math.round(sig.confidence * 100)}% agree · ${levelsLine(sig)}` }),
     sig.tuned && sig.rule ? el('div', { class: 'sub', text: tunedLine(sig) }) : null,
+    sig.action === 'buy' && sig.record ? el('div', { class: 'sub', text: tradeRecordLine(sig.symbol, sig.record) }) : null,
     sig.top && sig.top.length ? el('div', { class: 'sub', text: `Led by ${sig.top.join(', ')}` }) : null);
 }
 
@@ -697,7 +700,119 @@ function renderSignals() {
     ...section('Watching', holds, 'Nothing else scanned yet.'),
     errors.length ? el('p', { class: 'muted small', text: `Could not score: ${errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ')}` }) : '',
   );
+  renderOpportunities();
   renderMarket();
+}
+
+// ---- Opportunities (from the server's market scan) -------------------------------
+
+const setupName = id => (id === 'signal' ? 'Buy and Sell signals' : SETUPS[id] ? SETUPS[id].name : id);
+const holdText = o => `${o.hold} ${o.type === 'stock' ? 'trading days' : 'days'}`;
+
+async function rateSetup(setups, useful, id) {
+  try {
+    const { setups: info } = await srv.serverFetch(state.settings, '/feedback', { method: 'POST', body: { setups, useful, id } });
+    if (id) state.rated[id] = useful;
+    state.market = { ...state.market, setupsInfo: info };
+    store.saveMarket(state.market);
+    const muted = setups.filter(x => info.muted.includes(x));
+    toast(muted.length ? `Thanks. ${setupName(muted[0])} alerts are now muted; turn them back on in Settings.` : 'Thanks, your rating is saved.');
+    renderOpportunities();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function unmuteSetup(setup) {
+  try {
+    const { setups: info } = await srv.serverFetch(state.settings, '/setups/unmute', { method: 'POST', body: { setup } });
+    state.market = { ...state.market, setupsInfo: info };
+    store.saveMarket(state.market);
+    toast(`${setupName(setup)} alerts are back on.`);
+    renderOpportunities();
+    renderSetupSettings();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function feedbackButtons(setups, id) {
+  const rated = state.rated[id];
+  const button = (label, useful) => el('button', {
+    type: 'button',
+    class: rated === useful ? 'chosen' : '',
+    text: label,
+    onclick: e => { e.stopPropagation(); rateSetup(setups, useful, id); },
+  });
+  return el('div', { class: 'feedback' }, button('Useful', true), button('Not useful', false));
+}
+
+function opportunityCard(o) {
+  const item = { type: o.type, symbol: o.symbol, name: o.name };
+  const symbolRec = o.symbolRecord && o.symbolRecord.n >= 3
+    ? `On ${o.symbol}: ${o.symbolRecord.wins} of ${o.symbolRecord.n} past cases made money, average ${fmtPct(o.symbolRecord.avg)}.` : '';
+  return el('li', { class: 'signal opp', onclick: () => { state.chartTf = '1D'; openChart(item, true); } },
+    el('div', { class: 'signal-top' },
+      el('div', { class: 'sym' }, o.symbol, el('span', { class: 'badge', text: o.type === 'stock' ? 'Stock' : 'Crypto' }),
+        el('span', { class: o.proven ? 'badge proven' : 'badge', text: o.proven ? 'Proven' : 'Watching, not proven' })),
+      el('div', { class: `score ${o.ev > 0 ? 'up' : 'down'}`, text: fmtPct(o.ev) })),
+    el('div', { class: 'sub', text: setupName(o.setup) }),
+    el('p', { class: 'why', text: o.why }),
+    el('div', { class: 'sub', text: recordLine(o.record, o.hold) }),
+    symbolRec ? el('div', { class: 'sub', text: symbolRec }) : null,
+    el('div', { class: 'sub', text: `Entry ${formatMoney(o.entry)} · Stop ${formatMoney(o.stop)} · Target ${formatMoney(o.take)} · hold up to ${holdText(o)}` }),
+    feedbackButtons([o.setup], o.id));
+}
+
+function setupReport(m) {
+  const records = m.records || {};
+  const info = m.setupsInfo || {};
+  const sources = info.sources || {};
+  const enabled = state.settings.setups || {};
+  const row = id => {
+    const r = records[id] || { n: 0, wins: 0, avg: 0 };
+    const status = enabled[id] === false ? 'Off' : (info.muted || []).includes(id) ? 'Muted' : setupProven(r) ? 'Proven' : r.n < MIN_PROVEN ? 'Too few cases' : 'Loses money';
+    return el('tr', {},
+      el('td', { text: SETUPS[id].name }),
+      el('td', { text: String(r.n) }),
+      el('td', { text: r.n ? `${Math.round((r.wins / r.n) * 100)}%` : '–' }),
+      el('td', { text: r.n ? fmtPct(r.avg) : '–' }),
+      el('td', { text: status }));
+  };
+  const SOURCE_NAMES = { insiders: 'SEC insider filings', earnings: 'SEC earnings dates', calendar: 'Nasdaq earnings calendar', fng: 'Fear & Greed index', funding: 'Kraken funding rates' };
+  const sourceLines = Object.entries(SOURCE_NAMES).filter(([k]) => sources[k]).map(([k, label]) => {
+    const st = sources[k];
+    return el('li', { class: 'sub', text: `${label}: ${st.ok ? `loaded (${st.count})` : 'not loaded'}${st.at ? `, ${timeAgo(st.at)}` : ''}${st.error ? `. ${st.error}` : ''}` });
+  });
+  return el('details', { class: 'report' },
+    el('summary', { text: 'Setup report' }),
+    el('p', { class: 'muted small', text: 'Every past case of each setup on the scanned symbols\' daily charts: bought at the close, sold at the stop, the target or the end of the holding period, after fees. A setup sends alerts once it is proven: at least 30 cases with a positive average.' }),
+    el('div', { class: 'table-wrap' }, el('table', { class: 'setups' },
+      el('thead', {}, el('tr', {}, ...['Setup', 'Cases', 'Won', 'Average', 'Status'].map(t => el('th', { text: t })))),
+      el('tbody', {}, ...Object.keys(SETUPS).map(row)))),
+    sourceLines.length ? el('ul', { class: 'list compact' }, ...sourceLines) : el('p', { class: 'muted small', text: 'The data sources load within an hour of the server starting.' }),
+    info.secContact === false ? el('p', { class: 'small', text: 'Insider buying and earnings dates need SEC_CONTACT (your email) in the server\'s compose file.' }) : null);
+}
+
+function renderOpportunities() {
+  const body = $('opps-body');
+  const m = state.market;
+  if (!serverOn() || !m || !m.at || !m.records) {
+    body.replaceChildren();
+    return;
+  }
+  const opps = m.opportunities || [];
+  const muted = (m.setupsInfo && m.setupsInfo.muted) || [];
+  const warnings = m.warnings || [];
+  body.replaceChildren(...[
+    el('h2', { class: 'section', text: `Opportunities (${opps.length})` }),
+    el('p', { class: 'muted small', text: `Ranked by the average result of past cases after fees, from the scan ${timeAgo(m.at)}.` }),
+    muted.length ? el('p', { class: 'small', text: `Muted after your ratings: ${muted.map(setupName).join(', ')}. They still show here; turn their alerts back on in Settings.` }) : null,
+    warnings.length ? el('ul', { class: 'list' }, ...warnings.map(w => el('li', { class: 'signal' }, el('div', { class: 'sym', text: w.title }), el('div', { class: 'sub', text: w.body })))) : null,
+    opps.length ? el('ul', { class: 'list' }, ...opps.slice(0, 15).map(opportunityCard))
+      : el('p', { class: 'muted small', text: 'No setup fired on the newest candles. The report below shows how each one did in the past.' }),
+    setupReport(m),
+  ].filter(Boolean));
 }
 
 function renderMarket() {
@@ -772,10 +887,10 @@ async function refreshMarket({ force = false } = {}) {
   if (!serverOn() || !navigator.onLine) return;
   if (!force && state.market && Date.now() - (state.market.fetchedAt || 0) < MARKET_REFRESH_MS) return;
   try {
-    const { market, modelsAt = {} } = await srv.serverFetch(state.settings, '/signals');
-    state.market = market ? { ...market, fetchedAt: Date.now() } : { fetchedAt: Date.now() };
+    const { market, modelsAt = {}, setups = null } = await srv.serverFetch(state.settings, '/signals');
+    state.market = market ? { ...market, setupsInfo: setups, fetchedAt: Date.now() } : { setupsInfo: setups, fetchedAt: Date.now() };
     store.saveMarket(state.market);
-    if (state.view === 'signals') renderMarket();
+    if (state.view === 'signals') { renderOpportunities(); renderMarket(); }
     await refreshModels(modelsAt);
     await refreshPaper();
   } catch (e) {
@@ -868,6 +983,7 @@ async function saveServer() {
     status.className = 'small bad';
     return;
   }
+  srv.saveWorkerConfig(state.settings);
   status.textContent = 'Connected. Your watchlist and holdings now sync with the server.';
   status.className = 'small good';
   await syncNow();
@@ -1188,6 +1304,7 @@ function renderPaper() {
         stat('Closed trades', String(sum.trades)),
         stat('Won', sum.trades ? `${Math.round(sum.winRate * 100)}%` : '–'),
         stat('Worst drop', fmtPct(-sum.maxDrawdown)))),
+    bySetupTable(acc),
     el('h2', { class: 'section', text: `Open (${acc.positions.length})` }),
     acc.positions.length
       ? el('ul', { class: 'list' }, ...acc.positions.map(p => {
@@ -1198,7 +1315,8 @@ function renderPaper() {
             el('div', { class: 'sym', text: p.symbol }),
             el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? `${pnl >= 0 ? '+' : ''}${formatMoney(pnl)}` : '–' })),
           el('div', { class: 'sub', text: `${Number(p.qty.toPrecision(6))} at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
-          el('div', { class: 'sub', text: `Stop ${formatMoney(p.stop)} · Target ${formatMoney(p.take)} · since ${fmtTime(p.openedAt)}` }));
+          el('div', { class: 'sub', text: `Stop ${formatMoney(p.stop)} · Target ${formatMoney(p.take)} · since ${fmtTime(p.openedAt)}${p.until ? ` · sells by ${fmtTime(p.until)}` : ''}` }),
+          el('div', { class: 'sub', text: setupName(paper.setupOf(p)) }));
       }))
       : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
     events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
@@ -1210,9 +1328,26 @@ function renderPaper() {
         el('div', { class: 'signal-top' },
           el('div', { class: 'sym', text: t.symbol }),
           el('span', { class: changeClass(t.pnl), text: `${t.pnl >= 0 ? '+' : ''}${formatMoney(t.pnl)} (${fmtPct(t.ret)})` })),
-        el('div', { class: 'sub', text: `${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }))))
+        el('div', { class: 'sub', text: `${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason === 'time' ? 'holding period over' : t.reason} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)} · ${setupName(t.setup || 'signal')}` }))))
       : el('p', { class: 'muted small', text: 'No closed paper trades yet.' }),
   ].filter(Boolean));
+}
+
+// Trades, win rate, return and worst drop for each way the account trades.
+function bySetupTable(acc) {
+  const rows = paper.bySetup(acc);
+  if (!rows.length || (rows.length === 1 && rows[0].setup === 'signal')) return null;
+  return el('div', { class: 'card' },
+    el('h3', { text: 'By setup' }),
+    el('div', { class: 'table-wrap' }, el('table', { class: 'setups' },
+      el('thead', {}, el('tr', {}, ...['Setup', 'Trades', 'Won', 'Return', 'Worst drop'].map(t => el('th', { text: t })))),
+      el('tbody', {}, ...rows.map(r => el('tr', {},
+        el('td', { text: `${setupName(r.setup)}${r.open ? ` (${r.open} open)` : ''}` }),
+        el('td', { text: String(r.trades) }),
+        el('td', { text: r.trades ? `${Math.round(r.winRate * 100)}%` : '–' }),
+        el('td', { class: upDown(r.ret), text: r.trades ? fmtPct(r.ret) : '–' }),
+        el('td', { text: r.trades ? fmtPct(-r.maxDrawdown) : '–' })))))),
+    el('p', { class: 'muted small', text: 'Return is on the starting amount. Opportunity trades sell at their stop, their target or the end of their holding period.' }));
 }
 
 async function resetPaper() {
@@ -1260,8 +1395,28 @@ function renderSettings() {
   $('server-url').value = state.settings.serverUrl;
   $('server-key').value = state.settings.serverKey;
   renderNotifyStatus();
+  renderSetupSettings();
   renderServer();
   if (serverOn()) loadServerStatus();
+}
+
+function renderSetupSettings() {
+  const on = state.settings.setups || {};
+  $('setup-switches').replaceChildren(...Object.entries(SETUPS).map(([id, s]) => {
+    const input = el('input', { type: 'checkbox' });
+    input.checked = on[id] !== false;
+    input.addEventListener('change', () => {
+      state.settings = store.saveSettings({ setups: { ...state.settings.setups, [id]: input.checked } });
+      markChanged();
+      $('setups-status').textContent = 'Saved. The next market scan uses it.';
+    });
+    return el('label', { class: 'switch' }, input, el('span', { text: `${s.name}${s.kind === 'stock' ? ' (stocks)' : s.kind === 'crypto' ? ' (crypto)' : ''}` }));
+  }));
+  const info = (state.market && state.market.setupsInfo) || {};
+  const muted = info.muted || [];
+  $('setups-muted').replaceChildren(...muted.map(id => el('div', { class: 'row' },
+    el('span', { class: 'small', text: `${setupName(id)} alerts are muted: you rated 7 of the last 10 "Not useful".` }),
+    el('button', { type: 'button', class: 'ghost', text: 'Turn back on', onclick: () => unmuteSetup(id) }))));
 }
 
 function saveRisk() {
@@ -1493,6 +1648,7 @@ function start() {
   refreshMarket({ force: true });
   if (state.settings.showCad) refreshFx();
   registerServiceWorker();
+  if (serverOn()) srv.saveWorkerConfig(state.settings);
 }
 
 start();

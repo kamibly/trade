@@ -26,6 +26,7 @@
         <button type="button" id="scan-btn" class="ghost">Scan now</button>
       </div>
       <p class="notice small">Signals combine 30 methods into one score. They support your decisions and are often wrong. Check the chart before acting.</p>
+      <div id="opps-body"></div>
       <div id="signals-body"></div>
       <div id="market-body"></div>
     </section>
@@ -158,6 +159,14 @@
           <span>Quiet hours, 22:00 to 07:00</span>
         </label>
         <p class="muted small">While the app is closed, alerts come from your server (see Your server below). With server alerts on, the app shows its own alerts on screen only, so you don't get each one twice.</p>
+      </div>
+
+      <div class="card">
+        <h2>Opportunities</h2>
+        <p class="muted small">Setups your server looks for across the S&amp;P 500 and top 50 crypto, using more than the price chart. A setup sends alerts only after it made money on average, after fees, in at least 30 past cases. The paper account trades all of them, so you can compare.</p>
+        <div id="setup-switches"></div>
+        <p id="setups-status" class="small" role="status"></p>
+        <div id="setups-muted"></div>
       </div>
 
       <div class="card">

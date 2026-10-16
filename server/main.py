@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -75,6 +75,7 @@ def status(x_api_key: Optional[str] = Header(default=None)):
         "prices": {"lastRunAt": (state.get("prices") or {}).get("lastRunAt"), "everySeconds": service.PRICES_EVERY_MS // 1000},
         "models": service.model_summaries(),
         "training": {**(state.get("training") or {}), "nextAt": service.next_train_at()},
+        "setups": service.setups_info(state),
     }
 
 
@@ -98,7 +99,7 @@ def get_signals(x_api_key: Optional[str] = Header(default=None)):
     check_api_key(x_api_key)
     state = service.load_state()
     models = {tf: s["trainedAt"] for tf, s in service.model_summaries().items()}
-    return {"signals": state["signals"], "market": state.get("market"), "modelsAt": models}
+    return {"signals": state["signals"], "market": state.get("market"), "modelsAt": models, "setups": service.setups_info(state)}
 
 
 @app.get("/paper")
@@ -132,9 +133,29 @@ def get_models(x_api_key: Optional[str] = Header(default=None)):
 def post_run(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(default={})):
     """Runs the watch, the market scan or model training now, in the background."""
     check_api_key(x_api_key)
-    what = payload.get("what") if payload.get("what") in ("market", "train") else "watch"
+    what = payload.get("what") if payload.get("what") in ("market", "train", "events") else "watch"
     service.run_in_background(what)
     return {"ok": True, "started": what}
+
+
+@app.post("/feedback")
+def post_feedback(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(...)):
+    """Your rating of an alert: { setups: ["insider", ...], useful: true | false }."""
+    check_api_key(x_api_key)
+    try:
+        return {"ok": True, "setups": service.add_feedback(payload.get("setups") or [], bool(payload.get("useful")))}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/setups/unmute")
+def post_unmute(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(...)):
+    """Turns a muted setup's alerts back on."""
+    check_api_key(x_api_key)
+    try:
+        return {"ok": True, "setups": service.unmute(str(payload.get("setup", "")))}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/push/subscribe")

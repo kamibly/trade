@@ -10,10 +10,12 @@ import { readFile } from 'node:fs/promises';
 import { fetchCandles, yahooCandles, yahooPrice, fetchCryptoTop } from './js/data.js';
 import { analyze, signalAt, baseVotesAt, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
 import { featureNames, featureVector, sequence, label, turnLabels } from './js/ml.js';
-import { summarize, alertFor, learn, learnKey, ruleOf, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
+import { summarize, alertFor, learn, learnKey, ruleOf, tradeRecordLine, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
 import * as paper from './js/paper.js';
 import { formatMoney } from './js/format.js';
+import { SETUPS } from './js/setups.js';
+import { lite, findOpportunities, digest } from './opportunities.mjs';
 
 const SP500_CSV = 'https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv';
 const fmtScore = v => `${v > 0 ? '+' : ''}${Math.round(v)}`;
@@ -49,8 +51,8 @@ async function candlesFor(item, tf, settings, deps) {
 
 // Scores one symbol, re-learning its method weights (and, with tuning on, its
 // thresholds and mode) from the backtest once a day, or when the settings or
-// the ML models change.
-async function score(item, tf, settings, weightsCache, deps, models) {
+// the ML models change. `onS` gets the analyzed chart when the caller needs it.
+async function score(item, tf, settings, weightsCache, deps, models, onS) {
   const { candles } = await candlesFor(item, tf, settings, deps);
   if (candles.length < MIN_CANDLES) throw new Error(`Only ${candles.length} candles, ${MIN_CANDLES} needed`);
   const S = analyze(candles, { models });
@@ -65,6 +67,7 @@ async function score(item, tf, settings, weightsCache, deps, models) {
     thresholds: ruleOf(settings, w), weights: w.weights || undefined, stopAtr: settings.stopAtr, takeAtr: settings.takeAtr,
   });
   if (!sig) throw new Error('Not enough history');
+  if (onS) onS(S);
   return { ...summarize(item, sig, tf, w), at: deps.now() };
 }
 
@@ -83,9 +86,10 @@ async function pool(items, size, fn) {
 const levels = s => `Entry ${formatMoney(s.entry)} · Stop ${formatMoney(s.stop)} · Target ${formatMoney(s.take)}`;
 
 // Paper trades become a short line for the app's Paper tab.
+const setupNote = ev => (ev.setup && SETUPS[ev.setup] ? `, ${SETUPS[ev.setup].name.toLowerCase()}` : '');
 const paperLine = ev => (ev.kind === 'open'
-  ? `Bought ${ev.symbol} at ${formatMoney(ev.price)} (${formatMoney(ev.cost)})`
-  : `Sold ${ev.symbol} at ${formatMoney(ev.price)} (${ev.reason}), ${ev.pnl >= 0 ? '+' : ''}${formatMoney(ev.pnl)}`);
+  ? `Bought ${ev.symbol} at ${formatMoney(ev.price)} (${formatMoney(ev.cost)}${setupNote(ev)})`
+  : `Sold ${ev.symbol} at ${formatMoney(ev.price)} (${ev.reason === 'time' ? 'holding period over' : ev.reason}${setupNote(ev)}), ${ev.pnl >= 0 ? '+' : ''}${formatMoney(ev.pnl)}`);
 
 // Watchlist and holdings on the alert timeframe, plus the paper account.
 // job: { tf, settings, items, holdings, prev: { key: signal }, weights: { "key:tf": {at, weights} },
@@ -114,11 +118,13 @@ export async function runWatch(job, deps = defaultDeps) {
     if (!action) continue;
     changes[k] = action;
     const yours = action === 'sell' && held.has(k);
+    const record = action === 'buy' ? tradeRecordLine(s.symbol, s.record) : '';
     alerts.push({
       kind: 'signal',
       key: k,
+      setups: ['signal'],
       title: `${action === 'buy' ? 'Buy' : 'Sell'} signal: ${s.symbol}${yours ? ' (you hold it)' : ''}`,
-      body: `Score ${fmtScore(s.score)} on the ${TIMEFRAMES[tf].label} chart. ${levels(s)}.${s.top.length ? ` Led by ${s.top.join(', ')}.` : ''}`,
+      body: `Score ${fmtScore(s.score)} on the ${TIMEFRAMES[tf].label} chart. ${levels(s)}.${s.top.length ? ` Led by ${s.top.join(', ')}.` : ''}${record ? ` ${record}` : ''}`,
       hash: `chart/${s.type}/${encodeURIComponent(s.symbol)}`,
     });
   }
@@ -213,19 +219,48 @@ export async function runPrices(job, deps = defaultDeps) {
   return { prices, alerts, holdingsAlerted, paper: job.paper || null, paperEvents, errors };
 }
 
+// One CSV line into its fields (quoted fields may hold commas and "" quotes).
+function csvFields(line) {
+  const out = [];
+  let cur = '';
+  let quoted = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quoted) {
+      if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') quoted = false; else cur += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { out.push(cur); cur = ''; } else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+// Symbol, Security, GICS Sector, ..., CIK: the name, the sector (for the
+// ranking) and the SEC's company number (for filings).
 export function parseSp500(csv) {
-  return csv.split(/\r?\n/).slice(1)
+  const lines = csv.split(/\r?\n/);
+  const head = csvFields(lines[0] || '').map(h => h.trim().toLowerCase());
+  const col = name => head.indexOf(name);
+  const [iSym, iName, iSector, iCik] = [col('symbol'), col('security'), col('gics sector'), col('cik')];
+  return lines.slice(1)
     .map(line => {
-      // Symbol,Security,... where Security may be quoted and contain commas.
-      const m = line.match(/^([A-Z0-9.\-]+),("([^"]*)"|[^,]*)/);
-      return m ? { type: 'stock', symbol: m[1], name: m[3] ?? m[2] } : null;
+      const f = csvFields(line);
+      const symbol = (f[iSym < 0 ? 0 : iSym] || '').trim();
+      if (!/^[A-Z0-9.\-]+$/.test(symbol)) return null;
+      const item = { type: 'stock', symbol, name: (f[iName < 0 ? 1 : iName] || symbol).trim() };
+      if (iSector >= 0 && f[iSector]) item.sector = f[iSector].trim();
+      if (iCik >= 0 && /^\d+$/.test((f[iCik] || '').trim())) item.cik = Number(f[iCik]);
+      return item;
     })
     .filter(Boolean);
 }
 
-// S&P 500 and the top 50 cryptos on the daily chart.
-// job: { settings, prev: { key: action }, weights }
-// result: { at, scanned, buys, sells, newBuys, newSells, actions, weights, errors, alert }
+// S&P 500 and the top 50 cryptos on the daily chart, plus the opportunity setups.
+// job: { settings, prev: { key: action }, weights, models,
+//        events: { insiders, earnings, fng, funding }, enabled: { setup: bool },
+//        held: [key], announced: [id], muted: [setup] }
+// result: { at, scanned, buys, sells, newBuys, newSells, actions, weights, errors, alert,
+//           opportunities, records, counts, warnings, digest }
 export async function runMarket(job, deps = defaultDeps) {
   const tf = '1D';
   const { settings } = job;
@@ -246,13 +281,15 @@ export async function runMarket(job, deps = defaultDeps) {
     errors.cryptoTop = `Top crypto list: ${e.message}`;
   }
   const results = [];
+  const rows = [];
   await pool([...crypto, ...stocks], 4, async item => {
     try {
-      results.push(await score(item, tf, settings, weights, deps, job.models));
+      results.push(await score(item, tf, settings, weights, deps, job.models, S => rows.push({ item, S: lite(S), sector: item.sector || null })));
     } catch (e) {
       errors[key(item)] = e.message;
     }
   });
+  const setups = await opportunitiesFor(job, rows, deps, errors);
   const prev = job.prev || {};
   const actions = Object.fromEntries(results.map(r => [r.key, r.action]));
   const buys = results.filter(r => r.action === 'buy').sort((a, b) => b.score - a.score);
@@ -266,6 +303,7 @@ export async function runMarket(job, deps = defaultDeps) {
   if (newBuys.length || newSells.length) {
     alert = {
       kind: 'market',
+      setups: ['signal'],
       title: `Market scan: ${[newBuys.length && `${newBuys.length} new buy`, newSells.length && `${newSells.length} new sell`].filter(Boolean).join(', ')} idea${newBuys.length + newSells.length === 1 ? '' : 's'}`,
       body: [newBuys.length && `Buy: ${names(newBuys)}`, newSells.length && `Sell: ${names(newSells)}`].filter(Boolean).join('. '),
       hash: 'signals',
@@ -287,7 +325,46 @@ export async function runMarket(job, deps = defaultDeps) {
     weights: kept,
     errors,
     alert,
+    ...setups,
   };
+}
+
+// The setups on the scan's charts. SPY is the stocks' benchmark, Bitcoin the crypto's.
+async function opportunitiesFor(job, rows, deps, errors) {
+  let spy = null;
+  try {
+    const { candles } = await deps.yahooCandles({ type: 'stock', symbol: 'SPY', name: 'S&P 500' }, '1D');
+    if (candles.length >= MIN_CANDLES) spy = lite(analyze(candles));
+  } catch (e) {
+    errors.spy = `S&P 500 benchmark (SPY): ${e.message}`;
+  }
+  const btcRow = rows.find(r => r.item.type === 'crypto' && r.item.symbol === 'BTC');
+  const found = findOpportunities({
+    rows,
+    spy,
+    btc: btcRow ? btcRow.S : null,
+    events: job.events || {},
+    settings: job.settings,
+    enabled: job.enabled || {},
+    held: new Set(job.held || []),
+    nowSec: Math.floor(deps.now() / 1000),
+  });
+  const push = digest(found.opportunities, new Set(job.announced || []), new Set(job.muted || []));
+  return {
+    opportunities: found.opportunities.slice(0, 30),
+    records: found.records,
+    counts: found.counts,
+    warnings: found.warnings,
+    digest: push,
+  };
+}
+
+// The paper account takes the market scan's opportunities.
+// job: { paper, opportunities, riskPct }  result: { paper, paperEvents }
+export async function runPaper(job, deps = defaultDeps) {
+  const paperEvents = paper.openSetups(job.paper, job.opportunities || [], { riskPct: job.riskPct || 1, now: deps.now() })
+    .map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
+  return { paper: job.paper, paperEvents };
 }
 
 // Your symbols plus a spread of S&P 500 stocks and top cryptos, so the models
@@ -354,7 +431,7 @@ async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
-  const run = { market: runMarket, dataset: runDataset, prices: runPrices }[job.mode] || runWatch;
+  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper }[job.mode] || runWatch;
   const result = await run(job);
   if (job.stream) {
     // Training data is big: a header line, then one row per line, so Python
