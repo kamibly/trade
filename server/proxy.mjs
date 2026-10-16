@@ -72,7 +72,8 @@ async function socks5Connect(proxy, host, port) {
 }
 
 export function proxiedFetch(proxyUrl, { tlsOptions = {} } = {}) {
-  const proxy = new URL(proxyUrl);
+  // "ts-proxy:1056" without a scheme means an HTTP proxy.
+  const proxy = new URL(proxyUrl.includes('://') ? proxyUrl : `http://${proxyUrl}`);
   const connect = proxy.protocol === 'socks5:' || proxy.protocol === 'socks5h:' ? socks5Connect : httpConnect;
   return async (url, { headers = {}, signal } = {}) => {
     const u = new URL(url);

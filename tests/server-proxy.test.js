@@ -46,7 +46,7 @@ test('stock requests go through an HTTP or SOCKS5 proxy', async t => {
   const socksPort = await listen(socks);
   const tlsOptions = { rejectUnauthorized: false };
   try {
-    for (const p of [`http://127.0.0.1:${httpPort}`, `socks5://127.0.0.1:${socksPort}`]) {
+    for (const p of [`127.0.0.1:${httpPort}`, `socks5://127.0.0.1:${socksPort}`]) {
       const res = await proxiedFetch(p, { tlsOptions })(`https://localhost:${sitePort}/v8/chart/AAPL?x=1`, { headers: { 'User-Agent': 'test' } });
       assert.equal(res.status, 200);
       assert.deepEqual(await res.json(), { ok: true });
