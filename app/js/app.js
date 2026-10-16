@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.9.1 (crypto around the clock)';
+export const APP_VERSION = '0.9.2 (crypto around the clock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -956,6 +956,7 @@ function renderServer() {
   $('server-push').textContent = state.settings.serverPush ? 'Turn off server alerts' : 'Turn on server alerts';
   $('server-push').disabled = !serverOn();
   $('server-test').hidden = !state.settings.serverPush;
+  $('server-train').disabled = !serverOn() || trainingNow(st);
   const info = $('server-info');
   if (!serverOn()) { info.textContent = 'Not connected.'; return; }
   if (!st) { info.textContent = 'Checking your server…'; return; }
@@ -985,7 +986,30 @@ function cryptoLine(c) {
   ].filter(Boolean).join(' ');
 }
 
+// The server marks a training run as started; a run takes up to an hour per
+// timeframe, so after 5 hours it counts as stopped (the server restarted).
+function trainingNow(st) {
+  const t = st && st.training;
+  return Boolean(t && t.runningSince && Date.now() - t.runningSince < 5 * 3600_000);
+}
+
+async function trainNow() {
+  const status = $('server-status');
+  $('server-train').disabled = true;
+  try {
+    await srv.serverFetch(state.settings, '/run', { method: 'POST', body: { what: 'train' } });
+    status.textContent = 'Training started on your server. It takes 10 to 30 minutes per chart timeframe; this page shows the results when it finishes.';
+    status.className = 'small good';
+    setTimeout(loadServerStatus, 5000);
+  } catch (e) {
+    $('server-train').disabled = false;
+    status.textContent = e.message;
+    status.className = 'small bad';
+  }
+}
+
 function modelsLine(st) {
+  if (trainingNow(st)) return `Training the models now, started ${timeAgo(st.training.runningSince)}.`;
   const models = Object.entries(st.models || {});
   const failed = Object.entries((st.training && st.training.results) || {}).filter(([, r]) => r.error);
   const next = st.training && st.training.nextAt ? ` Next training ${new Date(st.training.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '';
@@ -1623,6 +1647,7 @@ function bind() {
   $('server-save').addEventListener('click', saveServer);
   $('server-push').addEventListener('click', toggleServerPush);
   $('server-test').addEventListener('click', testServerPush);
+  $('server-train').addEventListener('click', trainNow);
 
   $('key-save').addEventListener('click', saveKey);
   $('key-show').addEventListener('click', () => {

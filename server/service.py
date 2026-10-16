@@ -893,6 +893,7 @@ def run_train(reason: str = "schedule", trainer: Callable[[dict, int], dict] = r
         profile = load_state().get("profile")
         if not profile:
             return None
+        update_state(lambda st: st["training"].update(runningSince=now_ms()))
         results = {}
         for tf in train_timeframes(profile):
             job = {"tf": tf, "items": watch_items(profile), "settings": engine_settings(profile), "total": TRAIN_SYMBOLS}
