@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fromYahoo } from '../app/js/candles.js';
-import { runWatch, runMarket, runPrices, parseSp500 } from '../server/engine.mjs';
+import { runWatch, runMarket, runPrices, parseSp500, politely } from '../server/engine.mjs';
 import { newAccount } from '../app/js/paper.js';
 
 function series(n, drift, vol = 0.02, seed = 42) {
@@ -128,6 +128,28 @@ test('crypto scan covers the given coins only, and a fast-move rescore scores ju
   assert.deepEqual(quick.newBuys, ['crypto:SOL']);
   assert.match(quick.alert.title, /^Crypto scan: 1 new buy idea$/);
   assert.equal(quick.scanBuys[0].setup, 'scan');
+});
+
+test('Yahoo calls are spaced, wait out a 429 together, and stop asking after the last retry', async () => {
+  let t = 0;
+  let paused = 0;
+  const waits = [];
+  const cooldown = { get: async () => paused, set: async until => { paused = until; } };
+  const opts = { gap: 100, waits: [1000, 5000], giveUp: 60_000, now: () => t, wait: async ms => { waits.push(ms); t += ms; }, cooldown };
+  const limited = Object.assign(new Error('query1.finance.yahoo.com answered 429'), { status: 429 });
+  let fails = 1;
+  const calls = [];
+  const get = politely(async s => { calls.push([s, t]); if (fails-- > 0) throw limited; return s; }, opts);
+  assert.equal(await get('A'), 'A'); // a 429, a 1 s pause, then the answer
+  assert.deepEqual(calls, [['A', 0], ['A', 1000]]);
+  assert.equal(await get('B'), 'B');
+  assert.equal(calls.at(-1)[1], 1100); // spaced by the gap
+  fails = 9;
+  await assert.rejects(get('C'), /429/);
+  await assert.rejects(get('D'), /429/); // blocked: no new request
+  assert.equal(calls.filter(([s]) => s === 'D').length, 0);
+  const other = Object.assign(new Error('no such symbol'), { status: 404 });
+  await assert.rejects(politely(async () => { throw other; }, opts)(), /no such symbol/);
 });
 
 test('app sync helpers: direction, merge and profile', async () => {

@@ -6,7 +6,8 @@
 // job: { mode: 'watch' | 'prices' | 'market' | 'dataset', ... }  (see the run* functions below)
 
 import { TIMEFRAMES } from './js/candles.js';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fetchCandles, yahooCandles, yahooPrice, fetchCryptoTop } from './js/data.js';
 import { analyze, signalAt, baseVotesAt, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
 import { featureNames, featureVector, sequence, label, turnLabels } from './js/ml.js';
@@ -21,10 +22,51 @@ const SP500_CSV = 'https://raw.githubusercontent.com/datasets/s-and-p-500-compan
 const fmtScore = v => `${v > 0 ? '+' : ''}${Math.round(v)}`;
 const key = item => `${item.type}:${item.symbol}`;
 
+// Yahoo Finance answers 429 when asked too fast, and the watch, the scans,
+// training and the minute price check each run their own engine. So every run
+// spaces its Yahoo calls, and a 429 pauses all of them: the pause is shared
+// through a file in the data folder. After the last retry a run stops asking
+// for a few minutes, so a long scan fails fast instead of hammering.
+const YAHOO_GAP_MS = 300;
+const YAHOO_WAITS_MS = [3000, 10000, 30000];
+const YAHOO_GIVE_UP_MS = 5 * 60_000;
+const COOLDOWN_FILE = join(process.env.DATA_DIR || '/data', 'yahoo-cooldown');
+const fileCooldown = {
+  get: async () => Number(await readFile(COOLDOWN_FILE, 'utf8').catch(() => 0)) || 0,
+  set: async until => { await writeFile(COOLDOWN_FILE, String(until)).catch(() => {}); },
+};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+export function politely(fn, { gap = YAHOO_GAP_MS, waits = YAHOO_WAITS_MS, giveUp = YAHOO_GIVE_UP_MS, wait = sleep, now = Date.now, cooldown = fileCooldown } = {}) {
+  let next = 0;
+  let blockedUntil = 0;
+  let blockedError = null;
+  return async (...args) => {
+    for (let attempt = 0; ; attempt++) {
+      if (now() < blockedUntil) throw blockedError;
+      const paused = await cooldown.get();
+      const slot = Math.max(now(), next, paused);
+      next = slot + gap;
+      if (slot > now()) await wait(slot - now());
+      try {
+        return await fn(...args);
+      } catch (e) {
+        if (e.status !== 429) throw e;
+        if (attempt >= waits.length) {
+          blockedUntil = now() + giveUp;
+          blockedError = e;
+          throw e;
+        }
+        await cooldown.set(Math.max(await cooldown.get(), now() + waits[attempt]));
+      }
+    }
+  };
+}
+
 export const defaultDeps = {
   fetchCandles,
-  yahooCandles,
-  yahooPrice,
+  yahooCandles: politely(yahooCandles),
+  yahooPrice: politely(yahooPrice),
   fetchCryptoTop,
   fetchText: async url => {
     const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
