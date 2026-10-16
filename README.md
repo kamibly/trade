@@ -138,7 +138,9 @@ the learned models expect.
   every candle close, stop-loss and target every minute); otherwise it trades
   only while the app is open.
 
-- **By setup.** Paper trades are tagged with what opened them (a Buy signal or
+- **By setup.** The server's paper account also buys the market scan's new buy
+  ideas (sold at the stop, the target or when a later scan says Sell). Paper
+  trades are tagged with what opened them (a Buy signal, a market scan idea or
   one of the opportunity setups below), and the Paper tab shows trades, win
   rate, return and worst drop for each. At most 10 positions are open at once.
 

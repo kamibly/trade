@@ -86,7 +86,7 @@ async function pool(items, size, fn) {
 const levels = s => `Entry ${formatMoney(s.entry)} · Stop ${formatMoney(s.stop)} · Target ${formatMoney(s.take)}`;
 
 // Paper trades become a short line for the app's Paper tab.
-const setupNote = ev => (ev.setup && SETUPS[ev.setup] ? `, ${SETUPS[ev.setup].name.toLowerCase()}` : '');
+const setupNote = ev => (ev.setup === 'scan' ? ', market scan idea' : ev.setup && SETUPS[ev.setup] ? `, ${SETUPS[ev.setup].name.toLowerCase()}` : '');
 const paperLine = ev => (ev.kind === 'open'
   ? `Bought ${ev.symbol} at ${formatMoney(ev.price)} (${formatMoney(ev.cost)}${setupNote(ev)})`
   : `Sold ${ev.symbol} at ${formatMoney(ev.price)} (${ev.reason === 'time' ? 'holding period over' : ev.reason}${setupNote(ev)}), ${ev.pnl >= 0 ? '+' : ''}${formatMoney(ev.pnl)}`);
@@ -325,6 +325,11 @@ export async function runMarket(job, deps = defaultDeps) {
     weights: kept,
     errors,
     alert,
+    // For the paper account: new buy ideas, strongest first, and every Sell.
+    scanBuys: newBuys.map(r => ({
+      id: `scan:${r.key}:${r.candleTime}`, setup: 'scan', key: r.key, symbol: r.symbol, type: r.type, entry: r.entry, stop: r.stop, take: r.take, ev: r.score / 100,
+    })),
+    scanSells: sells.map(r => ({ key: r.key, entry: r.entry })),
     ...setups,
   };
 }
@@ -361,9 +366,14 @@ async function opportunitiesFor(job, rows, deps, errors) {
 
 // The paper account takes the market scan's opportunities.
 // job: { paper, opportunities, riskPct }  result: { paper, paperEvents }
+// job: { paper, opportunities, scanBuys, scanSells, riskPct }
 export async function runPaper(job, deps = defaultDeps) {
-  const paperEvents = paper.openSetups(job.paper, job.opportunities || [], { riskPct: job.riskPct || 1, now: deps.now() })
-    .map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
+  const opts = { riskPct: job.riskPct || 1, now: deps.now() };
+  const paperEvents = [
+    ...paper.closeOnSells(job.paper, job.scanSells || [], 'scan', opts),
+    ...paper.openSetups(job.paper, job.opportunities || [], opts),
+    ...paper.openSetups(job.paper, job.scanBuys || [], opts),
+  ].map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
   return { paper: job.paper, paperEvents };
 }
 

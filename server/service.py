@@ -593,11 +593,11 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
             st["marketActions"] = result.pop("actions", {})
             st["marketWeights"] = result.pop("weights", {})
             result["reason"] = reason
-            st["market"] = result
+            st["market"] = {k: v for k, v in result.items() if k not in ("scanBuys", "scanSells")}
             remember(st, new_ids)
 
         update_state(apply)
-        paper_opportunities(result.get("opportunities") or [], engine)
+        paper_opportunities(result.get("opportunities") or [], engine, result.get("scanBuys") or [], result.get("scanSells") or [])
         return result
     finally:
         lock.release()
@@ -619,10 +619,13 @@ def remember(st: dict, ids: List[str]) -> None:
         st["announced"] = (st.get("announced", []) + [i for i in ids if i not in st.get("announced", [])])[-500:]
 
 
-def paper_opportunities(opportunities: List[dict], engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
-    """The paper account takes the scan's opportunities (in the watch lock,
-    since watch runs change the same account)."""
-    if not opportunities:
+def paper_opportunities(opportunities: List[dict], engine: Callable[[dict, int], dict] = run_engine,
+                        scan_buys: Optional[List[dict]] = None, scan_sells: Optional[List[dict]] = None) -> Optional[dict]:
+    """The paper account takes the scan's opportunities and new buy ideas, and
+    sells its scan trades that turned Sell (in the watch lock, since watch runs
+    change the same account)."""
+    scan_buys, scan_sells = scan_buys or [], scan_sells or []
+    if not opportunities and not scan_buys and not scan_sells:
         return None
     lock = _run_locks["watch"]
     if not lock.acquire(timeout=900):
@@ -633,7 +636,12 @@ def paper_opportunities(opportunities: List[dict], engine: Callable[[dict, int],
         profile = state.get("profile")
         if not profile:
             return None
-        job = {"mode": "paper", "paper": state.get("paper") or new_paper(profile), "opportunities": opportunities, "riskPct": profile["settings"].get("riskPct", 1)}
+        acc = state.get("paper") or new_paper(profile)
+        held = {p["key"] for p in acc.get("positions", []) if p.get("setup") == "scan"}
+        sells = [s for s in scan_sells if s["key"] in held]
+        if not opportunities and not scan_buys and not sells:
+            return None
+        job = {"mode": "paper", "paper": acc, "opportunities": opportunities, "scanBuys": scan_buys, "scanSells": sells, "riskPct": profile["settings"].get("riskPct", 1)}
         try:
             result = engine(job, 120)
         except Exception:

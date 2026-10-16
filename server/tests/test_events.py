@@ -264,7 +264,8 @@ def test_market_scan_sends_each_opportunity_once_and_paper_trades_them(monkeypat
             return {"paper": {**job["paper"], "positions": [{"key": "stock:AAPL", "setup": "insider"}]}, "paperEvents": [{"kind": "open", "text": "Bought AAPL"}]}
         dig = None if opp["id"] in job["announced"] else {"kind": "opportunities", "setups": ["insider"], "ids": [opp["id"]], "title": "Opportunity: AAPL", "body": "b", "hash": "signals"}
         return {"at": 5, "scanned": 1, "buys": [], "sells": [], "actions": {}, "weights": {}, "errors": {}, "alert": None,
-                "opportunities": [opp], "records": {"insider": {"n": 40, "wins": 25, "avg": 0.02}}, "counts": {}, "warnings": [], "digest": dig}
+                "opportunities": [opp], "records": {"insider": {"n": 40, "wins": 25, "avg": 0.02}}, "counts": {}, "warnings": [], "digest": dig,
+                "scanBuys": [{"id": "scan:crypto:SOL:1", "setup": "scan", "key": "crypto:SOL"}], "scanSells": [{"key": "stock:MSFT", "entry": 1}]}
 
     service.run_market(engine=engine)
     market = jobs[0]
@@ -272,6 +273,9 @@ def test_market_scan_sends_each_opportunity_once_and_paper_trades_them(monkeypat
     assert market["held"] == ["stock:AAPL"] and "insiders" in market["events"]
     assert [p["title"] for p in sent] == ["Opportunity: AAPL"]
     assert jobs[1]["mode"] == "paper" and jobs[1]["opportunities"] == [opp]
+    # The scan's new buy ideas go to the paper account too; a Sell only for its own scan trades.
+    assert jobs[1]["scanBuys"][0]["key"] == "crypto:SOL" and jobs[1]["scanSells"] == []
+    assert "scanBuys" not in service.load_state()["market"]
     st = service.load_state()
     assert st["announced"] == [opp["id"]] and st["paper"]["positions"][0]["setup"] == "insider"
     assert st["market"]["records"]["insider"]["n"] == 40

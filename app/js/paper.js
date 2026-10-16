@@ -91,13 +91,26 @@ export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now() }
     if (acc.positions.length >= MAX_POSITIONS) break;
     if (acc.taken.includes(o.id) || acc.positions.some(p => p.key === o.key)) continue;
     if (!(o.entry > 0) || !(o.stop < o.entry)) continue;
-    const days = o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
-    const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: now + Math.round(days * DAY_MS), id: o.id });
+    // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
+    const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
+    const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id });
     acc.taken.push(o.id);
     if (ev) events.push(ev);
   }
   if (acc.taken.length > 300) acc.taken.splice(0, acc.taken.length - 300);
   if (events.length) mark(acc, prices, now);
+  return events;
+}
+
+// Market scan trades are sold when a later scan rates them Sell.
+// sells: [{ key, entry }]
+export function closeOnSells(acc, sells, setup, { now = Date.now() } = {}) {
+  const at = new Map(sells.map(s => [s.key, s.entry]));
+  const events = [];
+  for (const p of [...acc.positions]) {
+    if (setupOf(p) === setup && ok(at.get(p.key))) events.push(closePosition(acc, p, at.get(p.key), 'sell signal', now));
+  }
+  if (events.length) mark(acc, {}, now);
   return events;
 }
 

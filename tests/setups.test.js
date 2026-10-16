@@ -189,3 +189,18 @@ test('S&P 500 list carries the sector and the SEC company number', async () => {
   assert.equal(aapl.cik, 320193);
   assert.ok(rows.filter(r => r.sector && r.cik).length > 490);
 });
+
+test('paper takes the market scan buy ideas and sells them when a later scan says Sell', async () => {
+  const idea = (sym, score) => ({ id: `scan:stock:${sym}:1`, setup: 'scan', key: `stock:${sym}`, symbol: sym, type: 'stock', entry: 100, stop: 90, take: 130, ev: score / 100 });
+  const acc = paper.newAccount(10_000, 0);
+  const r = await runPaper({ paper: acc, scanBuys: [idea('AAA', 45), idea('BBB', 70)], riskPct: 1 }, { now: () => 5 });
+  // Strongest score first, no holding period.
+  assert.deepEqual(r.paper.positions.map(p => p.key), ['stock:BBB', 'stock:AAA']);
+  assert.ok(r.paper.positions.every(p => p.setup === 'scan' && !p.until));
+  assert.match(r.paperEvents[0].text, /market scan idea\)$/);
+  const later = await runPaper({ paper: r.paper, scanSells: [{ key: 'stock:AAA', entry: 104 }, { key: 'stock:ZZZ', entry: 1 }] }, { now: () => 9 });
+  assert.equal(later.paperEvents.length, 1);
+  assert.equal(later.paper.trades[0].setup, 'scan');
+  assert.equal(later.paper.trades[0].reason, 'sell signal');
+  assert.deepEqual(later.paper.positions.map(p => p.key), ['stock:BBB']);
+});

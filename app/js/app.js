@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.8.1 (opportunities)';
+export const APP_VERSION = '0.8.2 (opportunities)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -706,7 +706,7 @@ function renderSignals() {
 
 // ---- Opportunities (from the server's market scan) -------------------------------
 
-const setupName = id => (id === 'signal' ? 'Buy and Sell signals' : SETUPS[id] ? SETUPS[id].name : id);
+const setupName = id => (id === 'signal' ? 'Buy and Sell signals' : id === 'scan' ? 'Market scan ideas' : SETUPS[id] ? SETUPS[id].name : id);
 const holdText = o => `${o.hold} ${o.type === 'stock' ? 'trading days' : 'days'}`;
 
 async function rateSetup(setups, useful, id) {
