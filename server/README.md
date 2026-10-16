@@ -11,8 +11,9 @@ The Trade app's helper on your OCI VM. It runs next to jobspy-service and:
 - scans the S&P 500 and the top 50 crypto on the daily chart every hour while
   the US market is open, plus once in the evening, and shows the best buy and
   sell ideas in the app's Signals tab;
-- trains two machine-learning models (LightGBM and an LSTM network) every
-  week and shares them with the app;
+- trains four machine-learning models per timeframe (LightGBM, an LSTM
+  network, and bottom and top finders) every week and shares them with the app;
+- tunes each symbol's buy and sell levels once a day (see the main README);
 - keeps your watchlist, holdings and alert settings in sync between phones.
 
 Scores come from the app's own JavaScript (`engine.mjs` runs copies of the
@@ -29,8 +30,9 @@ stop-loss hits.
 ## Machine learning
 
 Every week (`TRAIN_AT`, Sunday 03:00 by default), and soon after the first
-start or a change of alert timeframe, the service trains models for your alert
-timeframe and the daily chart. It learns from your watchlist and holdings plus
+start, the service trains models for every timeframe (15m, 1H, 1D and 1W), one
+at a time, your alert timeframe first. Yahoo Finance only has about a month of
+15-minute stock history, so 15m models may not pass their test. It learns from your watchlist and holdings plus
 a spread of S&P 500 stocks and top cryptos (`TRAIN_SYMBOLS`, 120 charts).
 The newest ~30% of that history tests the models; the app shows the result and
 only lets a model vote if it was right more than half the time on at least 200
@@ -148,7 +150,8 @@ With server alerts on, the app stops showing its own system notifications
 
 The watchlist and holdings are checked a minute after every candle of your
 alert timeframe closes (a new Buy or Sell can only appear then), and also every
-5 minutes (15m), 15 minutes (1H, 1D) or hour (1W) in between. Stop-losses and
+5 minutes (15m), 15 minutes (1H, 1D) or hour (1W) in between, and about 30
+seconds after you change a setting or your watchlist. Stop-losses and
 targets of holdings and paper trades are checked every minute. Checks run
 whether or not a phone has server alerts on, so paper trading never stops;
 alerts are only sent to phones that turned them on.

@@ -67,8 +67,8 @@ def test_split_is_by_time_and_drops_rows_that_see_the_test_period():
     cutoff, train, test = ml.split(data)
     assert cutoff == 70
     assert (test.t > cutoff).all() and len(test) == 2 * 29
-    assert train.t.max() == cutoff - ml.HORIZON
-    assert len(train) == 2 * (71 - ml.HORIZON)
+    assert train.t.max() == cutoff - ml.TURN_HORIZON
+    assert len(train) == 2 * (71 - ml.TURN_HORIZON)
     assert list(train.t) == sorted(train.t)
 
 
@@ -101,6 +101,13 @@ def test_training_scores_the_test_period_and_js_predicts_the_same(dataset):
     assert models["lgbm"]["features"] == dataset["features"] and models["lgbm"]["trees"]
     # The trending series are learnable: the trees should beat a coin flip.
     assert models["lgbm"]["test"]["hit"] > 0.5
+    # Turning-point models: measured against how often the outcome happens anyway.
+    for name in ml.TURN_MODELS:
+        m = models[name]
+        assert m["trees"] and m["stopAtr"] == 2 and m["takeAtr"] == 3
+        assert 0 <= m["test"]["base"] <= 1 and "usable" in m["test"]
+        assert m["test"]["usable"] == (m["test"]["n"] >= ml.MIN_N and m["test"]["hit"] >= m["test"]["base"] + ml.TURN_EDGE)
+    assert ml.summary(models)["bottom"] == models["bottom"]["test"]
 
     # The phone and the server run the exported JSON in JavaScript; it must match Python.
     idx = list(range(len(data) - 200, len(data)))
@@ -145,7 +152,7 @@ def test_train_run_trains_each_timeframe_and_resets_weights(monkeypatch):
         return {"tf": job["tf"], "lgbm": {"hit": 0.55}}
 
     res = service.run_train("manual", trainer=trainer)
-    assert [j["tf"] for j in jobs] == ["1D", "1h"]
+    assert [j["tf"] for j in jobs] == ["1h", "1D", "15m", "1W"]  # every timeframe, the alert one first
     assert jobs[0]["items"] == [{"type": "stock", "symbol": "AAPL", "name": "AAPL"}] and jobs[0]["total"] == service.TRAIN_SYMBOLS
     assert res["1h"]["error"] == "Yahoo down" and res["1D"]["lgbm"]["hit"] == 0.55
     st = service.load_state()
@@ -169,6 +176,10 @@ def test_training_schedule(monkeypatch):
     service.update_state(lambda st: st.update(lastTrainSlot=slot, training={"lastRunAt": service.now_ms(), "results": {}}))
     assert service.train_due(service.load_state(), wed) is None  # failed just now: wait
     ml.save_models("1D", {"cutoff": 1})
+    service.update_state(lambda st: st.update(training={"lastRunAt": 0, "results": {}}))
+    assert service.train_due(service.load_state(), wed)  # other timeframes still have no models
+    for tf in ("15m", "1h", "1W"):
+        ml.save_models(tf, {"cutoff": 1})
     service.update_state(lambda st: st.update(training={"lastRunAt": 0, "results": {}}))
     assert service.train_due(service.load_state(), wed) is None  # has models, week not over
     assert service.train_due(service.load_state(), datetime(2026, 1, 11, 3, 5, tzinfo=tz)).startswith("2026-01-11T03:00")

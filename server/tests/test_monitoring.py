@@ -42,6 +42,7 @@ def test_watch_runs_right_after_each_candle_close():
     assert not service.candle_closed_since("15m", base + 2 * m, base + 4 * m)
     service.set_profile(PROFILE)
     st = service.load_state()
+    st["watchSoonAt"] = None  # the check asked for by the new profile is tested below
     st["watch"]["lastRunAt"] = base + 2 * m
     assert not service.watch_due(st, base + 4 * m)
     assert service.watch_due(st, base + 7 * m + 1)  # 5 minutes passed (15m chart)
@@ -106,3 +107,38 @@ def test_paper_reset_and_hourly_scans():
     assert c.get("/paper").status_code == 401
     times = service.scan_times()
     assert len([t for t in times if "10:00" <= t <= "16:00"]) == 6  # hourly while the market is open
+
+
+def test_a_change_gets_checked_within_a_minute(monkeypatch):
+    now = [1_800_000_000_000]
+    monkeypatch.setattr(service, "now_ms", lambda: now[0])
+    service.set_profile(PROFILE)
+    st = service.load_state()
+    assert st["watchSoonAt"] == now[0] + service.WATCH_SOON_MS
+    st["watch"]["lastRunAt"] = now[0]
+    assert not service.watch_due(st, now[0] + 10_000)
+    assert service.watch_due(st, now[0] + service.WATCH_SOON_MS)
+    # Saving the same profile again (or only quiet hours) asks for nothing new.
+    service.update_state(lambda s: s.update(watchSoonAt=None))
+    service.set_profile({**PROFILE, "settings": {**PROFILE["settings"], "quietHours": True}})
+    assert service.load_state()["watchSoonAt"] is None
+    service.set_profile({**PROFILE, "settings": {**PROFILE["settings"], "tune": "manual"}})
+    assert service.load_state()["watchSoonAt"] == now[0] + service.WATCH_SOON_MS
+
+    # A run clears the ask, unless a newer change came in while it ran.
+    def engine(job, timeout):
+        return {"signals": {}, "alerts": [], "weights": {}, "holdingsAlerted": {}, "errors": {}, "paper": None, "paperEvents": []}
+    now[0] += service.WATCH_SOON_MS
+    service.run_watch(engine=engine)
+    assert service.load_state()["watchSoonAt"] is None
+
+
+def test_profile_tuning_settings_and_training_every_timeframe():
+    p = service.set_profile(PROFILE)
+    assert p["settings"]["tune"] == "auto" and p["settings"]["mode"] == "standard"
+    p = service.set_profile({**PROFILE, "settings": {**PROFILE["settings"], "tune": "manual", "mode": "dip"}})
+    assert p["settings"]["tune"] == "manual" and p["settings"]["mode"] == "dip"
+    assert service.engine_settings(p)["mode"] == "dip"
+    assert service.train_timeframes(p) == ["15m", "1D", "1W", "1h"]
+    p["settings"]["alertTf"] = "1h"
+    assert service.train_timeframes(p) == ["1h", "1D", "15m", "1W"]

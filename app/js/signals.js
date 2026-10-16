@@ -333,8 +333,34 @@ export function scoreHistory(S, { from = 0, weights } = {}) {
   return S.candles.map((_, i) => (i < Math.max(from, MIN_CANDLES - 1) ? NaN : scoreAt(S, i, weights)));
 }
 
-export function actionFor(score, thresholds = DEFAULT_THRESHOLDS) {
-  return score >= thresholds.buy ? 'buy' : score <= thresholds.sell ? 'sell' : 'hold';
+// How the score becomes Buy, Sell or Hold. `rule` is { buy, sell, mode }:
+// - 'standard': Buy at or above `buy`, Sell at or below `sell`.
+// - 'dip' (buy the dip in an uptrend): Buy only in an uptrend right after a
+//   pullback (RSI or Stochastic oversold in the last 5 candles); Sell when the
+//   score falls to `sell` or the price closes below its 200-candle average.
+// `ctx` comes from contextAt() and is only needed for 'dip'.
+export const MODES = { standard: 'Standard', dip: 'Buy the dip in an uptrend' };
+const PULLBACK_CANDLES = 5;
+
+export function actionFor(score, rule = DEFAULT_THRESHOLDS, ctx = null) {
+  if (rule.mode === 'dip') {
+    if (!ctx) return 'hold';
+    if (score <= rule.sell || ctx.belowTrend) return 'sell';
+    return ctx.uptrend && ctx.pulledBack && score >= rule.buy ? 'buy' : 'hold';
+  }
+  return score >= rule.buy ? 'buy' : score <= rule.sell ? 'sell' : 'hold';
+}
+
+// The trend facts the 'dip' mode needs at candle i.
+export function contextAt(S, i) {
+  const m200 = S.sma200[i];
+  const m50 = S.sma50[i];
+  if (!ok(m200) || !ok(m50)) return { uptrend: false, pulledBack: false, belowTrend: false };
+  let pulledBack = false;
+  for (let k = Math.max(0, i - PULLBACK_CANDLES + 1); k <= i && !pulledBack; k++) {
+    pulledBack = (ok(S.rsi[k]) && S.rsi[k] <= 35) || (ok(S.stoch.k[k]) && S.stoch.k[k] <= 20);
+  }
+  return { uptrend: S.close[i] > m200 && m50 > m200, pulledBack, belowTrend: S.close[i] < m200 };
 }
 
 // The full read-out for one candle: score, action, agreement and trade levels.
@@ -342,7 +368,10 @@ export function signalAt(S, i = S.candles.length - 1, { thresholds = DEFAULT_THR
   const votes = votesAt(S, i);
   if (!votes.length) return null;
   const score = scoreVotes(votes, weights);
-  const dir = sign(score);
+  const ctx = contextAt(S, i);
+  const action = actionFor(score, thresholds, ctx);
+  // In 'dip' mode a Buy can come with a modest score; its levels are a buy's.
+  const dir = action === 'buy' ? 1 : action === 'sell' ? -1 : sign(score);
   const active = votes.filter(v => v.vote !== 0);
   const agree = active.filter(v => sign(v.vote) === dir).length;
   const entry = S.close[i];
@@ -351,7 +380,9 @@ export function signalAt(S, i = S.candles.length - 1, { thresholds = DEFAULT_THR
   return {
     time: S.candles[i].time,
     score,
-    action: actionFor(score, thresholds),
+    action,
+    ctx,
+    rule: { buy: thresholds.buy, sell: thresholds.sell, mode: thresholds.mode || 'standard' },
     confidence: active.length && dir ? agree / active.length : 0,
     entry,
     atr,
@@ -362,13 +393,14 @@ export function signalAt(S, i = S.candles.length - 1, { thresholds = DEFAULT_THR
   };
 }
 
-// Candles where the score crossed into buy or sell territory, for chart markers.
-export function crossings(scores, thresholds = DEFAULT_THRESHOLDS) {
+// Candles where the action turned to buy or sell, for chart markers.
+// `S` is needed for the 'dip' mode.
+export function crossings(scores, thresholds = DEFAULT_THRESHOLDS, S = null) {
   const out = [];
   let prev = 'hold';
   scores.forEach((s, i) => {
     if (!ok(s)) return;
-    const a = actionFor(s, thresholds);
+    const a = actionFor(s, thresholds, S ? contextAt(S, i) : null);
     if (a !== prev && a !== 'hold') out.push({ i, action: a, score: s });
     prev = a;
   });

@@ -15,7 +15,7 @@ function series(n, drift, vol = 0.02, seed = 42) {
   });
 }
 
-const settings = { buyAt: 40, sellAt: -40, stopAtr: 2, takeAtr: 3, twelveKey: '' };
+const settings = { tune: 'manual', buyAt: 40, sellAt: -40, stopAtr: 2, takeAtr: 3, twelveKey: '' };
 
 function deps(map, extra = {}) {
   const get = item => {

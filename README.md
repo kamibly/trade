@@ -36,6 +36,8 @@ them to another phone.
 | 3 | Backtest, portfolio, stop-loss and take-profit, paper trading | Done |
 | 4 | OCI alert service: notifications when the app is closed, scanner | Done |
 | 5 | Machine learning (LightGBM, LSTM) on the server | Done |
+| 6 | Continuous server monitoring and server paper trading | Done |
+| 7 | Levels tuned per symbol, dip mode, turning-point models | Done |
 
 ## How signals work
 
@@ -52,17 +54,40 @@ so a group with many methods can't outvote the rest.
 | Price structure | Support and resistance, Fibonacci retracement, pivot points, candlestick patterns |
 | Statistical forecasts | Linear regression, Holt-Winters smoothing, ARIMA(3,1,0), Monte Carlo (GBM), Hurst exponent |
 
-A score of +40 or more is a buy and -40 or less a sell (both adjustable in
-Settings). On random-walk prices the score stays within ±30 99% of the time,
-while steady trends reach 35 to 50. Each signal suggests a stop-loss 2 × ATR
-and a target 3 × ATR from the entry. Volume methods drop out when a source
-has no volume (CoinGecko backup).
+Each signal suggests a stop-loss 2 × ATR and a target 3 × ATR from the entry.
+Volume methods drop out when a source has no volume (CoinGecko backup).
+
+### Buy and sell levels
+
+There are two ways to turn the score into Buy and Sell:
+
+- **Standard:** Buy at the buy level or more, Sell at the sell level or less.
+- **Buy the dip in an uptrend:** Buy only while the price is above its
+  200-candle average and the 50 is above the 200, right after a pullback (RSI at
+  35 or less, or Stochastic at 20 or less, in the last 5 candles), once the score
+  reaches the buy level. Sell at the sell level, or when the price closes below
+  its 200 average. No Buys in a downtrend.
+
+**Auto** (the default) tunes each symbol once a day: on the older 60% of its
+history it tries both ways and buy levels from +15 to +60 and sell levels from
+-15 to -60, trading them with the stop and target, and keeps the one with the
+best return less half its worst drop (at least 3 trades). The newer 40%, which
+the tuning never saw, then shows whether it holds up: each signal reads, for
+example, "Tuned: Buy +25, Sell -30, dip mode · test +8% vs +3% standard".
+**Manual** uses your own levels and way for every symbol (+40 and -40, standard,
+by default). On random-walk prices the score stays within ±30 99% of the time,
+while steady trends reach 35 to 50.
+
+No method calls exact bottoms and tops while they happen: those are only
+certain in hindsight, and every mark on the chart is computed only from the
+candles before it, as it would have looked live.
 
 ## Machine learning
 
-With your server connected, a seventh group joins the vote: two models your
-server trains every week (Sunday 03:00 by default) on your symbols plus a
-spread of S&P 500 stocks and top cryptos, about 120 charts:
+With your server connected, a seventh group joins the vote: models your
+server trains every week (Sunday 03:00 by default) for every timeframe (15m,
+1H, 1D and 1W) on your symbols plus a spread of S&P 500 stocks and top
+cryptos, about 120 charts:
 
 - **LightGBM** (gradient-boosted trees) reads the 30 method votes and a few
   indicator values (recent returns, ATR, RSI, ADX, distance from the 50 and
@@ -70,10 +95,19 @@ spread of S&P 500 stocks and top cryptos, about 120 charts:
 - **LSTM** (a small neural network) reads the last 32 candles' moves and
   volume changes.
 
-Both predict whether the price is higher after fees 10 candles later. The
-oldest ~70% of the history trains them and the newest ~30% tests them; a model
-votes only if it was right more than half the time on at least 200 clear test
-calls, and only on candles after its training period, so its backtest is out of
+Both predict whether the price is higher after fees 10 candles later. Two
+more LightGBM models look for turning points:
+
+- **Bottom finder:** would a buy here have reached its target (+3 ATR) before
+  its stop (-2 ATR) within 30 candles?
+- **Top finder:** would the price have fallen 3 ATR before rising 2 ATR?
+
+They only push the score their way ("not a bottom" is no reason to sell).
+
+The oldest ~70% of the history trains the models and the newest ~30% tests them.
+LightGBM and the LSTM vote only if right more than half the time on at least
+200 clear test calls; the finders, only if right at least 3 points more often
+than their outcome happens anyway. All of them vote and only on candles after its training period, so its backtest is out of
 sample too. The phone downloads the models and runs them itself, so charts
 and the in-app scanner use them as well. The chart's "Machine-learning models"
 card shows each model's test result and whether it votes.

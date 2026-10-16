@@ -93,6 +93,7 @@ def _empty_state() -> dict:
         "paper": None,            # the paper-trading account (runs here, shown in the app)
         "paperEvents": [],        # its latest buys and sells
         "prices": {"lastRunAt": None, "values": {}, "errors": {}},
+        "watchSoonAt": None,      # a check asked for after a settings or watchlist change
     }
 
 
@@ -186,6 +187,8 @@ def clean_profile(raw: dict) -> dict:
         "holdings": holdings,
         "settings": {
             "alertTf": tf,
+            "tune": "manual" if s.get("tune") == "manual" else "auto",
+            "mode": "dip" if s.get("mode") == "dip" else "standard",
             "buyAt": buy,
             "sellAt": sell,
             "stopAtr": _num(s.get("stopAtr"), 2, 0.5, 10),
@@ -198,10 +201,24 @@ def clean_profile(raw: dict) -> dict:
     }
 
 
+WATCH_SOON_MS = 30_000  # after a change, wait for the phone's other edits before checking
+
+
+def _signal_inputs(profile: Optional[dict]):
+    """What a watch run's signals depend on: the symbols and the settings."""
+    if not profile:
+        return None
+    keys = sorted(f"{i['type']}:{i['symbol']}" for i in profile["watchlist"] + profile["holdings"])
+    return keys, {k: v for k, v in profile["settings"].items() if k != "quietHours"}
+
+
 def set_profile(raw: dict) -> dict:
     profile = clean_profile(raw)
 
     def apply(state):
+        # A new symbol or setting gets checked within a minute, not at the next scheduled run.
+        if _signal_inputs(state.get("profile")) != _signal_inputs(profile):
+            state["watchSoonAt"] = now_ms() + WATCH_SOON_MS
         # Alerts already sent for a holding stay sent, whichever side last saved it.
         old = {h["id"]: h.get("alerted", {}) for h in ((state.get("profile") or {}).get("holdings") or [])}
         for h in profile["holdings"]:
@@ -310,7 +327,7 @@ def run_engine(job: dict, timeout: int) -> dict:
 
 def engine_settings(profile: dict) -> dict:
     s = profile["settings"]
-    return {"buyAt": s["buyAt"], "sellAt": s["sellAt"], "stopAtr": s["stopAtr"], "takeAtr": s["takeAtr"], "twelveKey": TWELVE_DATA_KEY}
+    return {"tune": s["tune"], "mode": s["mode"], "buyAt": s["buyAt"], "sellAt": s["sellAt"], "stopAtr": s["stopAtr"], "takeAtr": s["takeAtr"], "twelveKey": TWELVE_DATA_KEY}
 
 
 def watch_items(profile: dict) -> List[dict]:
@@ -332,6 +349,7 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
         profile = state.get("profile")
         if not profile:
             return None
+        started = now_ms()
         tf = profile["settings"]["alertTf"]
         items = watch_items(profile)
         keys = {f"{i['type']}:{i['symbol']}:{tf}" for i in items}
@@ -351,7 +369,10 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
             result = engine(job, 600)
         except Exception as e:
             logger.exception("Watch run failed")
-            update_state(lambda st: st["watch"].update(lastRunAt=now_ms(), errors={"engine": str(e)}))
+            def failed(st):
+                st["watch"].update(lastRunAt=now_ms(), errors={"engine": str(e)})
+                clear_watch_soon(st, started)
+            update_state(failed)
             return None
         sent = deliver(result["alerts"], profile["settings"]["quietHours"])
 
@@ -371,6 +392,7 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
                 "sent": sent,
             }
             save_paper(st, result)
+            clear_watch_soon(st, started)
 
         update_state(apply)
         return result
@@ -518,8 +540,10 @@ def model_summaries() -> Dict[str, dict]:
 
 
 def train_timeframes(profile: dict) -> List[str]:
-    """The alert timeframe and the daily chart the market scan uses."""
-    return sorted({profile["settings"]["alertTf"], "1D"})
+    """Every timeframe, so any chart gets ML votes. The alert timeframe trains
+    first, then the daily chart the market scan uses."""
+    first = [profile["settings"]["alertTf"], "1D"]
+    return list(dict.fromkeys(first + sorted(TIMEFRAMES)))
 
 
 def run_ml(job: dict, timeout: int) -> dict:
@@ -646,11 +670,20 @@ def candle_closed_since(tf: str, last: int, now: int) -> bool:
     return (now - CLOSE_DELAY_MS) // step > (last - CLOSE_DELAY_MS) // step
 
 
+def clear_watch_soon(st: dict, started: int) -> None:
+    """A run answers the asked-for check, unless the ask came in after the run started."""
+    if (st.get("watchSoonAt") or 0) <= started + WATCH_SOON_MS:
+        st["watchSoonAt"] = None
+
+
 def watch_due(state: dict, now: int) -> bool:
-    """Right after each candle of the alert timeframe closes, and every few minutes in between."""
+    """Right after each candle of the alert timeframe closes, every few minutes
+    in between, and shortly after the watchlist or settings change."""
     profile = state.get("profile")
     if not profile:
         return False
+    if state.get("watchSoonAt") and now >= state["watchSoonAt"]:
+        return True
     tf = profile["settings"]["alertTf"]
     every = WATCH_EVERY.get(tf, 15) * 60_000
     last = state["watch"].get("lastRunAt") or 0

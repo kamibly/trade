@@ -1,12 +1,17 @@
 """
 Weekly machine-learning training for trade-service.
 
-Two models per timeframe, both predicting whether the price is up by more than
+Four models per timeframe. Two predict whether the price is up by more than
 the round-trip fee 10 candles later:
 
 - LightGBM (gradient-boosted trees) on the 30 method votes plus a few
   indicator features;
 - a small LSTM neural network on the last 32 candles' moves and volume.
+
+Two more LightGBM models find turning points: "bottom" learns whether a buy
+here reaches its target before its stop (the app's stop and target, in ATRs),
+"top" whether the price falls to a target before rising to a stop. They must
+beat how often that happens anyway by TURN_EDGE to vote.
 
 The data comes from engine.mjs (mode "dataset"), so the features are computed
 by the same JavaScript the phone runs. Rows are split by time: the oldest ~70%
@@ -32,6 +37,9 @@ from typing import List, Optional
 import service
 
 HORIZON = 10
+TURN_HORIZON = 30         # candles the turning-point labels look ahead (app/js/ml.js)
+TURN_EDGE = 0.03
+TURN_MODELS = ("bottom", "top")
 FEE = 0.001
 MIN_VOTE = 0.3            # the backtest's "clear opinion": |vote| >= 0.3
 MIN_HIT, MIN_N = 0.5, 200
@@ -72,31 +80,46 @@ def save_models(tf: str, models: dict) -> None:
 class Data:
     """Engine rows as compact arrays (lists of dicts would need several times the memory)."""
 
-    def __init__(self, keys, t, x, seq, y, ret):
+    def __init__(self, keys, t, x, seq, y, ret, yb=None, yt=None):
+        import numpy as np
         self.keys, self.t, self.x, self.seq, self.y, self.ret = keys, t, x, seq, y, ret
+        # Turning-point labels; NaN where the outcome isn't known yet.
+        nan = lambda: np.full(len(t), np.nan, dtype=np.float32)
+        self.bottom = yb if yb is not None else nan()
+        self.top = yt if yt is not None else nan()
 
     def __len__(self):
         return len(self.t)
 
     def take(self, idx) -> "Data":
-        return Data(self.keys[idx], self.t[idx], self.x[idx], self.seq[idx], self.y[idx], self.ret[idx])
+        return Data(self.keys[idx], self.t[idx], self.x[idx], self.seq[idx], self.y[idx], self.ret[idx],
+                    self.bottom[idx], self.top[idx])
+
+    def labelled(self, target: str) -> "Data":
+        """Only the rows whose `target` label is known."""
+        import numpy as np
+        return self.take(np.flatnonzero(np.isfinite(getattr(self, target))))
 
 
 def to_data(rows) -> Data:
     """Builds the arrays from an iterable of engine rows, one row at a time."""
     import numpy as np
-    keys, t, x, seq, y, ret = [], [], [], [], [], []
+    keys, t, x, seq, y, ret, yb, yt = [], [], [], [], [], [], [], []
+    num = lambda v: math.nan if v is None else v
     for r in rows:
         keys.append(r["key"])
         t.append(r["t"])
-        x.append(np.array([math.nan if v is None else v for v in r["x"]], dtype=np.float64))
+        x.append(np.array([num(v) for v in r["x"]], dtype=np.float64))
         seq.append(np.array(r["seq"], dtype=np.float32))
         y.append(r["y"])
         ret.append(r["ret"])
+        yb.append(num(r.get("yb")))
+        yt.append(num(r.get("yt")))
     if not t:
         return Data(np.array([], dtype=object), np.array([], dtype=np.int64), np.zeros((0, 0)), np.zeros((0, 0, 2), dtype=np.float32), np.array([], dtype=np.float32), np.array([]))
     return Data(np.array(keys, dtype=object), np.array(t, dtype=np.int64), np.stack(x), np.stack(seq),
-                np.array(y, dtype=np.float32), np.array(ret, dtype=np.float64))
+                np.array(y, dtype=np.float32), np.array(ret, dtype=np.float64),
+                np.array(yb, dtype=np.float32), np.array(yt, dtype=np.float32))
 
 
 def load_dataset(job: dict, timeout: int = 3000):
@@ -125,8 +148,8 @@ def load_dataset(job: dict, timeout: int = 3000):
 def split(data: Data):
     """Train and test rows by a time cutoff shared by every symbol.
 
-    The last HORIZON train rows of each symbol are dropped: their labels look
-    past the cutoff, into the test period.
+    The last TURN_HORIZON train rows of each symbol are dropped: their labels
+    look past the cutoff, into the test period.
     """
     import numpy as np
     times = np.sort(data.t)
@@ -138,7 +161,7 @@ def split(data: Data):
     train = []
     for idx in by_key.values():
         idx.sort(key=lambda i: data.t[i])
-        train.extend(idx[:-HORIZON])
+        train.extend(idx[:-TURN_HORIZON])
     train = np.array(sorted(train, key=lambda i: data.t[i]), dtype=np.int64)
     test = np.flatnonzero(data.t > cutoff)
     return cutoff, data.take(train), data.take(test)
@@ -208,7 +231,20 @@ def outcomes(probs, ret, cal: dict) -> List[dict]:
 
 
 def usable(test: dict) -> bool:
+    if "base" in test:
+        return test["n"] >= MIN_N and test["hit"] >= test["base"] + TURN_EDGE
     return test["hit"] > MIN_HIT and test["n"] >= MIN_N
+
+
+def turn_test(probs, labels, cal: dict) -> dict:
+    """A turning-point model's clear calls (vote >= 0.3): how often the outcome
+    followed (hit), next to how often it happens anyway (base)."""
+    import numpy as np
+    v, labels = votes_of(probs, cal), np.asarray(labels, dtype=np.float64)
+    clear = v >= MIN_VOTE
+    n = int(clear.sum())
+    return {"hit": round(float(labels[clear].mean()), 4) if n else 0, "n": n, "rows": int(len(labels)),
+            "base": round(float(labels.mean()), 4) if len(labels) else 0}
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +283,7 @@ def export_lgbm(booster, features: List[str], num_iteration: int) -> dict:
     return {"init": 0, "features": features, "trees": [export_tree(t["tree_structure"]) for t in dump["tree_info"]]}
 
 
-def train_lgbm(train: Data, features: List[str]):
+def train_lgbm(train: Data, features: List[str], target: str = "y"):
     import lightgbm as lgb
     fit, valid = valid_split(train)
     params = {
@@ -255,8 +291,8 @@ def train_lgbm(train: Data, features: List[str]):
         "feature_fraction": 0.8, "bagging_fraction": 0.8, "bagging_freq": 1, "lambda_l2": 1.0,
         "verbose": -1, "seed": SEED, "num_threads": 2,
     }
-    dfit = lgb.Dataset(fit.x, label=fit.y)
-    dvalid = lgb.Dataset(valid.x, label=valid.y, reference=dfit)
+    dfit = lgb.Dataset(fit.x, label=getattr(fit, target))
+    dvalid = lgb.Dataset(valid.x, label=getattr(valid, target), reference=dfit)
     booster = lgb.train(params, dfit, num_boost_round=300, valid_sets=[dvalid],
                         callbacks=[lgb.early_stopping(30, verbose=False)])
     best = booster.best_iteration or booster.current_iteration()
@@ -348,8 +384,9 @@ def train_lstm(train: Data, epochs: int = 15):
 # Whole run
 # ---------------------------------------------------------------------------
 
-def train_models(data: Data, features: List[str], tf: str, symbols: Optional[int] = None, now: Optional[int] = None) -> dict:
-    """Trains both models and returns what's saved."""
+def train_models(data: Data, features: List[str], tf: str, symbols: Optional[int] = None, now: Optional[int] = None,
+                 stop_atr: float = 2, take_atr: float = 3) -> dict:
+    """Trains the four models and returns what's saved."""
     import numpy as np
     if not len(data):
         raise ValueError("No training data (no charts could be loaded)")
@@ -373,7 +410,20 @@ def train_models(data: Data, features: List[str], tf: str, symbols: Optional[int
     lstm["test"] = hit_rate(p_test, test.ret, lstm)
     lstm["outcomes"] = outcomes(p_test, test.ret, lstm)
 
-    for m in (lgbm, lstm):
+    turns = {}
+    for name in TURN_MODELS:
+        tr, te = train.labelled(name), test.labelled(name)
+        if len(tr) < MIN_TRAIN_ROWS or len(te) < MIN_TEST_ROWS:
+            continue
+        _, tvalid = valid_split(tr)
+        booster, best, m = train_lgbm(tr, features, name)
+        m.update(calibrate(booster.predict(tvalid.x, num_iteration=best)))
+        m["test"] = turn_test(booster.predict(te.x, num_iteration=best), getattr(te, name), m)
+        m.update({"stopAtr": stop_atr, "takeAtr": take_atr})
+        turns[name] = m
+        del booster
+
+    for m in (lgbm, lstm, *turns.values()):
         m["test"]["usable"] = usable(m["test"])
     return {
         "tf": tf,
@@ -384,6 +434,7 @@ def train_models(data: Data, features: List[str], tf: str, symbols: Optional[int
         "testRows": len(test),
         "lgbm": lgbm,
         "lstm": lstm,
+        **turns,
     }
 
 
@@ -393,7 +444,7 @@ def summary(models: Optional[dict]) -> Optional[dict]:
         return None
     keep = ("tf", "cutoff", "trainedAt", "symbols", "trainRows", "testRows")
     out = {k: models.get(k) for k in keep}
-    for name in ("lgbm", "lstm"):
+    for name in ("lgbm", "lstm", *TURN_MODELS):
         out[name] = (models.get(name) or {}).get("test")
     return out
 
@@ -402,7 +453,9 @@ def main() -> None:
     job = json.load(sys.stdin)
     started = time.time()
     header, data = load_dataset(job)
-    models = train_models(data, header["features"], job["tf"], header.get("symbols"))
+    settings = job.get("settings") or {}
+    models = train_models(data, header["features"], job["tf"], header.get("symbols"),
+                          stop_atr=settings.get("stopAtr", 2), take_atr=settings.get("takeAtr", 3))
     save_models(job["tf"], models)
     out = summary(models)
     out["seconds"] = round(time.time() - started)

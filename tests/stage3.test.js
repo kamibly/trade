@@ -143,7 +143,7 @@ test('scanner learns weights once and reuses them', async () => {
     saveCandles: () => {},
     fetchCandles: async () => { throw new Error('no network'); },
     getWeight: () => saved.w || null,
-    saveWeight: (item, tf, weights) => { learned++; saved.w = { at: Date.now(), weights }; },
+    saveWeight: (item, tf, l) => { learned++; saved.w = { at: Date.now(), ...l }; },
   };
   const item = { type: 'crypto', symbol: 'BTC' };
   const a = await scanItem(item, '1D', {}, DEFAULT_THRESHOLDS, deps);

@@ -129,9 +129,26 @@
             <option value="1W">1 week (long term)</option>
           </select>
         </label>
-        <div class="row two">
-          <label class="field"><span>Buy at score of at least</span><input id="buy-at" type="number" inputmode="numeric" min="10" max="100" step="5"></label>
-          <label class="field"><span>Sell at score of at most minus</span><input id="sell-at" type="number" inputmode="numeric" min="10" max="100" step="5"></label>
+        <label class="field">
+          <span>Buy and sell levels</span>
+          <select id="tune-mode">
+            <option value="auto">Auto: tuned for each symbol</option>
+            <option value="manual">Manual: my levels for every symbol</option>
+          </select>
+        </label>
+        <p id="tune-note" class="muted small"></p>
+        <div id="manual-levels">
+          <label class="field">
+            <span>How to read the score</span>
+            <select id="signal-mode">
+              <option value="standard">Standard: buy high scores, sell low ones</option>
+              <option value="dip">Buy the dip in an uptrend</option>
+            </select>
+          </label>
+          <div class="row two">
+            <label class="field"><span>Buy at score of at least</span><input id="buy-at" type="number" inputmode="numeric" min="10" max="100" step="5"></label>
+            <label class="field"><span>Sell at score of at most minus</span><input id="sell-at" type="number" inputmode="numeric" min="10" max="100" step="5"></label>
+          </div>
         </div>
         <p id="alert-status" class="small" role="status"></p>
         <button type="button" id="notify-btn" class="primary">Turn on notifications</button>
