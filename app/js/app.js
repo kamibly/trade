@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.8.0 (opportunities)';
+export const APP_VERSION = '0.8.1 (opportunities)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -794,11 +794,33 @@ function setupReport(m) {
     info.secContact === false ? el('p', { class: 'small', text: 'Insider buying and earnings dates need SEC_CONTACT (your email) in the server\'s compose file.' }) : null);
 }
 
+async function runMarketNow(button) {
+  button.disabled = true;
+  try {
+    await srv.serverFetch(state.settings, '/run', { method: 'POST', body: { what: 'market' } });
+    button.textContent = 'Scanning on your server; this takes a few minutes';
+    // Check back for the result while the scan runs.
+    for (const wait of [3, 6, 10, 15]) setTimeout(() => refreshMarket({ force: true }), wait * 60_000);
+  } catch (e) {
+    button.disabled = false;
+    toast(e.message);
+  }
+}
+
 function renderOpportunities() {
   const body = $('opps-body');
   const m = state.market;
-  if (!serverOn() || !m || !m.at || !m.records) {
+  if (!serverOn()) {
     body.replaceChildren();
+    return;
+  }
+  // A scan from before the server had the setups (or none yet): say when they arrive.
+  if (!m || !m.at || !m.records) {
+    const failed = m && m.error ? ` The last scan failed: ${m.error}` : '';
+    body.replaceChildren(
+      el('h2', { class: 'section', text: 'Opportunities' }),
+      el('p', { class: 'muted small', text: `Your server finds opportunities in its market scan, which runs every hour while the US market is open and at 20:00. They appear here after its next scan.${failed}` }),
+      el('button', { type: 'button', class: 'ghost', text: 'Run the market scan now', onclick: e => runMarketNow(e.currentTarget) }));
     return;
   }
   const opps = m.opportunities || [];
