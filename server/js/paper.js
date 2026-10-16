@@ -94,8 +94,10 @@ export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now() }
     // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
     const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
     const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id });
+    // Without the cash to buy it, the idea is tried again next scan.
+    if (!ev) continue;
     acc.taken.push(o.id);
-    if (ev) events.push(ev);
+    events.push(ev);
   }
   if (acc.taken.length > 300) acc.taken.splice(0, acc.taken.length - 300);
   if (events.length) mark(acc, prices, now);

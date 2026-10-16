@@ -204,3 +204,16 @@ test('paper takes the market scan buy ideas and sells them when a later scan say
   assert.equal(later.paper.trades[0].reason, 'sell signal');
   assert.deepEqual(later.paper.positions.map(p => p.key), ['stock:BBB']);
 });
+
+test('an idea the paper account had no cash for is tried again later', async () => {
+  const paper = await import('../app/js/paper.js');
+  const acc = paper.newAccount(1000, 0);
+  acc.cash = 0.5;
+  const idea = { id: 'scan:stock:AAPL:1', setup: 'scan', key: 'stock:AAPL', symbol: 'AAPL', type: 'stock', entry: 100, stop: 95, take: 110, ev: 0.5 };
+  assert.equal(paper.openSetups(acc, [idea], { now: 1 }).length, 0);
+  assert.deepEqual(acc.taken, []);
+  acc.cash = 1000;
+  assert.equal(paper.openSetups(acc, [idea], { now: 2 }).length, 1);
+  assert.deepEqual(acc.taken, ['scan:stock:AAPL:1']);
+  assert.equal(paper.openSetups(acc, [idea], { now: 3 }).length, 0); // once per idea
+});
