@@ -43,13 +43,17 @@ KEEP_DAYS = 800             # insider history kept (2 years plus the 30-day wind
 QUARTERS = 8                # quarterly insider data sets loaded (2 years)
 DAILY_EVERY_S = 20 * 3600   # per-company SEC data and the Nasdaq calendar
 CALENDAR_DAYS = 14          # how far ahead the Nasdaq calendar is read
-SEC_GAP_S = 0.12            # under the SEC's 10 requests a second
+SEC_GAP_S = 0.2             # 5 a second, well under the SEC's limit of 10
 
 # Coins with a Kraken perpetual (Kraken calls Bitcoin XBT).
 FUNDING_COINS = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "LINK", "DOT", "AVAX", "BCH", "XLM", "ATOM", "UNI", "TRX", "NEAR", "FIL", "AAVE"]
 KRAKEN_NAME = {"BTC": "XBT"}
 
-FORM345_URL = "https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/{y}q{q}_form345.zip"
+# The SEC moved the data sets from 2026q2 on; older quarters stay at the first address.
+FORM345_URLS = [
+    "https://www.sec.gov/files/datastandardsinnovation/data/insider-transactions-data-sets/{y}q{q}_form345.zip",
+    "https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/{y}q{q}_form345.zip",
+]
 DAILY_INDEX_URL = "https://www.sec.gov/Archives/edgar/daily-index/{y}/QTR{q}/form.{d}.idx"
 ARCHIVE_URL = "https://www.sec.gov/Archives/{path}"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
@@ -68,15 +72,35 @@ class NotFound(Exception):
     pass
 
 
+class Blocked(RuntimeError):
+    """The SEC is limiting our requests; stop and try again next hour."""
+
+
+def _http_error(url: str, e: urllib.error.HTTPError) -> Exception:
+    # sec.gov answers 403, not 404, for a file that doesn't exist (a holiday's
+    # index, say); its rate limit is a 403 page that says so.
+    if e.code == 404:
+        return NotFound(url)
+    if e.code == 403 and "sec.gov" in url:
+        try:
+            body = e.read(4000).decode("utf-8", "replace").lower()
+        except Exception:  # noqa: BLE001
+            body = ""
+        if "rate" in body or "automated" in body or "undeclared" in body:
+            return Blocked("the SEC is limiting requests; trying again next hour")
+        return NotFound(url)
+    if e.code == 429:
+        return Blocked(f"{urllib.parse.urlparse(url).netloc} is limiting requests")
+    return RuntimeError(f"{urllib.parse.urlparse(url).netloc} answered {e.code}")
+
+
 def http_get(url: str, headers: Optional[dict] = None, timeout: int = 30) -> bytes:
     req = urllib.request.Request(url, headers=headers or BROWSER_HEADERS)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as res:
             return res.read()
     except urllib.error.HTTPError as e:
-        if e.code == 404:
-            raise NotFound(url) from e
-        raise RuntimeError(f"{urllib.parse.urlparse(url).netloc} answered {e.code}") from e
+        raise _http_error(url, e) from e
 
 
 def http_download(url: str, path: str, headers: dict, timeout: int = 300) -> None:
@@ -86,9 +110,7 @@ def http_download(url: str, path: str, headers: dict, timeout: int = 300) -> Non
             while chunk := res.read(1 << 20):
                 f.write(chunk)
     except urllib.error.HTTPError as e:
-        if e.code == 404:
-            raise NotFound(url) from e
-        raise RuntimeError(f"SEC answered {e.code}") from e
+        raise _http_error(url, e) from e
 
 
 class Sec:
@@ -420,11 +442,20 @@ def refresh_insiders(folder: str, sec: Sec, ciks: Dict[int, str], today: date, n
         tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         tmp.close()
         try:
-            sec.download(FORM345_URL.format(y=qid[:4], q=qid[-1]), tmp.name)
+            for k, url in enumerate(FORM345_URLS):
+                try:
+                    sec.download(url.format(y=qid[:4], q=qid[-1]), tmp.name)
+                    break
+                except NotFound:
+                    if k == len(FORM345_URLS) - 1:
+                        raise
             _add_purchases(store, parse_form345(tmp.name, ciks), now)
             done_q.add(qid)
         except NotFound:
             errors.append(f"{qid} data set not published yet")
+        except Blocked as e:
+            errors.append(str(e))
+            break
         except Exception as e:  # noqa: BLE001 - one bad quarter shouldn't stop the rest
             errors.append(f"{qid}: {e}")
         finally:
@@ -446,6 +477,8 @@ def refresh_insiders(folder: str, sec: Sec, ciks: Dict[int, str], today: date, n
                 for row in {r["path"]: r for r in parse_daily_index(text) if r["cik"] in ciks}.values():
                     try:
                         f4 = parse_form4(sec.get(ARCHIVE_URL.format(path=row["path"])).decode("utf-8", "replace"))
+                    except Blocked:
+                        raise  # the day stays to do, so no filing is skipped
                     except Exception as e:  # noqa: BLE001
                         logger.info("Form 4 %s: %s", row["path"], e)
                         continue
@@ -458,6 +491,9 @@ def refresh_insiders(folder: str, sec: Sec, ciks: Dict[int, str], today: date, n
                 # Weekends and holidays have no index; today's appears in the evening.
                 if (today - d).days >= 4:
                     done_days.add(key)
+            except Blocked as e:
+                errors.append(str(e))
+                break
             except Exception as e:  # noqa: BLE001
                 errors.append(f"index {key}: {e}")
         d += timedelta(days=1)

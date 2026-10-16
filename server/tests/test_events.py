@@ -293,3 +293,58 @@ def test_events_run_warns_once_before_earnings(monkeypatch):
     assert sent == []
     st = service.load_state()
     assert st["events"]["lastRunAt"] and not service.events_due(st, service.now_ms())
+
+
+def test_sec_answers_403_for_missing_files_and_for_its_rate_limit():
+    import io
+    import urllib.error
+
+    def err(code, body, url="https://www.sec.gov/Archives/edgar/daily-index/2026/QTR3/form.20260907.idx"):
+        return events._http_error(url, urllib.error.HTTPError(url, code, "x", {}, io.BytesIO(body)))
+
+    assert isinstance(err(403, b"<Error><Code>AccessDenied</Code></Error>"), events.NotFound)  # Labor Day: no index
+    assert isinstance(err(403, b"Your Request Originated from an Undeclared Automated Tool"), events.Blocked)
+    assert isinstance(err(403, b"Request Rate Threshold Exceeded"), events.Blocked)
+    assert isinstance(err(404, b""), events.NotFound)
+    assert not isinstance(err(403, b"", url="https://api.nasdaq.com/x"), events.NotFound)
+
+
+def test_insider_data_sets_try_the_new_sec_address_first(tmp_path):
+    asked = []
+
+    def download(url, path, headers):
+        asked.append(url)
+        if "datastandardsinnovation" in url and "2026q2" not in url:
+            raise events.NotFound(url)
+        if "structureddata" in url and "2026q2" in url:
+            raise AssertionError("2026q2 is only at the new address")
+        make_form345(path)
+
+    def get(url, headers=None):
+        raise events.NotFound(url)
+
+    sec = events.Sec("me@example.com", get=get, download=download)
+    sec_wait = events.SEC_GAP_S
+    events.SEC_GAP_S = 0
+    try:
+        out = events.refresh_insiders(str(tmp_path), sec, {320193: "AAPL"}, date(2026, 10, 16), 1_771_000_000, max_days=0)
+    finally:
+        events.SEC_GAP_S = sec_wait
+    assert out["quarters"] == 8 and not out["error"]
+    assert any("datastandardsinnovation" in u and "2026q2" in u for u in asked)
+    assert any("structureddata" in u and "2025q1" in u for u in asked)
+
+
+def test_a_rate_limit_stops_the_run_and_keeps_the_day_to_do(tmp_path):
+    def get(url, headers=None):
+        raise events.Blocked("the SEC is limiting requests; trying again next hour")
+
+    sec = events.Sec("me@example.com", get=get, download=lambda u, p, h: make_form345(p))
+    sec_wait = events.SEC_GAP_S
+    events.SEC_GAP_S = 0
+    try:
+        out = events.refresh_insiders(str(tmp_path), sec, {320193: "AAPL"}, date(2026, 10, 16), 1_771_000_000)
+    finally:
+        events.SEC_GAP_S = sec_wait
+    assert out["error"] == "the SEC is limiting requests; trying again next hour"
+    assert json.load(open(tmp_path / "insiders.json"))["days"] == []
