@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.9.3 (crypto around the clock)';
+export const APP_VERSION = '0.9.4 (crypto around the clock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -857,10 +857,13 @@ function renderMarket() {
     if (inPaper.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
     return li;
   };
-  const list = (title, rows, empty) => [
-    el('h3', { class: 'market-title', text: `${title} (${rows.length})` }),
-    rows.length ? el('ul', { class: 'list' }, ...rows.slice(0, 10).map(card)) : el('p', { class: 'muted small', text: empty }),
-  ];
+  // The 10 strongest, then a button for the rest.
+  const list = (title, rows, empty) => {
+    if (!rows.length) return [el('h3', { class: 'market-title', text: `${title} (0)` }), el('p', { class: 'muted small', text: empty })];
+    const ul = el('ul', { class: 'list' }, ...rows.slice(0, 10).map(card));
+    const more = rows.length > 10 ? el('button', { type: 'button', class: 'ghost', text: `Show all ${rows.length}`, onclick: e => { ul.append(...rows.slice(10).map(card)); e.currentTarget.remove(); } }) : null;
+    return [el('h3', { class: 'market-title', text: `${title} (${rows.length})` }), ul, more].filter(Boolean);
+  };
   body.replaceChildren(
     el('h2', { class: 'section', text: 'Market scan' }),
     el('p', { class: 'muted small', text: scanLine(m) }),

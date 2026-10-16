@@ -661,8 +661,8 @@ def rescored(old: Optional[dict], new: dict, only: List[str]) -> dict:
         return new
     keys = set(only)
     out = dict(old)
-    out["buys"] = sorted([r for r in old.get("buys", []) if r["key"] not in keys] + new.get("buys", []), key=lambda r: -(r.get("score") or 0))[:25]
-    out["sells"] = sorted([r for r in old.get("sells", []) if r["key"] not in keys] + new.get("sells", []), key=lambda r: r.get("score") or 0)[:25]
+    out["buys"] = sorted([r for r in old.get("buys", []) if r["key"] not in keys] + new.get("buys", []), key=lambda r: -(r.get("score") or 0))[:100]
+    out["sells"] = sorted([r for r in old.get("sells", []) if r["key"] not in keys] + new.get("sells", []), key=lambda r: r.get("score") or 0)[:100]
     out["newBuys"], out["newSells"] = new.get("newBuys", []), new.get("newSells", [])
     out["rescoredAt"] = new.get("at")
     return out
@@ -692,8 +692,8 @@ def merged_market(scans: dict) -> Optional[dict]:
         "at": max(x["at"] for x in done),
         "scanned": sum(x.get("scanned", 0) for x in done),
         "total": sum(x.get("total", 0) for x in done),
-        "buys": sorted(both("buys"), key=lambda r: -(r.get("score") or 0))[:30],
-        "sells": sorted(both("sells"), key=lambda r: r.get("score") or 0)[:30],
+        "buys": sorted(both("buys"), key=lambda r: -(r.get("score") or 0))[:200],
+        "sells": sorted(both("sells"), key=lambda r: r.get("score") or 0)[:200],
         "newBuys": both("newBuys"),
         "newSells": both("newSells"),
         "errors": {k: v for x in done for k, v in (x.get("errors") or {}).items()},
