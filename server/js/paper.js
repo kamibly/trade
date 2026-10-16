@@ -87,9 +87,12 @@ export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now() }
   acc.taken ||= [];
   const prices = {};
   const list = [...opportunities].sort((a, b) => (b.ev || 0) - (a.ev || 0));
+  // An idea counts as taken only if it was really traded: older versions
+  // marked ideas they had no cash for, which then were never bought.
+  const traded = new Set([...acc.positions, ...acc.trades].map(p => p.key));
   for (const o of list) {
     if (acc.positions.length >= MAX_POSITIONS) break;
-    if (acc.taken.includes(o.id) || acc.positions.some(p => p.key === o.key)) continue;
+    if ((acc.taken.includes(o.id) && traded.has(o.key)) || acc.positions.some(p => p.key === o.key)) continue;
     if (!(o.entry > 0) || !(o.stop < o.entry)) continue;
     // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
     const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;

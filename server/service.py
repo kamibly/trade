@@ -645,7 +645,10 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
             remember(st, new_ids)
 
         update_state(apply)
-        paper_opportunities(result.get("opportunities") or [], engine, result.get("scanBuys") or [], result.get("scanSells") or [])
+        # Both markets' opportunities, so an idea missed earlier (the account
+        # was busy or short of cash) is tried again on the next scan of either.
+        opps = (load_state().get("market") or {}).get("opportunities") or result.get("opportunities") or []
+        paper_opportunities(opps, engine, result.get("scanBuys") or [], result.get("scanSells") or [])
         return result
     finally:
         lock.release()

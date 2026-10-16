@@ -217,3 +217,11 @@ test('an idea the paper account had no cash for is tried again later', async () 
   assert.deepEqual(acc.taken, ['scan:stock:AAPL:1']);
   assert.equal(paper.openSetups(acc, [idea], { now: 3 }).length, 0); // once per idea
 });
+
+test('an idea marked taken by an older version but never traded is bought', async () => {
+  const paper = await import('../app/js/paper.js');
+  const acc = paper.newAccount(10000, 0);
+  acc.taken = ['insider:stock:AAPL:1'];
+  const idea = { id: 'insider:stock:AAPL:1', setup: 'insider', key: 'stock:AAPL', symbol: 'AAPL', type: 'stock', entry: 100, stop: 95, take: 110, hold: 20, ev: 0.02 };
+  assert.equal(paper.openSetups(acc, [idea], { now: 1 }).length, 1);
+});
