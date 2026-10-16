@@ -8,7 +8,8 @@
 import { TIMEFRAMES } from './js/candles.js';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fetchCandles, yahooCandles, yahooPrice, fetchCryptoTop } from './js/data.js';
+import { fetchCandles, fetchCryptoTop } from './js/data.js';
+import { stockSources } from './stocks.mjs';
 import { analyze, signalAt, baseVotesAt, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
 import { featureNames, featureVector, sequence, label, turnLabels } from './js/ml.js';
 import { summarize, alertFor, learn, learnKey, ruleOf, tradeRecordLine, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
@@ -63,10 +64,15 @@ export function politely(fn, { gap = YAHOO_GAP_MS, waits = YAHOO_WAITS_MS, giveU
   };
 }
 
+// Nasdaq, the backup for daily charts and prices, gets the same spacing; it
+// isn't retried, since Yahoo is still asked first next time.
+const memoryCooldown = () => { let until = 0; return { get: async () => until, set: async t => { until = t; } }; };
+const stocks = stockSources({ limitYahoo: politely, limitNasdaq: f => politely(f, { gap: 250, waits: [], cooldown: memoryCooldown() }) });
+
 export const defaultDeps = {
   fetchCandles,
-  yahooCandles: politely(yahooCandles),
-  yahooPrice: politely(yahooPrice),
+  yahooCandles: stocks.candles,
+  yahooPrice: stocks.price,
   fetchCryptoTop,
   fetchText: async url => {
     const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
@@ -76,7 +82,8 @@ export const defaultDeps = {
   now: () => Date.now(),
 };
 
-// Stocks: Yahoo Finance first (no key, no tight limit), then Twelve Data if the server has a key.
+// Stocks: Yahoo Finance first (no key), then Nasdaq for daily and weekly charts
+// (see stocks.mjs), then Twelve Data if the server has a key.
 async function candlesFor(item, tf, settings, deps) {
   if (item.type === 'crypto') return deps.fetchCandles(item, tf, settings);
   try {

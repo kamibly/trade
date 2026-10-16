@@ -28,8 +28,11 @@ Scores come from the app's own JavaScript (`engine.mjs` runs copies of the
 app's modules in `js/` with Node), so the server and the phone always agree.
 The folder works on its own: it needs nothing else from the project.
 
-Stock prices come from Yahoo Finance, which needs no key; a Twelve Data key is
-an optional backup.
+Stock prices come from Yahoo Finance, which needs no key. When Yahoo refuses
+(it answers 429 to a server it thinks asks too much), the server asks again the
+way a browser does, then falls back to Nasdaq's public quotes for daily and
+weekly charts and live prices. Nasdaq has no intraday history, so for 15m and
+1H charts set a free Twelve Data key (`TWELVE_DATA_KEY`) as the backup.
 Crypto comes from Coinbase, Kraken and CoinGecko, as in the app.
 
 Quiet hours (22:00 to 07:00, your time zone) hold back every alert except
