@@ -318,7 +318,8 @@ export function parseSp500(csv) {
 //        events: { insiders, earnings, fng, funding }, enabled: { setup: bool },
 //        held: [key], announced: [id], muted: [setup],
 //        scope: 'stocks' | 'crypto' | 'all', items: crypto to scan (default the top 50),
-//        only: [key] to rescore just these (fast moves; no setups) }
+//        only: [key] to rescore just these (fast moves; no setups),
+//        buyStarts: { key: { at, entry } } where each current buy idea began }
 // result: { at, scanned, buys, sells, newBuys, newSells, actions, weights, errors, alert,
 //           opportunities, records, counts, warnings, digest }
 export async function runMarket(job, deps = defaultDeps) {
@@ -371,6 +372,11 @@ export async function runMarket(job, deps = defaultDeps) {
   const fresh = list => list.filter(r => r.key in prev && prev[r.key] !== r.action);
   const newBuys = fresh(buys);
   const newSells = fresh(sells);
+  // Where each buy idea began: kept while it stays a Buy, so the paper account
+  // can buy an idea it missed while the price is still near its start.
+  const oldStarts = job.buyStarts || {};
+  const buyStarts = Object.fromEntries(buys.map(r => [r.key,
+    prev[r.key] === 'buy' && oldStarts[r.key] ? oldStarts[r.key] : { at: deps.now(), entry: r.entry }]));
   const names = list => list.slice(0, 4).map(r => `${r.symbol} ${fmtScore(r.score)}`).join(', ');
   let alert = null;
   if (newBuys.length || newSells.length) {
@@ -398,10 +404,12 @@ export async function runMarket(job, deps = defaultDeps) {
     weights: kept,
     errors,
     alert,
-    // For the paper account: new buy ideas, strongest first, and every Sell.
-    scanBuys: newBuys.map(r => ({
-      id: `scan:${r.key}:${r.candleTime}`, setup: 'scan', key: r.key, symbol: r.symbol, type: r.type, entry: r.entry, stop: r.stop, take: r.take, ev: r.score / 100,
+    // For the paper account: every buy idea still within 1 ATR of where it
+    // began, strongest first (each bought once per idea), and every Sell.
+    scanBuys: buys.filter(r => r.entry <= buyStarts[r.key].entry + (r.atr || 0)).map(r => ({
+      id: `scan:${r.key}:${buyStarts[r.key].at}`, setup: 'scan', key: r.key, symbol: r.symbol, type: r.type, entry: r.entry, stop: r.stop, take: r.take, ev: r.score / 100,
     })),
+    buyStarts,
     scanSells: sells.map(r => ({ key: r.key, entry: r.entry })),
     // Where each symbol stood, for the every-minute fast-move watch.
     levels: Object.fromEntries(results.filter(r => r.type === 'crypto').map(r => [r.key, { entry: r.entry, atr: r.atr }])),

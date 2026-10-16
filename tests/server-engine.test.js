@@ -128,6 +128,18 @@ test('crypto scan covers the given coins only, and a fast-move rescore scores ju
   assert.deepEqual(quick.newBuys, ['crypto:SOL']);
   assert.match(quick.alert.title, /^Crypto scan: 1 new buy idea$/);
   assert.equal(quick.scanBuys[0].setup, 'scan');
+
+  // Every buy idea goes to the paper account, once per idea, while the price is
+  // within 1 ATR of where the idea began.
+  const ids = full.scanBuys.map(b => b.id);
+  assert.equal(ids.length, full.buys.length);
+  const again = await runMarket({ scope: 'crypto', items, settings, prev: full.actions, weights: full.weights, buyStarts: full.buyStarts }, d);
+  assert.deepEqual(again.scanBuys.map(b => b.id), ids); // same ideas, same ids
+  const key0 = full.buys[0].key;
+  const ranAway = { ...full.buyStarts, [key0]: { at: 1, entry: full.buys[0].entry - 2 * full.buys[0].atr } };
+  const later = await runMarket({ scope: 'crypto', items, settings, prev: full.actions, weights: full.weights, buyStarts: ranAway }, d);
+  assert.ok(!later.scanBuys.some(b => b.key === key0));
+  assert.deepEqual(later.buyStarts[key0], ranAway[key0]);
 });
 
 test('Yahoo calls are spaced, wait out a 429 together, and stop asking after the last retry', async () => {

@@ -596,6 +596,7 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
             "held": sorted(held_keys(state)),
             "announced": state.get("announced", []),
             "muted": sorted(muted),
+            "buyStarts": _scope_part(state.get("buyStarts"), scope),
         }
         if scope == "crypto":
             job["items"] = crypto_items(state)
@@ -622,13 +623,16 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
         def apply(st):
             actions, weights = result.pop("actions", {}), result.pop("weights", {})
             levels = result.pop("levels", {})
+            starts = result.pop("buyStarts", {})
             # Each scan replaces only its own symbols' saved actions and weights.
             other = "crypto" if scope == "stocks" else "stocks"
             if only:
                 st["marketActions"] = {**st["marketActions"], **actions}
                 st["marketWeights"] = {**st["marketWeights"], **weights}
                 st["cryptoLevels"] = {**st.get("cryptoLevels", {}), **levels}
+                st["buyStarts"] = {**{k: v for k, v in (st.get("buyStarts") or {}).items() if k not in only}, **starts}
             else:
+                st["buyStarts"] = {**_scope_part(st.get("buyStarts"), other), **starts}
                 st["marketActions"] = {**_scope_part(st["marketActions"], other), **actions}
                 st["marketWeights"] = {**_scope_part(st["marketWeights"], other), **weights}
                 if scope == "crypto":

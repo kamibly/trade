@@ -95,6 +95,7 @@ def test_crypto_scan_covers_the_coin_list_keeps_stock_results_and_rescores_fast_
     monkeypatch.setattr(crypto, "universe", lambda t, min_volume=0: [{"type": "crypto", "symbol": f"C{k}", "name": "x"} for k in range(25)])
     service.update_state(lambda st: st.update(
         marketActions={"stock:MMM": "buy", "crypto:OLD": "hold"}, marketWeights={"stock:MMM:1D": {"w": 1}},
+        buyStarts={"stock:MMM": {"at": 1, "entry": 50}, "crypto:OLD": {"at": 1, "entry": 3}},
         scans={"stocks": {"at": 5, "scanned": 500, "total": 503, "buys": [{"key": "stock:MMM", "score": 60}], "sells": []}}))
     jobs = []
 
@@ -105,16 +106,17 @@ def test_crypto_scan_covers_the_coin_list_keeps_stock_results_and_rescores_fast_
         if job.get("only"):
             return {"at": 9, "scanned": 1, "total": 1, "buys": [summary("SOL", "buy", 55, entry=170)], "sells": [], "newBuys": ["crypto:SOL"], "newSells": [],
                     "actions": {"crypto:SOL": "buy"}, "weights": {}, "errors": {}, "alert": {"kind": "market", "setups": ["signal"], "title": "Crypto scan: 1 new buy idea", "body": ""},
-                    "levels": {"crypto:SOL": {"entry": 170, "atr": 5}}, "scanBuys": [{"id": "scan:crypto:SOL:1", "setup": "scan", "key": "crypto:SOL", "ev": 0.55}], "scanSells": []}
+                    "levels": {"crypto:SOL": {"entry": 170, "atr": 5}}, "buyStarts": {"crypto:SOL": {"at": 9, "entry": 170}}, "scanBuys": [{"id": "scan:crypto:SOL:1", "setup": "scan", "key": "crypto:SOL", "ev": 0.55}], "scanSells": []}
         return {"at": 7, "scanned": 2, "total": 2, "buys": [summary("BTC", "buy", 45)], "sells": [], "newBuys": [], "newSells": [],
                 "actions": {"crypto:BTC": "buy", "crypto:SOL": "hold"}, "weights": {"crypto:BTC:1D": {"w": 2}}, "errors": {}, "alert": None,
-                "levels": {"crypto:BTC": {"entry": 100, "atr": 5}, "crypto:SOL": {"entry": 150, "atr": 5}}, "scanBuys": [], "scanSells": [],
+                "levels": {"crypto:BTC": {"entry": 100, "atr": 5}, "crypto:SOL": {"entry": 150, "atr": 5}}, "buyStarts": {"crypto:BTC": {"at": 7, "entry": 100}}, "scanBuys": [], "scanSells": [],
                 "opportunities": [], "records": {"crowd": {"n": 10, "wins": 6, "avg": 0.01}}, "counts": {}, "warnings": [], "digest": None}
 
     service.run_crypto(engine=engine)
     job = jobs[0]
     assert job["scope"] == "crypto" and len(job["items"]) == 25
     assert job["prev"] == {"crypto:OLD": "hold"} and job["weights"] == {}  # only its own symbols
+    assert job["buyStarts"] == {"crypto:OLD": {"at": 1, "entry": 3}}
     st = service.load_state()
     assert st["marketActions"] == {"stock:MMM": "buy", "crypto:BTC": "buy", "crypto:SOL": "hold"}
     assert st["marketWeights"] == {"stock:MMM:1D": {"w": 1}, "crypto:BTC:1D": {"w": 2}}
@@ -132,6 +134,8 @@ def test_crypto_scan_covers_the_coin_list_keeps_stock_results_and_rescores_fast_
     assert st["scans"]["crypto"]["scanned"] == 2  # still the full scan's numbers
     assert st["cryptoLevels"]["crypto:SOL"]["entry"] == 170 and st["marketActions"]["crypto:SOL"] == "buy"
     assert st["paper"]["positions"][0]["key"] == "crypto:SOL"
+    # Where each buy idea began: the stock scan's kept, the full scan's replaced, the rescore's added.
+    assert st["buyStarts"] == {"stock:MMM": {"at": 1, "entry": 50}, "crypto:BTC": {"at": 7, "entry": 100}, "crypto:SOL": {"at": 9, "entry": 170}}
     # The new level is the baseline: no move, no rescore.
     assert service.run_pulse(fetch=lambda: {"SOL": {"price": 171}}, engine=engine) == []
 

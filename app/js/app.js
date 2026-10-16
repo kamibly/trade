@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.9.2 (crypto around the clock)';
+export const APP_VERSION = '0.9.3 (crypto around the clock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -850,9 +850,11 @@ function renderMarket() {
     return;
   }
   const fresh = new Set([...(m.newBuys || []), ...(m.newSells || [])]);
+  const inPaper = new Set(serverPaperOn() ? (state.serverPaper.paper.positions || []).map(p => p.key) : []);
   const card = sig => {
     const li = signalCard(sig);
     if (fresh.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge', text: 'New' }));
+    if (inPaper.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
     return li;
   };
   const list = (title, rows, empty) => [
@@ -1321,6 +1323,7 @@ async function refreshPaper() {
     state.serverPaper = { ...r, fetchedAt: Date.now() };
     store.saveServerPaper(state.serverPaper);
     if (state.view === 'portfolio' && state.pfTab === 'paper') renderPaper();
+    if (state.view === 'signals') renderMarket();
   } catch (e) {
     console.warn('Paper account fetch failed', e);
   }
