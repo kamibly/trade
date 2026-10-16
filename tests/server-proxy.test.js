@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { proxiedFetch } from '../server/proxy.mjs';
+import { proxiedFetch, fallbackFetch } from '../server/proxy.mjs';
 
 function selfSigned() {
   const dir = mkdtempSync(join(tmpdir(), 'proxy-test-'));
@@ -57,4 +57,25 @@ test('stock requests go through an HTTP or SOCKS5 proxy', async t => {
   } finally {
     site.close(); http.close(); socks.close();
   }
+});
+
+test('the proxy is a fallback: used after a refusal, for a while, by every run', async () => {
+  let t = 0;
+  let until = 0;
+  const store = { get: async () => until, set: async v => { until = v; } };
+  const calls = [];
+  let directStatus = 200;
+  const direct = async url => { calls.push(['vm', url]); return { status: directStatus }; };
+  const proxied = async url => { calls.push(['home', url]); return { status: 200 }; };
+  const f = fallbackFetch(direct, proxied, { stickyMs: 1000, now: () => t, store });
+  await f('a');
+  directStatus = 429;
+  await f('b');
+  await f('c'); // still within the 30 minutes (here 1 s): straight to the proxy
+  t = 2000;
+  directStatus = 200;
+  await f('d'); // the VM is asked again
+  assert.deepEqual(calls, [['vm', 'a'], ['vm', 'b'], ['home', 'b'], ['home', 'c'], ['vm', 'd']]);
+  const down = fallbackFetch(async () => { throw new TypeError('fetch failed'); }, proxied, { now: () => t, store });
+  assert.equal((await down('e')).status, 200);
 });

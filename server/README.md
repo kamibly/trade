@@ -33,8 +33,8 @@ Stock prices come from Yahoo Finance, which needs no key. When Yahoo refuses
 way a browser does, then falls back to Nasdaq's public quotes for daily and
 weekly charts and live prices. Nasdaq has no intraday history, so for 15m and
 1H charts set a free Twelve Data key (`TWELVE_DATA_KEY`) as the backup. Or set
-`STOCK_PROXY` so these requests leave from a home connection, which Yahoo
-rarely limits.
+`STOCK_PROXY` so that, while Yahoo refuses the VM, these requests leave from a
+home connection, which Yahoo rarely limits.
 Crypto comes from Coinbase, Kraken and CoinGecko, as in the app.
 
 Quiet hours (22:00 to 07:00, your time zone) hold back every alert except
@@ -159,7 +159,7 @@ With server alerts on, the app stops showing its own system notifications
 | `MARKET_SCAN_TIMES` | When the S&P 500 scan runs, on weekdays | `09:45,10:15,10:45,11:15,11:45,12:15,12:45,13:15,13:45,14:15,14:45,15:15,15:45,20:00` |
 | `CRYPTO_SCAN_MINUTES` | How often the crypto scan runs, around the clock | `15` |
 | `TWELVE_DATA_KEY` | Backup for stocks Yahoo Finance can't serve | none |
-| `STOCK_PROXY` | Sends only the Yahoo and Nasdaq requests through a proxy, such as a Tailscale exit node at home (`http://host:port` or `socks5://host:port`), since they limit cloud addresses far more | none |
+| `STOCK_PROXY` | A fallback for Yahoo and Nasdaq: when they refuse the VM, their requests go through this proxy for the next 30 minutes, such as a Tailscale exit node at home (`http://host:port` or `socks5://host:port`). Nothing else uses it | none |
 | `TRAIN_AT` | When the models retrain each week (day and local time) | `Sun 03:00` |
 | `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
 | `SEC_CONTACT` | Your email, which the SEC asks every program to send with its requests. Insider buying and earnings dates load only once it is set; it is sent only to the SEC | none |

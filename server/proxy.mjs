@@ -98,3 +98,23 @@ export function proxiedFetch(proxyUrl, { tlsOptions = {} } = {}) {
     });
   };
 }
+
+// The VM asks first; only when a stock host refuses it (429, 403) or can't be
+// reached does the request go out through the proxy. After a refusal every
+// run uses the proxy for `stickyMs`, shared through `store` (a file in the
+// data folder), so a blocked VM doesn't keep knocking.
+export function fallbackFetch(direct, proxied, { stickyMs = 30 * 60_000, now = Date.now, store } = {}) {
+  return async (url, opts) => {
+    if (now() < await store.get()) return proxied(url, opts);
+    let res;
+    try {
+      res = await direct(url, opts);
+    } catch (e) {
+      if (e.name === 'AbortError' || e.name === 'TimeoutError') throw e;
+      return proxied(url, opts);
+    }
+    if (res.status !== 429 && res.status !== 403) return res;
+    await store.set(now() + stickyMs);
+    return proxied(url, opts);
+  };
+}
