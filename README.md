@@ -182,8 +182,10 @@ each data source loaded.
 ## Your OCI server
 
 [`server/`](server/) is trade-service, a Docker container that runs next to
-jobspy-service. It sends alerts while the app is closed, scans the S&P 500 and
-top 50 crypto every hour while the US market is open, checks your holdings'
+jobspy-service. It sends alerts while the app is closed, scans every
+actively traded coin on Coinbase and Kraken every 15 minutes around the clock
+(and rescores any coin that jumps or drops 1.5 ATR within the minute), scans
+the S&P 500 every 30 minutes while the US market is open, checks your holdings'
 stop-losses and targets every minute, runs paper trading around the clock,
 trains the machine-learning models weekly, and
 syncs your watchlist and holdings. It scores

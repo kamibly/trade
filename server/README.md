@@ -7,10 +7,18 @@ The Trade app's helper on your OCI VM. It runs next to jobspy-service and:
   notifications for new Buy and Sell signals, even while the app is closed;
 - checks your holdings' stop-loss and target every minute at the live price
   (stocks while the US market is open, crypto around the clock);
-- runs the paper-trading account around the clock on the same signals;
-- scans the S&P 500 and the top 50 crypto on the daily chart every hour while
-  the US market is open, plus once in the evening, and shows the best buy and
-  sell ideas in the app's Signals tab;
+- runs the paper-trading account around the clock on the same signals, and
+  buys each new buy idea from the scans (selling it on a later Sell), quiet
+  hours included;
+- scans every coin traded against the dollar on Coinbase or Kraken with at
+  least $1M a day (no stablecoins) on the daily chart every 15 minutes, day and
+  night; the coin list refreshes daily;
+- watches every coin's price every minute (one request per exchange) and
+  scores a coin again right away when it moves 1.5 ATR or more since its last
+  scan;
+- scans the S&P 500 on the daily chart every 30 minutes while the US market is
+  open, plus once in the evening, and shows the best buy and sell ideas from
+  both scans in the app's Signals tab;
 - trains four machine-learning models per timeframe (LightGBM, an LSTM
   network, and bottom and top finders) every week and shares them with the app;
 - tunes each symbol's buy and sell levels once a day (see the main README);
@@ -143,7 +151,8 @@ With server alerts on, the app stops showing its own system notifications
 | `ALLOWED_ORIGIN` | The app's web address | `https://kamibly.github.io` |
 | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT` | Notification keys from step 3 | none |
 | `TRADE_TZ` | Time zone for quiet hours and scan times | `America/Toronto` |
-| `MARKET_SCAN_TIMES` | When the S&P 500 and top-50 crypto scan runs | `09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00` |
+| `MARKET_SCAN_TIMES` | When the S&P 500 scan runs, on weekdays | `09:45,10:15,10:45,11:15,11:45,12:15,12:45,13:15,13:45,14:15,14:45,15:15,15:45,20:00` |
+| `CRYPTO_SCAN_MINUTES` | How often the crypto scan runs, around the clock | `15` |
 | `TWELVE_DATA_KEY` | Backup for stocks Yahoo Finance can't serve | none |
 | `TRAIN_AT` | When the models retrain each week (day and local time) | `Sun 03:00` |
 | `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
@@ -164,7 +173,7 @@ targets of holdings and paper trades are checked every minute. Checks run
 whether or not a phone has server alerts on, so paper trading never stops;
 alerts are only sent to phones that turned them on.
 
-Each check runs on its own, so an hourly market scan or the weekly training
+Each check runs on its own, so a market scan or the weekly training
 never delays the minute checks.
 
 Everything the service remembers (phones, synced holdings, last signals, scan
@@ -198,7 +207,7 @@ All except `/health` need the `X-API-Key` header.
 | `GET /sync`, `PUT /sync` | Watchlist, holdings and alert settings |
 | `GET /signals` | Last watchlist signals and the market scan |
 | `GET /models` | The trained models, which the app runs on the phone |
-| `POST /run` | Run now: `{"what": "watch"}`, `{"what": "market"}`, `{"what": "train"}` or `{"what": "events"}` |
+| `POST /run` | Run now: `{"what": "watch"}`, `{"what": "market"}` (both scans), `{"what": "crypto"}`, `{"what": "train"}` or `{"what": "events"}` |
 | `POST /feedback` | Rate an alert: `{"setups": ["insider"], "useful": false}` |
 | `POST /setups/unmute` | Turn a muted setup's alerts back on: `{"setup": "insider"}` |
 | `POST /push/subscribe`, `/push/unsubscribe`, `/push/test` | App notifications |

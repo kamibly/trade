@@ -8,7 +8,8 @@ the server and the phone agree on every score. This module runs it with Node.
 Environment variables:
     VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT  - app notifications
     TRADE_TZ           - time zone for quiet hours and scan times, default America/Toronto
-    MARKET_SCAN_TIMES  - when the S&P 500 and top-50 crypto scan runs, default hourly while the
+    CRYPTO_SCAN_MINUTES - how often the crypto scan runs, around the clock, default 15
+    MARKET_SCAN_TIMES  - when the S&P 500 scan runs, default every 30 minutes while the
                          US market is open plus 20:00: "09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00"
     TWELVE_DATA_KEY    - optional; backup for stocks Yahoo Finance can't serve
     DATA_DIR           - where trade.json is kept, default /data
@@ -34,7 +35,7 @@ VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:you@example.com")
 TZ_NAME = os.environ.get("TRADE_TZ", "America/Toronto")
-DEFAULT_SCAN_TIMES = "09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00"
+DEFAULT_SCAN_TIMES = "09:45,10:15,10:45,11:15,11:45,12:15,12:45,13:15,13:45,14:15,14:45,15:15,15:45,20:00"
 MARKET_SCAN_TIMES = os.environ.get("MARKET_SCAN_TIMES", DEFAULT_SCAN_TIMES)
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -57,7 +58,10 @@ QUIET_START, QUIET_END = 22, 7
 TIMEFRAMES = set(WATCH_EVERY)
 
 _lock = threading.RLock()
-_run_locks = {"watch": threading.Lock(), "market": threading.Lock(), "train": threading.Lock(), "events": threading.Lock()}
+_run_locks = {name: threading.Lock() for name in ("watch", "market", "crypto", "pulse", "train", "events")}
+CRYPTO_SCAN_MINUTES = int(os.environ.get("CRYPTO_SCAN_MINUTES", "15") or 15)
+UNIVERSE_EVERY_MS = 20 * 3600_000  # the crypto list is rebuilt about once a day
+PULSE_EVERY_MS = 60_000            # fast-move watch
 SP500_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500.csv")
 SETUP_IDS = ("insider", "earnings", "ranking", "crowd")
 EVENTS_EVERY_MS = 3600_000   # outside data for the setups (insiders, earnings, crowd)
@@ -94,6 +98,11 @@ def _empty_state() -> dict:
         "marketWeights": {},
         "watch": {"lastRunAt": None, "errors": {}, "lastAlerts": []},
         "lastMarketSlot": None,
+        "scans": {},              # the latest stock scan and crypto scan; "market" shows both
+        "lastCryptoSlot": None,
+        "cryptoUniverse": None,   # coins the crypto scan covers, rebuilt daily
+        "cryptoLevels": {},       # each coin's price and ATR at its last scan, for the fast-move watch
+        "pulse": {"lastRunAt": None},
         "training": {"lastRunAt": None, "results": {}},  # last model training per timeframe
         "lastTrainSlot": None,
         "paper": None,            # the paper-trading account (runs here, shown in the app)
@@ -557,8 +566,19 @@ def run_prices(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dic
         lock.release()
 
 
-def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
-    lock = _run_locks["market"]
+SCOPES = ("stocks", "crypto")
+SCOPE_PREFIX = {"stocks": "stock:", "crypto": "crypto:"}
+
+
+def _scope_part(d: dict, scope: str) -> dict:
+    return {k: v for k, v in (d or {}).items() if k.startswith(SCOPE_PREFIX[scope])}
+
+
+def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = run_engine, scope: str = "stocks",
+               only: Optional[List[str]] = None) -> Optional[dict]:
+    """The S&P 500 scan (scope "stocks") or the crypto scan (scope "crypto").
+    `only` rescores just those crypto symbols after a fast move."""
+    lock = _run_locks["market" if scope == "stocks" else "crypto"]
     if not lock.acquire(blocking=False):
         return None
     try:
@@ -569,18 +589,28 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
         import events
         muted = muted_setups(state)
         job = {
-            "mode": "market", "settings": engine_settings(profile), "prev": state["marketActions"], "weights": state["marketWeights"], "models": load_models("1D"),
+            "mode": "market", "scope": scope, "settings": engine_settings(profile),
+            "prev": _scope_part(state["marketActions"], scope), "weights": _scope_part(state["marketWeights"], scope), "models": load_models("1D"),
             "events": events.load_events(events_dir()),
             "enabled": profile["settings"].get("setups") or {},
             "held": sorted(held_keys(state)),
             "announced": state.get("announced", []),
             "muted": sorted(muted),
         }
+        if scope == "crypto":
+            job["items"] = crypto_items(state)
+            if only:
+                job["only"] = only
         try:
             result = engine(job, 3000)
         except Exception as e:
-            logger.exception("Market scan failed")
-            update_state(lambda st: st.update(market={**(st.get("market") or {}), "error": str(e), "failedAt": now_ms()}))
+            logger.exception("%s scan failed", scope)
+
+            def failed(st):
+                scans = st.setdefault("scans", {})
+                scans[scope] = {**(scans.get(scope) or {}), "error": str(e), "failedAt": now_ms()}
+                st["market"] = merged_market(scans)
+            update_state(failed)
             return None
         announced = set(state.get("announced", []))
         warnings = [w for w in result.get("warnings", []) if w["id"] not in announced]
@@ -590,10 +620,24 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
         new_ids = (result["digest"]["ids"] if result.get("digest") else []) + [w["id"] for w in warnings]
 
         def apply(st):
-            st["marketActions"] = result.pop("actions", {})
-            st["marketWeights"] = result.pop("weights", {})
+            actions, weights = result.pop("actions", {}), result.pop("weights", {})
+            levels = result.pop("levels", {})
+            # Each scan replaces only its own symbols' saved actions and weights.
+            other = "crypto" if scope == "stocks" else "stocks"
+            if only:
+                st["marketActions"] = {**st["marketActions"], **actions}
+                st["marketWeights"] = {**st["marketWeights"], **weights}
+                st["cryptoLevels"] = {**st.get("cryptoLevels", {}), **levels}
+            else:
+                st["marketActions"] = {**_scope_part(st["marketActions"], other), **actions}
+                st["marketWeights"] = {**_scope_part(st["marketWeights"], other), **weights}
+                if scope == "crypto":
+                    st["cryptoLevels"] = levels
             result["reason"] = reason
-            st["market"] = {k: v for k, v in result.items() if k not in ("scanBuys", "scanSells")}
+            view = {k: v for k, v in result.items() if k not in ("scanBuys", "scanSells")}
+            scans = st.setdefault("scans", {})
+            scans[scope] = rescored(scans.get(scope), view, only) if only else view
+            st["market"] = merged_market(scans)
             remember(st, new_ids)
 
         update_state(apply)
@@ -601,6 +645,129 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
         return result
     finally:
         lock.release()
+
+
+def run_crypto(reason: str = "schedule", engine: Callable[[dict, int], dict] = run_engine, only: Optional[List[str]] = None) -> Optional[dict]:
+    return run_market(reason, engine, scope="crypto", only=only)
+
+
+def rescored(old: Optional[dict], new: dict, only: List[str]) -> dict:
+    """A full scan's result with a few symbols scored again."""
+    if not old or not old.get("at"):
+        return new
+    keys = set(only)
+    out = dict(old)
+    out["buys"] = sorted([r for r in old.get("buys", []) if r["key"] not in keys] + new.get("buys", []), key=lambda r: -(r.get("score") or 0))[:25]
+    out["sells"] = sorted([r for r in old.get("sells", []) if r["key"] not in keys] + new.get("sells", []), key=lambda r: r.get("score") or 0)[:25]
+    out["newBuys"], out["newSells"] = new.get("newBuys", []), new.get("newSells", [])
+    out["rescoredAt"] = new.get("at")
+    return out
+
+
+def _merge_records(parts: List[dict]) -> dict:
+    out = {}
+    for recs in parts:
+        for k, r in (recs or {}).items():
+            o = out.setdefault(k, {"n": 0, "wins": 0, "sum": 0.0})
+            o["n"] += r.get("n", 0)
+            o["wins"] += r.get("wins", 0)
+            o["sum"] += r.get("avg", 0) * r.get("n", 0)
+    return {k: {"n": o["n"], "wins": o["wins"], "avg": round(o["sum"] / o["n"], 5) if o["n"] else 0} for k, o in out.items()}
+
+
+def merged_market(scans: dict) -> Optional[dict]:
+    """What the app shows: the latest stock scan and crypto scan together."""
+    stocks, crypto = scans.get("stocks") or {}, scans.get("crypto") or {}
+    done = [x for x in (stocks, crypto) if x.get("at")]
+    if not done:
+        errs = [x.get("error") for x in (stocks, crypto) if x.get("error")]
+        return {"error": "; ".join(errs)} if errs else None
+    both = lambda k: [r for x in done for r in (x.get(k) or [])]  # noqa: E731
+    opps = sorted(both("opportunities"), key=lambda o: (not o.get("proven"), -(o.get("ev") or 0)))
+    out = {
+        "at": max(x["at"] for x in done),
+        "scanned": sum(x.get("scanned", 0) for x in done),
+        "total": sum(x.get("total", 0) for x in done),
+        "buys": sorted(both("buys"), key=lambda r: -(r.get("score") or 0))[:30],
+        "sells": sorted(both("sells"), key=lambda r: r.get("score") or 0)[:30],
+        "newBuys": both("newBuys"),
+        "newSells": both("newSells"),
+        "errors": {k: v for x in done for k, v in (x.get("errors") or {}).items()},
+        "opportunities": opps[:30],
+        "warnings": both("warnings"),
+        "stocksAt": stocks.get("at"), "stocksScanned": stocks.get("scanned"),
+        "cryptoAt": crypto.get("rescoredAt") or crypto.get("at"), "cryptoScanned": crypto.get("scanned"), "cryptoTotal": crypto.get("total"),
+    }
+    if any(x.get("records") for x in done):
+        out["records"] = _merge_records([x.get("records") for x in done])
+        out["counts"] = {k: sum((x.get("counts") or {}).get(k, 0) for x in done) for k in out["records"]}
+    errs = [f"{name} scan failed: {x['error']}" for name, x in (("Stock", stocks), ("Crypto", crypto)) if x.get("error")]
+    if errs:
+        out["error"] = "; ".join(errs)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Crypto around the clock
+# ---------------------------------------------------------------------------
+
+def crypto_items(state: dict) -> Optional[List[dict]]:
+    """Every qualifying coin on Coinbase and Kraken, refreshed once a day;
+    None (the top 50) when neither exchange has answered yet."""
+    import crypto
+    uni = state.get("cryptoUniverse") or {}
+    if uni.get("items") and now_ms() - (uni.get("at") or 0) < UNIVERSE_EVERY_MS:
+        return uni["items"]
+    try:
+        items = crypto.universe(crypto.fetch_tickers())
+        if len(items) < 20:
+            raise RuntimeError(f"only {len(items)} coins qualified")
+        update_state(lambda st: st.update(cryptoUniverse={"at": now_ms(), "items": items, "error": None}))
+        return items
+    except Exception as e:
+        logger.warning("Crypto list failed: %s", e)
+        update_state(lambda st: st.update(cryptoUniverse={**(st.get("cryptoUniverse") or {}), "error": str(e), "failedAt": now_ms()}))
+        return uni.get("items") or None
+
+
+def run_pulse(fetch: Optional[Callable[[], dict]] = None, engine: Callable[[dict, int], dict] = run_engine) -> List[str]:
+    """Every minute: all crypto prices in two requests. A coin that moved
+    1.5 ATR or more since its last scan is scored again right away."""
+    import crypto
+    lock = _run_locks["pulse"]
+    if not lock.acquire(blocking=False):
+        return []
+    try:
+        state = load_state()
+        update_state(lambda st: st.update(pulse={**(st.get("pulse") or {}), "lastRunAt": now_ms()}))
+        if not state.get("profile") or not state.get("cryptoLevels"):
+            return []
+        try:
+            tickers = (fetch or crypto.fetch_tickers)()
+        except Exception as e:
+            update_state(lambda st: st.update(pulse={**(st.get("pulse") or {}), "error": str(e)}))
+            return []
+        movers = crypto.fast_movers({s: t["price"] for s, t in tickers.items()}, state["cryptoLevels"])
+        update_state(lambda st: st.update(pulse={**(st.get("pulse") or {}), "lastRunAt": now_ms(), "error": None, "movers": movers[:20],
+                                                 **({"lastMoveAt": now_ms()} if movers else {})}))
+        if movers:
+            _spawn(lambda: run_crypto("fast move", engine=engine, only=movers[:30]))
+        return movers
+    finally:
+        lock.release()
+
+
+def crypto_slot(now: int) -> int:
+    """Which crypto scan slot `now` is in: every CRYPTO_SCAN_MINUTES, a minute after the candle edge."""
+    return (now - CLOSE_DELAY_MS) // (CRYPTO_SCAN_MINUTES * 60_000)
+
+
+def crypto_due(state: dict, now: int) -> bool:
+    return bool(state.get("profile")) and state.get("lastCryptoSlot") != crypto_slot(now)
+
+
+def pulse_due(state: dict, now: int) -> bool:
+    return bool(state.get("cryptoLevels")) and now - ((state.get("pulse") or {}).get("lastRunAt") or 0) >= PULSE_EVERY_MS
 
 
 def events_dir() -> str:
@@ -787,7 +954,11 @@ def train_due(state: dict, now: datetime) -> Optional[str]:
 
 
 def run_in_background(what: str) -> None:
-    target = {"market": run_market, "train": run_train, "events": run_events}.get(what, run_watch)
+    if what == "market":  # both scans
+        for fn in (run_market, run_crypto):
+            threading.Thread(target=fn, args=("manual",), daemon=True).start()
+        return
+    target = {"crypto": run_crypto, "train": run_train, "events": run_events}.get(what, run_watch)
     threading.Thread(target=target, args=("manual",), daemon=True).start()
 
 
@@ -808,7 +979,10 @@ def scan_times() -> List[str]:
 
 
 def due_market_slot(now: datetime, last_slot: Optional[str]) -> Optional[str]:
-    """The latest scan time today that has passed and hasn't run yet."""
+    """The latest scan time today that has passed and hasn't run yet.
+    Weekdays only: stocks don't trade at the weekend, and crypto has its own scan."""
+    if now.weekday() >= 5:
+        return None
     due = None
     for t in scan_times():
         h, m = (int(x) for x in t.split(":"))
@@ -820,11 +994,11 @@ def due_market_slot(now: datetime, last_slot: Optional[str]) -> Optional[str]:
 
 def next_market_at(now: Optional[datetime] = None) -> str:
     now = now or datetime.now(tz())
-    for day in (0, 1):
+    for day in range(4):  # over a weekend, Monday's first scan
         for t in scan_times():
             h, m = (int(x) for x in t.split(":"))
             slot = (now + timedelta(days=day)).replace(hour=h, minute=m, second=0, microsecond=0)
-            if slot > now:
+            if slot > now and slot.weekday() < 5:
                 return slot.isoformat()
     return ""
 
@@ -881,6 +1055,12 @@ def start_scheduler() -> None:
                 if slot:
                     update_state(lambda st: st.update(lastMarketSlot=slot))
                     _spawn(run_market)
+                if crypto_due(state, now):
+                    cslot = crypto_slot(now)
+                    update_state(lambda st: st.update(lastCryptoSlot=cslot))
+                    _spawn(run_crypto)
+                elif pulse_due(state, now):
+                    _spawn(run_pulse)
                 if events_due(state, now):
                     _spawn(run_events)
                 train = train_due(state, datetime.now(tz()))

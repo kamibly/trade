@@ -106,7 +106,7 @@ def test_paper_reset_and_hourly_scans():
     assert c.post("/paper/reset", json={"start": 5}, headers=KEY).status_code == 400
     assert c.get("/paper").status_code == 401
     times = service.scan_times()
-    assert len([t for t in times if "10:00" <= t <= "16:00"]) == 6  # hourly while the market is open
+    assert len([t for t in times if "10:00" <= t <= "16:00"]) == 12  # every 30 minutes while the market is open
 
 
 def test_a_change_gets_checked_within_a_minute(monkeypatch):

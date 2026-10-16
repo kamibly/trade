@@ -1,5 +1,5 @@
 // Talks to your own trade-service on the OCI server: it sends alerts while the
-// app is closed, scans the S&P 500 and top 50 crypto, and keeps the watchlist
+// app is closed, scans the S&P 500 and every actively traded coin, and keeps the watchlist
 // and holdings in sync between phones. Every call carries the server key.
 
 export class ServerError extends Error {}

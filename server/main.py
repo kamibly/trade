@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -70,7 +70,10 @@ def status(x_api_key: Optional[str] = Header(default=None)):
         "synced": {"updatedAt": profile.get("updatedAt"), "watchlist": len(profile.get("watchlist", [])), "holdings": len(profile.get("holdings", []))},
         "watch": state["watch"],
         "watchEveryMinutes": service.WATCH_EVERY.get((profile.get("settings") or {}).get("alertTf"), 15),
-        "market": {"lastRunAt": market.get("at"), "scanned": market.get("scanned"), "error": market.get("error"), "nextAt": service.next_market_at()},
+        "market": {"lastRunAt": market.get("stocksAt") or market.get("at"), "scanned": market.get("stocksScanned", market.get("scanned")), "error": market.get("error"), "nextAt": service.next_market_at()},
+        "crypto": {"lastRunAt": market.get("cryptoAt"), "scanned": market.get("cryptoScanned"), "total": market.get("cryptoTotal"), "everyMinutes": service.CRYPTO_SCAN_MINUTES,
+                   "coins": len((state.get("cryptoUniverse") or {}).get("items") or []), "listError": (state.get("cryptoUniverse") or {}).get("error"),
+                   "pulseAt": (state.get("pulse") or {}).get("lastRunAt"), "lastMoveAt": (state.get("pulse") or {}).get("lastMoveAt")},
         "scanTimes": service.scan_times(),
         "prices": {"lastRunAt": (state.get("prices") or {}).get("lastRunAt"), "everySeconds": service.PRICES_EVERY_MS // 1000},
         "models": service.model_summaries(),
@@ -133,7 +136,7 @@ def get_models(x_api_key: Optional[str] = Header(default=None)):
 def post_run(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(default={})):
     """Runs the watch, the market scan or model training now, in the background."""
     check_api_key(x_api_key)
-    what = payload.get("what") if payload.get("what") in ("market", "train", "events") else "watch"
+    what = payload.get("what") if payload.get("what") in ("market", "crypto", "train", "events") else "watch"
     service.run_in_background(what)
     return {"ok": True, "started": what}
 

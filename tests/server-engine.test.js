@@ -108,6 +108,28 @@ test('market scan uses the saved S&P list offline and only announces new ideas',
   assert.match(second.alert.body, /^Buy: MMM \+\d+/);
 });
 
+test('crypto scan covers the given coins only, and a fast-move rescore scores just the movers', async () => {
+  const up = series(300, 0.006, 0.01, 3);
+  let stocks = 0;
+  const d = deps({}, {
+    yahooCandles: async () => { stocks++; return { candles: up, source: 'stub' }; },
+    fetchCryptoTop: async () => { throw new Error('should use the given list'); },
+    fetchCandles: async () => ({ candles: up, source: 'stub' }),
+  });
+  const items = ['BTC', 'SOL', 'DOGE'].map(symbol => ({ type: 'crypto', symbol, name: symbol }));
+  const full = await runMarket({ scope: 'crypto', items, settings, prev: {}, weights: {} }, d);
+  assert.equal(full.scope, 'crypto');
+  assert.equal(full.total, 3);
+  assert.equal(stocks, 0);
+  assert.deepEqual(Object.keys(full.levels).sort(), ['crypto:BTC', 'crypto:DOGE', 'crypto:SOL']);
+  assert.ok(full.levels['crypto:SOL'].entry > 0 && full.levels['crypto:SOL'].atr > 0);
+  const quick = await runMarket({ scope: 'crypto', items, only: ['crypto:SOL'], settings, prev: { 'crypto:SOL': 'hold' }, weights: full.weights }, d);
+  assert.deepEqual(Object.keys(quick.actions), ['crypto:SOL']);
+  assert.deepEqual(quick.newBuys, ['crypto:SOL']);
+  assert.match(quick.alert.title, /^Crypto scan: 1 new buy idea$/);
+  assert.equal(quick.scanBuys[0].setup, 'scan');
+});
+
 test('app sync helpers: direction, merge and profile', async () => {
   const srv = await import('../app/js/server.js');
   assert.equal(srv.syncDirection(5, null), 'push');

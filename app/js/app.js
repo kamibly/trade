@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.8.2 (opportunities)';
+export const APP_VERSION = '0.9.0 (crypto around the clock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -819,8 +819,8 @@ function renderOpportunities() {
     const failed = m && m.error ? ` The last scan failed: ${m.error}` : '';
     body.replaceChildren(
       el('h2', { class: 'section', text: 'Opportunities' }),
-      el('p', { class: 'muted small', text: `Your server finds opportunities in its market scan, which runs every hour while the US market is open and at 20:00. They appear here after its next scan.${failed}` }),
-      el('button', { type: 'button', class: 'ghost', text: 'Run the market scan now', onclick: e => runMarketNow(e.currentTarget) }));
+      el('p', { class: 'muted small', text: `Your server finds opportunities in its scans: crypto every 15 minutes around the clock, stocks every 30 minutes while the US market is open and at 20:00. They appear here after the next scan.${failed}` }),
+      el('button', { type: 'button', class: 'ghost', text: 'Run the scans now', onclick: e => runMarketNow(e.currentTarget) }));
     return;
   }
   const opps = m.opportunities || [];
@@ -841,7 +841,7 @@ function renderMarket() {
   const m = state.market;
   const body = $('market-body');
   if (!serverOn()) {
-    body.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server in Settings to see buy and sell ideas from the whole S&P 500 and the top 50 crypto.' }));
+    body.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server in Settings to see buy and sell ideas from the whole S&P 500 and every actively traded coin.' }));
     return;
   }
   if (!m || !m.at) {
@@ -861,10 +861,17 @@ function renderMarket() {
   ];
   body.replaceChildren(
     el('h2', { class: 'section', text: 'Market scan' }),
-    el('p', { class: 'muted small', text: `${m.scanned} of ${m.total} symbols from the S&P 500 and top 50 crypto on the daily chart, scanned ${timeAgo(m.at)} by your server.` }),
+    el('p', { class: 'muted small', text: scanLine(m) }),
     ...list('Buy ideas', m.buys || [], 'No buy ideas in the last scan.'),
     ...list('Sell ideas', m.sells || [], 'No sell ideas in the last scan.'),
   );
+}
+
+function scanLine(m) {
+  if (!m.cryptoAt && !m.stocksAt) return `${m.scanned} of ${m.total} symbols on the daily chart, scanned ${timeAgo(m.at)} by your server.`;
+  const crypto = m.cryptoAt ? `${m.cryptoScanned} coins ${timeAgo(m.cryptoAt)}` : 'crypto not yet';
+  const stocks = m.stocksAt ? `${m.stocksScanned} S&P 500 stocks ${timeAgo(m.stocksAt)}` : 'stocks not yet';
+  return `Daily chart, scanned by your server: ${crypto} (every 15 minutes, day and night), ${stocks}.`;
 }
 
 // ---- Your server ---------------------------------------------------------------
@@ -960,9 +967,20 @@ function renderServer() {
     st.pushEnabled ? `${st.devices} phone${st.devices === 1 ? '' : 's'} get alerts.` : 'Notification keys are not set on the server yet.',
     w.lastRunAt ? `Watchlist and holdings checked ${timeAgo(w.lastRunAt)}, right after every candle closes and every ${st.watchEveryMinutes} minutes in between${errs ? `, ${errs} symbol${errs === 1 ? '' : 's'} failed` : ''}.` : 'Watchlist checks start within a few minutes.',
     st.prices && st.prices.lastRunAt ? `Stop-losses and targets checked every minute, last ${timeAgo(st.prices.lastRunAt)}.` : '',
-    st.market.lastRunAt ? `Market scan ${timeAgo(st.market.lastRunAt)}.` : '',
-    st.market.nextAt ? `Next market scan ${new Date(st.market.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '',
+    cryptoLine(st.crypto),
+    st.market.lastRunAt ? `Stock scan ${timeAgo(st.market.lastRunAt)}.` : '',
+    st.market.nextAt ? `Next stock scan ${new Date(st.market.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '',
     modelsLine(st),
+  ].filter(Boolean).join(' ');
+}
+
+function cryptoLine(c) {
+  if (!c) return '';
+  if (!c.lastRunAt) return `Crypto scan every ${c.everyMinutes} minutes, starting shortly.`;
+  return [
+    `Crypto scan every ${c.everyMinutes} minutes around the clock, last ${timeAgo(c.lastRunAt)}: ${c.scanned} of ${c.total} coins traded on Coinbase or Kraken.`,
+    c.listError ? `The coin list could not be refreshed: ${c.listError}.` : '',
+    c.pulseAt ? `Fast moves watched every minute${c.lastMoveAt ? `, last one rescored ${timeAgo(c.lastMoveAt)}` : ''}.` : '',
   ].filter(Boolean).join(' ');
 }
 

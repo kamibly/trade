@@ -258,7 +258,9 @@ export function parseSp500(csv) {
 // S&P 500 and the top 50 cryptos on the daily chart, plus the opportunity setups.
 // job: { settings, prev: { key: action }, weights, models,
 //        events: { insiders, earnings, fng, funding }, enabled: { setup: bool },
-//        held: [key], announced: [id], muted: [setup] }
+//        held: [key], announced: [id], muted: [setup],
+//        scope: 'stocks' | 'crypto' | 'all', items: crypto to scan (default the top 50),
+//        only: [key] to rescore just these (fast moves; no setups) }
 // result: { at, scanned, buys, sells, newBuys, newSells, actions, weights, errors, alert,
 //           opportunities, records, counts, warnings, digest }
 export async function runMarket(job, deps = defaultDeps) {
@@ -266,30 +268,43 @@ export async function runMarket(job, deps = defaultDeps) {
   const { settings } = job;
   const weights = { ...(job.weights || {}) };
   const errors = {};
-  let stocks;
-  try {
-    stocks = parseSp500(await deps.fetchText(SP500_CSV));
-    if (stocks.length < 400) throw new Error(`only ${stocks.length} rows`);
-  } catch (e) {
-    errors.sp500 = `S&P 500 list: ${e.message}; using the copy saved with the server`;
-    stocks = parseSp500(await readFile(new URL('./sp500.csv', import.meta.url), 'utf8'));
+  const scope = job.scope || 'all';
+  let stocks = [];
+  if (scope !== 'crypto') {
+    try {
+      stocks = parseSp500(await deps.fetchText(SP500_CSV));
+      if (stocks.length < 400) throw new Error(`only ${stocks.length} rows`);
+    } catch (e) {
+      errors.sp500 = `S&P 500 list: ${e.message}; using the copy saved with the server`;
+      stocks = parseSp500(await readFile(new URL('./sp500.csv', import.meta.url), 'utf8'));
+    }
   }
   let crypto = [];
-  try {
-    crypto = await deps.fetchCryptoTop(50);
-  } catch (e) {
-    errors.cryptoTop = `Top crypto list: ${e.message}`;
+  if (scope !== 'stocks') {
+    if (job.items && job.items.length) crypto = job.items;
+    else {
+      try {
+        crypto = await deps.fetchCryptoTop(50);
+      } catch (e) {
+        errors.cryptoTop = `Top crypto list: ${e.message}`;
+      }
+    }
+  }
+  let items = [...crypto, ...stocks];
+  if (job.only) {
+    const only = new Set(job.only);
+    items = items.filter(i => only.has(key(i)));
   }
   const results = [];
   const rows = [];
-  await pool([...crypto, ...stocks], 4, async item => {
+  await pool(items, 4, async item => {
     try {
       results.push(await score(item, tf, settings, weights, deps, job.models, S => rows.push({ item, S: lite(S), sector: item.sector || null })));
     } catch (e) {
       errors[key(item)] = e.message;
     }
   });
-  const setups = await opportunitiesFor(job, rows, deps, errors);
+  const setups = job.only ? {} : await opportunitiesFor({ ...job, scope }, rows, deps, errors);
   const prev = job.prev || {};
   const actions = Object.fromEntries(results.map(r => [r.key, r.action]));
   const buys = results.filter(r => r.action === 'buy').sort((a, b) => b.score - a.score);
@@ -304,7 +319,7 @@ export async function runMarket(job, deps = defaultDeps) {
     alert = {
       kind: 'market',
       setups: ['signal'],
-      title: `Market scan: ${[newBuys.length && `${newBuys.length} new buy`, newSells.length && `${newSells.length} new sell`].filter(Boolean).join(', ')} idea${newBuys.length + newSells.length === 1 ? '' : 's'}`,
+      title: `${scope === 'crypto' ? 'Crypto' : 'Market'} scan: ${[newBuys.length && `${newBuys.length} new buy`, newSells.length && `${newSells.length} new sell`].filter(Boolean).join(', ')} idea${newBuys.length + newSells.length === 1 ? '' : 's'}`,
       body: [newBuys.length && `Buy: ${names(newBuys)}`, newSells.length && `Sell: ${names(newSells)}`].filter(Boolean).join('. '),
       hash: 'signals',
     };
@@ -316,7 +331,7 @@ export async function runMarket(job, deps = defaultDeps) {
     at: deps.now(),
     tf,
     scanned: results.length,
-    total: stocks.length + crypto.length,
+    total: items.length,
     buys: buys.slice(0, 25),
     sells: sells.slice(0, 25),
     newBuys: newBuys.map(r => r.key),
@@ -330,6 +345,9 @@ export async function runMarket(job, deps = defaultDeps) {
       id: `scan:${r.key}:${r.candleTime}`, setup: 'scan', key: r.key, symbol: r.symbol, type: r.type, entry: r.entry, stop: r.stop, take: r.take, ev: r.score / 100,
     })),
     scanSells: sells.map(r => ({ key: r.key, entry: r.entry })),
+    // Where each symbol stood, for the every-minute fast-move watch.
+    levels: Object.fromEntries(results.filter(r => r.type === 'crypto').map(r => [r.key, { entry: r.entry, atr: r.atr }])),
+    scope,
     ...setups,
   };
 }
@@ -337,11 +355,13 @@ export async function runMarket(job, deps = defaultDeps) {
 // The setups on the scan's charts. SPY is the stocks' benchmark, Bitcoin the crypto's.
 async function opportunitiesFor(job, rows, deps, errors) {
   let spy = null;
-  try {
-    const { candles } = await deps.yahooCandles({ type: 'stock', symbol: 'SPY', name: 'S&P 500' }, '1D');
-    if (candles.length >= MIN_CANDLES) spy = lite(analyze(candles));
-  } catch (e) {
-    errors.spy = `S&P 500 benchmark (SPY): ${e.message}`;
+  if (job.scope !== 'crypto') {
+    try {
+      const { candles } = await deps.yahooCandles({ type: 'stock', symbol: 'SPY', name: 'S&P 500' }, '1D');
+      if (candles.length >= MIN_CANDLES) spy = lite(analyze(candles));
+    } catch (e) {
+      errors.spy = `S&P 500 benchmark (SPY): ${e.message}`;
+    }
   }
   const btcRow = rows.find(r => r.item.type === 'crypto' && r.item.symbol === 'BTC');
   const found = findOpportunities({
