@@ -29,6 +29,10 @@ services:
       CRYPTO_SCAN_MINUTES: "15"
       # Optional backup for stocks Yahoo Finance can't serve
       TWELVE_DATA_KEY: ""
+      # Optional: send only the Yahoo and Nasdaq requests through a proxy, such
+      # as a Tailscale container with a home exit node (http:// or socks5://).
+      # The proxy container must share a Docker network with this one.
+      STOCK_PROXY: ""
       # When the machine-learning models retrain each week (local time)
       TRAIN_AT: "Sun 03:00"
       # Your email address. The SEC asks every program that reads its filings to
