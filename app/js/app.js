@@ -14,12 +14,13 @@ import { SETUPS, recordLine, proven as setupProven, MIN_PROVEN } from './setups.
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
 import { voteMatrix, backtest } from './backtest.js';
 import * as paper from './paper.js';
+import { feeOf } from './fees.js';
 import * as pf from './portfolio.js';
 import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.11.0 (trade filter)';
+export const APP_VERSION = '0.11.1 (stop and target in dollars)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -120,7 +121,11 @@ function findItem(key) {
   if (own) return own;
   // Symbols from the server's market scan open as charts too.
   const m = state.market && [...(state.market.buys || []), ...(state.market.sells || []), ...(state.market.opportunities || [])].find(x => x.key === key);
-  return m ? { type: m.type, symbol: m.symbol, name: m.name } : undefined;
+  if (m) return { type: m.type, symbol: m.symbol, name: m.name };
+  // So do paper trades of ideas that have since left the scan's lists.
+  const acc = state.serverPaper && state.serverPaper.paper ? state.serverPaper.paper : state.paper;
+  const p = acc && [...(acc.positions || []), ...(acc.trades || [])].find(x => x.key === key);
+  return p ? { type: p.type, symbol: p.symbol, name: p.symbol } : undefined;
 }
 const serverOn = () => !!(state.settings.serverUrl && state.settings.serverKey);
 // With server alerts on, the server notifies; the open app only shows a toast.
@@ -1276,11 +1281,27 @@ function renderHoldings() {
             el('div', { class: 'price', text: formatMoney(v.value) }),
             el('span', { class: changeClass(v.pct), text: fmtPct(v.pct) }))),
       el('div', { class: 'sub', text: `${h.qty} at ${formatMoney(h.buyPrice)} · now ${formatMoney(price)} · ${v.pnl >= 0 ? '+' : ''}${formatMoney(v.pnl)}` }),
+      outcomeLine(h.qty, h.qty * h.buyPrice, h.stop, h.take),
       el('div', { class: 'sub' },
         `Stop ${h.stop != null ? formatMoney(h.stop) : 'not set'} · Target ${h.take != null ? formatMoney(h.take) : 'not set'} `,
         lvl === 'stop' ? el('span', { class: 'level stop', text: 'Stop hit' }) : lvl === 'target' ? el('span', { class: 'level target', text: 'Target reached' }) : null));
   }));
   if (!state.holdings.length) list.append(el('p', { class: 'muted center', text: 'Add what you own to get stop-loss, target and sell alerts.' }));
+}
+
+// What the position is worth if it sells at its stop and at its target,
+// against what was invested (less the broker's fee when `type` is given).
+function outcomeLine(qty, invested, stop, take, type) {
+  const at = price => qty * price - (type ? feeOf(type, qty, price) : 0);
+  const part = (name, price) => {
+    if (price == null || !Number.isFinite(price)) return null;
+    const v = at(price);
+    return el('span', {}, `${name}: ${formatMoney(v)} `, el('span', { class: upDown(v - invested), text: `(${signed(v - invested)})` }));
+  };
+  const s = part('At the stop', stop);
+  const t = part('At the target', take);
+  if (!s && !t) return null;
+  return el('div', { class: 'sub' }, ...[s, s && t ? ' · ' : null, t].filter(Boolean));
 }
 
 function removeHolding(h) {
@@ -1440,6 +1461,7 @@ function renderPaper() {
             stat('Gain/loss', Number.isFinite(pnl) ? signed(pnl) : '–', upDown(pnl))),
           el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
           el('div', { class: 'sub', text: `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
+          outcomeLine(p.qty, p.cost, p.stop, p.take, p.type),
           p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
           el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}` }))))
       : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
