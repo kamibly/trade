@@ -662,8 +662,25 @@ def current_ideas(state: dict):
     latest stock and crypto scans, for the paper account."""
     scans = state.get("scans") or {}
     opps = (state.get("market") or {}).get("opportunities") or []
-    buys = sorted((b for x in scans.values() for b in ((x or {}).get("paperBuys") or [])), key=lambda b: -(b.get("ev") or 0))
+    starts = state.get("buyStarts") or {}
+    buys = sorted((b for x in scans.values() for b in _paper_buys(x or {}, starts)), key=lambda b: -(b.get("ev") or 0))
     return opps, buys
+
+
+def _paper_buys(scan: dict, starts: dict) -> List[dict]:
+    """A scan's buy ideas for the paper account. A scan saved by an older
+    version has no paperBuys (stocks scan only on weekdays, so one can stay
+    that way for days): they are rebuilt from its buy list."""
+    if "paperBuys" in scan:
+        return scan["paperBuys"]
+    out = []
+    for r in scan.get("buys") or []:
+        start = starts.get(r["key"]) or {"at": scan.get("at") or 0, "entry": r.get("entry")}
+        out.append({"id": f"scan:{r['key']}:{start['at']}", "setup": "scan", "key": r["key"], "symbol": r.get("symbol"),
+                    "type": r.get("type"), "entry": r.get("entry"), "stop": r.get("stop"), "take": r.get("take"),
+                    "ev": (r.get("score") or 0) / 100,
+                    "ranAway": bool(r.get("entry") and start.get("entry") and r["entry"] > start["entry"] + (r.get("atr") or 0))})
+    return out
 
 
 def offer_ideas(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:

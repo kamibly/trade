@@ -93,16 +93,72 @@ export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(),
     else if (p.until && now >= p.until) events.push(closePosition(acc, p, s.entry, 'time', now));
     else if (s.action === 'sell' && setupOf(p) === 'signal') events.push(closePosition(acc, p, s.entry, 'sell signal', now));
   }
-  for (const [key, action] of Object.entries(alerts)) {
-    const s = signals[key];
-    if (action !== 'buy' || !s || acc.positions.some(p => p.key === key)) continue;
-    const slot = room(acc, { setup: 'signal' }, budgets);
-    if (!slot) continue;
-    const ev = open(acc, s, { key, riskPct, now, prices, setup: 'signal', cap: slot.cap });
+  // Watchlist Buys: not only a new Buy, but any current Buy the account
+  // doesn't hold yet, while the price is within 1 ATR of where the Buy began.
+  // Each Buy is bought once. (`alerts` only adds Buys a caller knows are new.)
+  acc.signalStarts ||= {};
+  acc.taken ||= [];
+  for (const [key, sig] of Object.entries(signals)) {
+    if (!sig.action) continue; // a price check, not a scored signal
+    if (sig.action === 'buy' || alerts[key] === 'buy') acc.signalStarts[key] ||= { at: now, entry: sig.entry };
+    else delete acc.signalStarts[key];
+  }
+  const buys = Object.entries(signals)
+    .filter(([key, sig]) => sig.action === 'buy' || alerts[key] === 'buy')
+    .sort(([, a], [, b]) => (b.score || 0) - (a.score || 0));
+  for (const [key, sig] of buys) {
+    const start = acc.signalStarts[key];
+    const id = `signal:${key}:${start.at}`;
+    const idea = { ...sig, id, key, setup: 'signal', ranAway: ok(sig.atr) && sig.entry > start.entry + sig.atr };
+    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets });
     if (ev) events.push(ev);
   }
+  pruneTaken(acc);
   mark(acc, prices, now);
   return events;
+}
+
+// Why an idea is not in the account, for the app: { key: reason }.
+const SKIPS = {
+  held: 'already held',
+  full: 'its budget is full',
+  cash: 'not enough cash left',
+  done: 'already bought once for this signal',
+  ranAway: 'the price moved more than 1 ATR since the idea began',
+  levels: 'no valid stop below the price',
+};
+
+function skip(acc, key, why) {
+  acc.skips ||= {};
+  acc.skips[key] = SKIPS[why];
+}
+
+// Buys one idea if its budget, cash and price allow; records why not otherwise.
+function tryOpen(acc, o, { riskPct, now, prices, budgets }) {
+  acc.skips ||= {};
+  if (acc.positions.some(p => p.key === o.key)) { delete acc.skips[o.key]; return null; }
+  // An idea counts as taken only if it was really traded: older versions
+  // marked ideas they had no cash for, which then were never bought.
+  const traded = acc.positions.some(p => p.key === o.key) || acc.trades.some(t => t.key === o.key);
+  if (acc.taken.includes(o.id) && traded) return skip(acc, o.key, 'done'), null;
+  if (o.ranAway) return skip(acc, o.key, 'ranAway'), null;
+  if (!(o.entry > 0) || !(o.stop < o.entry)) return skip(acc, o.key, 'levels'), null;
+  const slot = room(acc, o, budgets);
+  if (!slot) return skip(acc, o.key, 'full'), null;
+  // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
+  const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
+  const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: slot.cap });
+  // Without the cash to buy it, the idea is tried again next scan.
+  if (!ev) return skip(acc, o.key, 'cash'), null;
+  delete acc.skips[o.key];
+  acc.taken.push(o.id);
+  return ev;
+}
+
+function pruneTaken(acc) {
+  if (acc.taken.length > 300) acc.taken.splice(0, acc.taken.length - 300);
+  const keys = Object.keys(acc.skips || {});
+  if (keys.length > 300) for (const k of keys.slice(0, keys.length - 300)) delete acc.skips[k];
 }
 
 // Opens paper trades for the market scan's opportunities, best expected
@@ -115,23 +171,11 @@ export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), 
   acc.taken ||= [];
   const prices = {};
   const list = [...opportunities].sort((a, b) => (b.ev || 0) - (a.ev || 0));
-  // An idea counts as taken only if it was really traded: older versions
-  // marked ideas they had no cash for, which then were never bought.
-  const traded = new Set([...acc.positions, ...acc.trades].map(p => p.key));
   for (const o of list) {
-    const slot = room(acc, o, budgets);
-    if (!slot) continue;
-    if ((acc.taken.includes(o.id) && traded.has(o.key)) || acc.positions.some(p => p.key === o.key)) continue;
-    if (!(o.entry > 0) || !(o.stop < o.entry)) continue;
-    // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
-    const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
-    const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: slot.cap });
-    // Without the cash to buy it, the idea is tried again next scan.
-    if (!ev) continue;
-    acc.taken.push(o.id);
-    events.push(ev);
+    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets });
+    if (ev) events.push(ev);
   }
-  if (acc.taken.length > 300) acc.taken.splice(0, acc.taken.length - 300);
+  pruneTaken(acc);
   if (events.length) mark(acc, prices, now);
   return events;
 }

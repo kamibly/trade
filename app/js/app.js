@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.9.7 (crypto around the clock)';
+export const APP_VERSION = '0.9.8 (crypto around the clock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -692,7 +692,7 @@ function renderSignals() {
   const errors = Object.entries(scan.errors);
   const section = (title, list, empty) => [
     el('h2', { class: 'section', text: `${title} (${list.length})` }),
-    list.length ? el('ul', { class: 'list' }, ...list.map(signalCard)) : el('p', { class: 'muted small', text: empty }),
+    list.length ? el('ul', { class: 'list' }, ...list.map(sig => paperNote(signalCard(sig), sig))) : el('p', { class: 'muted small', text: empty }),
   ];
   $('signals-body').replaceChildren(
     ...section(`Your watchlist: Buy on ${TIMEFRAMES[tf].label}`, buys, 'No symbol is a Buy right now.'),
@@ -850,12 +850,10 @@ function renderMarket() {
     return;
   }
   const fresh = new Set([...(m.newBuys || []), ...(m.newSells || [])]);
-  const inPaper = new Set(serverPaperOn() ? (state.serverPaper.paper.positions || []).map(p => p.key) : []);
   const card = sig => {
     const li = signalCard(sig);
     if (fresh.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge', text: 'New' }));
-    if (inPaper.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
-    return li;
+    return paperNote(li, sig);
   };
   // The 10 strongest, then a button for the rest.
   const list = (title, rows, empty) => {
@@ -877,6 +875,19 @@ function scanLine(m) {
   const crypto = m.cryptoAt ? `${m.cryptoScanned} coins ${timeAgo(m.cryptoAt)}` : 'crypto not yet';
   const stocks = m.stocksAt ? `${m.stocksScanned} S&P 500 stocks ${timeAgo(m.stocksAt)}` : 'stocks not yet';
   return `Daily chart, scanned by your server: ${crypto} (every 15 minutes, day and night), ${stocks}.`;
+}
+
+// Buy ideas the server's paper account holds get a PAPER tag; the others say
+// why it didn't buy them.
+function paperNote(li, sig) {
+  if (!serverPaperOn() || sig.action !== 'buy') return li;
+  const acc = state.serverPaper.paper;
+  if ((acc.positions || []).some(p => p.key === sig.key)) {
+    li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
+  } else if (acc.skips && acc.skips[sig.key]) {
+    li.append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[sig.key]}.` }));
+  }
+  return li;
 }
 
 // ---- Your server ---------------------------------------------------------------
@@ -1326,7 +1337,7 @@ async function refreshPaper() {
     state.serverPaper = { ...r, fetchedAt: Date.now() };
     store.saveServerPaper(state.serverPaper);
     if (state.view === 'portfolio' && state.pfTab === 'paper') renderPaper();
-    if (state.view === 'signals') renderMarket();
+    if (state.view === 'signals') renderSignals();
   } catch (e) {
     console.warn('Paper account fetch failed', e);
   }

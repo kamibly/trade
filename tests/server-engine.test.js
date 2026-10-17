@@ -138,7 +138,8 @@ test('crypto scan covers the given coins only, and a fast-move rescore scores ju
   const key0 = full.buys[0].key;
   const ranAway = { ...full.buyStarts, [key0]: { at: 1, entry: full.buys[0].entry - 2 * full.buys[0].atr } };
   const later = await runMarket({ scope: 'crypto', items, settings, prev: full.actions, weights: full.weights, buyStarts: ranAway }, d);
-  assert.ok(!later.scanBuys.some(b => b.key === key0));
+  assert.ok(later.scanBuys.find(b => b.key === key0).ranAway);
+  assert.ok(!full.scanBuys.some(b => b.ranAway));
   assert.deepEqual(later.buyStarts[key0], ranAway[key0]);
 });
 

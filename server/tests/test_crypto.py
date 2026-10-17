@@ -162,3 +162,15 @@ def test_a_reset_account_buys_the_current_ideas_right_away(monkeypatch):
     monkeypatch.setattr(service, "paper_opportunities", lambda opps, engine, buys, sells: offered.append((opps, buys)))
     service.reset_paper()
     assert offered == [([{"id": "o", "key": "stock:AAPL"}], [buy])]
+
+
+def test_a_stock_scan_saved_before_paper_buys_still_offers_its_buy_ideas():
+    # Saved by an older version: buys but no paperBuys, and no stock scan until Monday.
+    aapl = {"key": "stock:AAPL", "symbol": "AAPL", "type": "stock", "entry": 250.0, "stop": 240.0, "take": 270.0, "atr": 5.0, "score": 40}
+    far = {"key": "stock:MSFT", "symbol": "MSFT", "type": "stock", "entry": 520.0, "stop": 500.0, "take": 560.0, "atr": 8.0, "score": 30}
+    state = {"scans": {"stocks": {"at": 7, "buys": [far, aapl]}},
+             "buyStarts": {"stock:AAPL": {"at": 3, "entry": 248.0}, "stock:MSFT": {"at": 4, "entry": 500.0}}}
+    _, buys = service.current_ideas(state)
+    assert [b["id"] for b in buys] == ["scan:stock:AAPL:3", "scan:stock:MSFT:4"]
+    assert buys[0]["setup"] == "scan" and buys[0]["type"] == "stock" and buys[0]["stop"] == 240.0 and not buys[0]["ranAway"]
+    assert buys[1]["ranAway"]

@@ -207,8 +207,8 @@ export async function runWatch(job, deps = defaultDeps) {
       });
     }
   }
-  // The paper account trades the same signals: buys on a new Buy, sells on a
-  // Sell, the stop-loss or the target.
+  // The paper account trades the same signals: buys a Buy it doesn't hold yet
+  // (within 1 ATR of where it began), sells on a Sell, the stop-loss or the target.
   let paperEvents = [];
   if (job.paper) {
     paperEvents = paper.step(job.paper, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now() })
@@ -270,7 +270,7 @@ export async function runPrices(job, deps = defaultDeps) {
   }
   let paperEvents = [];
   if (job.paper) {
-    const signals = Object.fromEntries(Object.entries(prices).map(([k, p]) => [k, { entry: p, action: 'hold' }]));
+    const signals = Object.fromEntries(Object.entries(prices).map(([k, p]) => [k, { entry: p }]));
     paperEvents = paper.step(job.paper, { signals, alerts: {}, now: deps.now() })
       .map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
   }
@@ -406,8 +406,9 @@ export async function runMarket(job, deps = defaultDeps) {
     alert,
     // For the paper account: every buy idea still within 1 ATR of where it
     // began, strongest first (each bought once per idea), and every Sell.
-    scanBuys: buys.filter(r => r.entry <= buyStarts[r.key].entry + (r.atr || 0)).map(r => ({
+    scanBuys: buys.map(r => ({
       id: `scan:${r.key}:${buyStarts[r.key].at}`, setup: 'scan', key: r.key, symbol: r.symbol, type: r.type, entry: r.entry, stop: r.stop, take: r.take, ev: r.score / 100,
+      ranAway: r.entry > buyStarts[r.key].entry + (r.atr || 0),
     })),
     buyStarts,
     scanSells: sells.map(r => ({ key: r.key, entry: r.entry })),

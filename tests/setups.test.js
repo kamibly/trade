@@ -248,3 +248,26 @@ test('paper: each source has its own budget, so opportunities cannot crowd out b
   assert.ok(Math.abs(w.qty * w.entry - 400) < 1); // 20% / 5 = 4% of $10,000
   assert.ok(acc.cash > 0);
 });
+
+test('paper: a watchlist Buy is bought even when it was already a Buy, and the app learns why others were not', () => {
+  const acc = paper.newAccount(10_000, 0);
+  const sig = (entry, action = 'buy') => ({ symbol: 'AAPL', type: 'stock', action, entry, atr: 2, stop: entry - 4, take: entry + 6, score: 40 });
+  // Already a Buy before this run (no alert this time): still bought.
+  assert.equal(paper.step(acc, { signals: { 'stock:AAPL': sig(100) }, now: 1 }).length, 1);
+  // Stopped out while still a Buy: not bought again for the same Buy.
+  paper.step(acc, { signals: { 'stock:AAPL': sig(95) }, now: 2 });
+  assert.equal(acc.positions.length, 0);
+  assert.equal(paper.step(acc, { signals: { 'stock:AAPL': sig(96) }, now: 3 }).length, 0);
+  assert.match(acc.skips['stock:AAPL'], /already bought once/);
+  // A price check (no action) keeps the Buy's start; a Hold ends it, and the next Buy is new.
+  paper.step(acc, { signals: { 'stock:AAPL': { entry: 96 } }, now: 4 });
+  assert.equal(acc.signalStarts['stock:AAPL'].at, 1);
+  paper.step(acc, { signals: { 'stock:AAPL': sig(96, 'hold') }, now: 5 });
+  assert.equal(paper.step(acc, { signals: { 'stock:AAPL': sig(97) }, now: 6 }).length, 1);
+  // A Buy that ran more than 1 ATR past its start is skipped, with the reason.
+  const b = paper.newAccount(10_000, 0);
+  paper.step(b, { signals: { 'stock:MSFT': { ...sig(100), symbol: 'MSFT', action: 'hold' } }, now: 1 });
+  b.signalStarts['stock:MSFT'] = { at: 1, entry: 90 };
+  assert.equal(paper.step(b, { signals: { 'stock:MSFT': { ...sig(100), symbol: 'MSFT' } }, now: 2 }).length, 0);
+  assert.match(b.skips['stock:MSFT'], /moved more than 1 ATR/);
+});
