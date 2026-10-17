@@ -26,6 +26,8 @@ export const DEFAULT_SETTINGS = {
   timeframe: '1D',
   showCad: true,
   alertTf: '1D',
+  tune: 'auto',
+  mode: 'standard',
   buyAt: 40,
   sellAt: -40,
   notifications: false,
@@ -86,11 +88,12 @@ export const saveQuotes = quotes => write('quotes', quotes);
 export const getSignals = () => read('signals', {});
 export const saveSignals = signals => write('signals', signals);
 
-// Method weights from the backtest per symbol and timeframe: { "<key>:<tf>": { at, weights } }.
+// Method weights and tuned rule from the backtest per symbol and timeframe: { "<key>:<tf>": { at, weights, rule, test, key } }.
 export const getWeights = () => read('weights', {});
-export function saveWeight(item, tf, weights) {
+// `learned` is scanner.learn()'s result: { weights, rule, test, key }.
+export function saveWeight(item, tf, learned) {
   const all = getWeights();
-  all[`${itemKey(item)}:${tf}`] = { at: Date.now(), weights };
+  all[`${itemKey(item)}:${tf}`] = { at: Date.now(), ...learned };
   write('weights', all);
 }
 export const weightFor = (item, tf) => getWeights()[`${itemKey(item)}:${tf}`] || null;

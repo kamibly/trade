@@ -9,16 +9,16 @@ import * as F from './forecast.js';
 import {
   analyze, signalAt, scoreVotes, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
 } from './signals.js';
-import { scanItem, alertFor } from './scanner.js';
+import { scanItem, alertFor, manualRule, autoTune, learnKey, backtestOptions, learnedFrom, ruleOf } from './scanner.js';
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
 import { voteMatrix, backtest } from './backtest.js';
 import * as paper from './paper.js';
 import * as pf from './portfolio.js';
 import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
-import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON } from './ml.js';
+import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.6.1 (server monitoring)';
+export const APP_VERSION = '0.7.0 (tuned signals)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -92,8 +92,15 @@ function toast(message, action) {
 
 const changeClass = pct => (pct > 0 ? 'change up' : pct < 0 ? 'change down' : 'change');
 const cadRate = () => (state.settings.showCad && state.fx ? state.fx.rate : NaN);
-const thresholds = () => ({ buy: state.settings.buyAt, sell: state.settings.sellAt });
-const scoreClass = score => (score >= state.settings.buyAt ? 'up' : score <= state.settings.sellAt ? 'down' : 'flat');
+const thresholds = () => manualRule(state.settings);
+const scoreClass = (score, rule = thresholds()) => (score >= rule.buy ? 'up' : score <= rule.sell ? 'down' : 'flat');
+// One line on how a rule turns the score into Buy and Sell.
+function ruleText(rule, tuned) {
+  const who = tuned ? 'Tuned for this symbol: ' : '';
+  return rule.mode === 'dip'
+    ? `${who}buy the dip in an uptrend. Buy at ${fmtScore(rule.buy)} or more right after a pullback while the price is above its 200 average; sell at ${fmtScore(rule.sell)} or less, or when the price closes below that average.`
+    : `${who}Buy at ${fmtScore(rule.buy)} or more, sell at ${fmtScore(rule.sell)} or less.`;
+}
 const ACTION_WORDS = { buy: 'Buy', sell: 'Sell', hold: 'Hold' };
 // Everything that needs prices and signals: the watchlist plus held symbols.
 function trackedItems() {
@@ -459,7 +466,7 @@ function levelsLine(sig) {
   return `Entry ${formatMoney(sig.entry)} · Stop ${formatMoney(sig.stop)} · ${word} ${formatMoney(sig.take)}`;
 }
 
-function chartOverlays(S, candles, scores) {
+function chartOverlays(S, candles, scores, rule) {
   const o = state.settings.overlays;
   const n = candles.length;
   const step = TIMEFRAMES[state.chartTf].seconds;
@@ -496,7 +503,7 @@ function chartOverlays(S, candles, scores) {
   let markers = [];
   if (o.markers) {
     const hist = scores.map((v, i) => (i < n - 250 ? NaN : v));
-    markers = crossings(hist, thresholds()).map(x => ({ time: candles[x.i].time, action: x.action }));
+    markers = crossings(hist, rule, S).map(x => ({ time: candles[x.i].time, action: x.action }));
   }
   return { overlays, markers, titles, outlook };
 }
@@ -530,18 +537,22 @@ function renderAnalysis() {
   // The votes and backtest take a moment on a phone, so they are kept until the candles change.
   const models = state.models[state.chartTf] || null;
   const id = `${store.itemKey(state.chartItem)}:${state.chartTf}:${candles.length}:${candles.at(-1).time}:${candles.at(-1).close}:${models ? models.trainedAt : ''}`;
-  const opts = { thresholds: thresholds(), ...riskOpts() };
-  if (!state.analysis || state.analysis.id !== id || state.analysis.opts !== JSON.stringify(opts)) {
+  const key = learnKey(state.settings);
+  if (!state.analysis || state.analysis.id !== id || state.analysis.key !== key) {
     const S = analyze(candles, { models });
     const votes = voteMatrix(S);
-    const bt = backtest(S, { ...opts, votes });
-    if (bt) store.saveWeight(state.chartItem, state.chartTf, bt.weights);
-    state.analysis = { id, opts: JSON.stringify(opts), S, votes, bt };
+    const bt = backtest(S, backtestOptions(state.settings, votes));
+    const learned = learnedFrom(bt, state.settings);
+    if (bt) store.saveWeight(state.chartItem, state.chartTf, learned);
+    state.analysis = { id, key, S, votes, bt, learned };
   }
-  const { S, votes, bt } = state.analysis;
+  const { S, votes, bt, learned } = state.analysis;
   const weights = bt ? bt.weights : undefined;
+  const rule = ruleOf(state.settings, learned);
+  const tuned = autoTune(state.settings) && !!learned.rule;
+  const opts = { thresholds: rule, ...riskOpts() };
   const scores = votes.map(v => (v.length ? scoreVotes(v, weights) : NaN));
-  const { overlays, markers, titles, outlook } = chartOverlays(S, candles, scores);
+  const { overlays, markers, titles, outlook } = chartOverlays(S, candles, scores, rule);
   state.chart.setOverlays(overlays, markers, titles);
   const mlText = state.settings.overlays.ml ? mlLineText(outlook, S.models) : '';
   $('ml-line').textContent = mlText;
@@ -556,10 +567,11 @@ function renderAnalysis() {
       el('div', { class: 'score-row' },
         el('div', {},
           el('div', { class: 'muted small', text: `Combined score, ${TIMEFRAMES[state.chartTf].label} chart` }),
-          el('div', { class: `score ${scoreClass(sig.score)}`, text: fmtScore(sig.score) })),
+          el('div', { class: `score ${scoreClass(sig.score, rule)}`, text: fmtScore(sig.score) })),
         el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
       scoreMeter(sig.score),
-      el('p', { class: 'small', text: `${Math.round(sig.confidence * 100)}% of the methods with an opinion agree. Buy at ${fmtScore(state.settings.buyAt)} or more, sell at ${fmtScore(state.settings.sellAt)} or less.` }),
+      el('p', { class: 'small', text: `${Math.round(sig.confidence * 100)}% of the methods with an opinion agree. ${ruleText(rule, tuned)}` }),
+      rule.mode === 'dip' ? el('p', { class: 'muted small', text: dipLine(sig.ctx) }) : null,
       el('p', { class: 'small', text: levelsLine(sig) }),
       el('p', { class: 'muted small', text: `Stop is ${state.settings.stopAtr} × ATR and target ${state.settings.takeAtr} × ATR from the entry. ${bt ? 'Methods are weighted by how often they were right in the backtest below.' : 'Methods count equally until there is enough history to backtest.'} Not financial advice: these methods are often wrong.` })),
     bt ? backtestCard(bt) : el('p', { class: 'muted small', text: 'The backtest needs about 180 candles; this chart has fewer.' }),
@@ -577,34 +589,44 @@ function renderAnalysis() {
 function modelsCard(models, bt) {
   if (!models) {
     return serverOn()
-      ? el('p', { class: 'muted small', text: `Machine learning: your server hasn't trained models for the ${TIMEFRAMES[state.chartTf].label} chart yet. It trains weekly, and for a new alert timeframe soon after you switch.` })
+      ? el('p', { class: 'muted small', text: `Machine learning: your server hasn't trained models for the ${TIMEFRAMES[state.chartTf].label} chart yet. It trains every timeframe weekly, and any that has no models soon after it starts.` })
       : el('p', { class: 'muted small', text: 'Machine learning (LightGBM and an LSTM network) runs when your server is connected in Settings.' });
   }
   const fmtDate = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  const row = (name, m) => {
+  const row = (name, m, id) => {
     const t = m && m.test;
     if (!t) return el('div', { class: 'bt-row' }, el('span', { text: name }), el('span', { class: 'muted', text: 'not trained' }));
     const used = modelUsable(m);
-    const s = bt && bt.stats[name === 'LightGBM' ? 'lgbm' : 'lstm'];
+    const s = bt && bt.stats[id];
+    const base = Number.isFinite(t.base) ? ` (happens ${Math.round(t.base * 100)}% anyway)` : '';
     return el('div', { class: 'bt-row' },
       el('span', { text: name }),
       el('span', {
         class: used ? 'good' : 'muted',
-        text: `right ${Math.round(t.hit * 100)}% of ${t.n} test calls · ${used ? `votes${s && s.n ? ` · weight ${bt.weights[s.id].toFixed(2)}` : ''}` : 'not used'}`,
+        text: `right ${Math.round(t.hit * 100)}% of ${t.n} test calls${base} · ${used ? `votes${s && s.n ? ` · weight ${bt.weights[s.id].toFixed(2)}` : ''}` : 'not used'}`,
       }));
   };
   return el('div', { class: 'card' },
     el('h3', { text: 'Machine-learning models' }),
-    el('p', { class: 'muted small', text: `Trained on your server ${fmtDate(models.trainedAt)} from ${models.symbols} charts. Each predicts whether the price is higher after fees ${ML_HORIZON} candles later, and was tested on the newest ${models.testRows} candles it never trained on (prices went up ${Math.round(((models.lgbm && models.lgbm.test && models.lgbm.test.upShare) || 0) * 100)}% of the time there).` }),
-    row('LightGBM', models.lgbm),
-    row('LSTM', models.lstm),
-    el('p', { class: 'muted small', text: 'A model votes only if it was right more than half the time on at least 200 clear test calls. Like every method, the backtest then weights it by how often it was right.' }));
+    el('p', { class: 'muted small', text: `Trained on your server ${fmtDate(models.trainedAt)} from ${models.symbols} charts. LightGBM and the LSTM predict whether the price is higher after fees ${ML_HORIZON} candles later. All four were tested on the newest ${models.testRows} candles they never trained on (prices went up ${Math.round(((models.lgbm && models.lgbm.test && models.lgbm.test.upShare) || 0) * 100)}% of the time there).` }),
+    row('LightGBM', models.lgbm, 'lgbm'),
+    row('LSTM', models.lstm, 'lstm'),
+    row('Bottom finder', models.bottom, 'bottom'),
+    row('Top finder', models.top, 'top'),
+    el('p', { class: 'muted small', text: `The bottom finder learns whether a buy here reached its target before its stop; the top finder, whether the price fell to a target before rising to a stop. They only push the score their way. LightGBM and the LSTM vote only if right more than half the time on at least 200 clear test calls; the finders, only if right ${Math.round(TURN_EDGE * 100)} points more often than the outcome happens anyway. Like every method, the backtest then weights them by how often they were right.` }));
 }
 
 function methodNote(v, bt) {
   const s = bt && bt.stats[v.id];
   if (!s || !s.n) return v.note;
   return `${v.note} · right ${Math.round(s.hit * 100)}% of ${s.n} times · weight ${bt.weights[v.id].toFixed(2)}`;
+}
+
+function dipLine(ctx) {
+  if (!ctx) return '';
+  return ctx.uptrend
+    ? `Uptrend now${ctx.pulledBack ? ', and the price just pulled back: a Buy can fire.' : ', but no pullback yet: waiting for RSI or Stochastic to dip.'}`
+    : ctx.belowTrend ? 'The price is below its 200 average: no Buys until the uptrend is back.' : 'No clear uptrend yet: no Buys.';
 }
 
 function backtestCard(bt) {
@@ -619,8 +641,10 @@ function backtestCard(bt) {
   return el('div', { class: 'card' },
     el('h3', { text: 'Backtest' }),
     el('p', { class: 'muted small', text: `Weights learned from ${fmtDate(bt.trainFrom)} to ${fmtDate(bt.testFrom)}, then tested on the ${bt.testCandles} newer candles they never saw. Long only, buying on a new Buy score and selling on the stop-loss, target or a Sell score, with 0.1% fees.` }),
-    line('Weighted methods', w),
+    bt.rule ? line(`Tuned levels (${bt.rule.mode === 'dip' ? 'dip mode' : 'standard'}, ${fmtScore(bt.rule.buy)} / ${fmtScore(bt.rule.sell)})`, bt.tuned) : null,
+    bt.rule ? line('Standard levels (+40 / -40)', bt.standard) : line('Weighted methods', w),
     line('All methods equal', bt.equal),
+    bt.rule ? el('p', { class: 'muted small', text: `The tuned levels were picked on the older candles only (where they made ${fmtPct(bt.tunedTrain ? bt.tunedTrain.totalReturn : NaN)}), so the test above shows whether they hold up on candles they never saw.` }) : null,
     el('div', { class: 'bt-row' }, el('span', { text: 'Buy and hold' }), el('span', { class: w.buyHold > 0 ? 'good' : 'bad', text: fmtPct(w.buyHold) })),
     w.open ? el('p', { class: 'small', text: `A test trade is still open from ${formatMoney(w.open.entry)}, counted at today's price.` }) : null,
     el('p', { class: 'muted small', text: 'Past results do not predict future ones, and a short test can be luck.' }));
@@ -634,10 +658,19 @@ function signalCard(sig) {
     el('div', { class: 'signal-top' },
       el('div', { class: 'sym' }, sig.symbol, el('span', { class: 'badge', text: sig.type === 'stock' ? 'Stock' : 'Crypto' }),
         el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
-      el('div', { class: `score ${scoreClass(sig.score)}`, text: fmtScore(sig.score) })),
+      el('div', { class: `score ${scoreClass(sig.score, sig.rule)}`, text: fmtScore(sig.score) })),
     scoreMeter(sig.score),
     el('div', { class: 'sub', text: `${Math.round(sig.confidence * 100)}% agree · ${levelsLine(sig)}` }),
+    sig.tuned && sig.rule ? el('div', { class: 'sub', text: tunedLine(sig) }) : null,
     sig.top && sig.top.length ? el('div', { class: 'sub', text: `Led by ${sig.top.join(', ')}` }) : null);
+}
+
+// "Tuned: Buy +25, Sell -30, dip mode · test +8% vs +3% standard"
+function tunedLine(sig) {
+  const r = sig.rule;
+  const t = sig.tuned.test;
+  const test = t && t.tuned && t.standard ? ` · test ${fmtPct(t.tuned.ret)} vs ${fmtPct(t.standard.ret)} standard` : '';
+  return `Tuned: Buy ${fmtScore(r.buy)}, Sell ${fmtScore(r.sell)}${r.mode === 'dip' ? ', dip mode' : ''}${test}`;
 }
 
 function renderSignals() {
@@ -659,8 +692,8 @@ function renderSignals() {
     list.length ? el('ul', { class: 'list' }, ...list.map(signalCard)) : el('p', { class: 'muted small', text: empty }),
   ];
   $('signals-body').replaceChildren(
-    ...section('Buy ideas', buys, `No symbol is at ${fmtScore(state.settings.buyAt)} or above right now.`),
-    ...section('Sell ideas', sells, `No symbol is at ${fmtScore(state.settings.sellAt)} or below right now.`),
+    ...section('Buy ideas', buys, 'No symbol is a Buy right now.'),
+    ...section('Sell ideas', sells, 'No symbol is a Sell right now.'),
     ...section('Watching', holds, 'Nothing else scanned yet.'),
     errors.length ? el('p', { class: 'muted small', text: `Could not score: ${errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ')}` }) : '',
   );
@@ -802,7 +835,8 @@ function modelsLine(st) {
   const next = st.training && st.training.nextAt ? ` Next training ${new Date(st.training.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '';
   if (!models.length) return `${failed.length ? `Model training failed: ${failed[0][1].error}.` : 'Machine-learning models are not trained yet.'}${next}`;
   const pct = t => (t ? `${Math.round(t.hit * 100)}%${t.usable ? '' : ' (not used)'}` : 'none');
-  return `${models.map(([tf, m]) => `${TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf} models right ${pct(m.lgbm)} (LightGBM) and ${pct(m.lstm)} (LSTM) in their test, trained ${timeAgo(m.trainedAt)}.`).join(' ')}${failed.length ? ` Last training of ${failed.map(([tf]) => tf).join(', ')} failed.` : ''}${next}`;
+  const turns = m => (m.bottom || m.top ? `, bottom finder ${pct(m.bottom)}, top finder ${pct(m.top)}` : '');
+  return `${models.map(([tf, m]) => `${TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf}: LightGBM ${pct(m.lgbm)}, LSTM ${pct(m.lstm)}${turns(m)} right in their test, trained ${timeAgo(m.trainedAt)}.`).join(' ')}${failed.length ? ` Last training of ${failed.map(([tf]) => tf).join(', ')} failed.` : ''}${next}`;
 }
 
 async function saveServer() {
@@ -938,7 +972,11 @@ async function runScan({ force = false } = {}) {
 
 // New buy/sell levels change each symbol's action without a new scan (and without alerts).
 function rescoreSignals() {
-  for (const s of Object.values(state.signals)) s.action = actionFor(s.score, thresholds());
+  for (const s of Object.values(state.signals)) {
+    const rule = autoTune(state.settings) && s.tuned && s.rule ? s.rule : thresholds();
+    s.rule = rule;
+    s.action = actionFor(s.score, rule, s.ctx);
+  }
   store.saveSignals(state.signals);
   renderSignals();
   if (state.view === 'chart') renderAnalysis();
@@ -1208,6 +1246,12 @@ function renderSettings() {
   $('alert-tf').value = state.settings.alertTf;
   $('buy-at').value = state.settings.buyAt;
   $('sell-at').value = -state.settings.sellAt;
+  $('tune-mode').value = autoTune(state.settings) ? 'auto' : 'manual';
+  $('signal-mode').value = state.settings.mode === 'dip' ? 'dip' : 'standard';
+  $('manual-levels').hidden = autoTune(state.settings);
+  $('tune-note').textContent = autoTune(state.settings)
+    ? 'Each symbol gets the buy and sell levels, and the way of reading the score (standard or buying the dip in an uptrend), that did best on its older history. Each signal shows how they did on newer candles they never saw.'
+    : '';
   $('quiet-toggle').checked = state.settings.quietHours;
   $('stop-atr').value = state.settings.stopAtr;
   $('take-atr').value = state.settings.takeAtr;
@@ -1266,8 +1310,9 @@ function saveThresholds() {
     renderSettings();
     return;
   }
-  state.settings = store.saveSettings({ buyAt: buy, sellAt: -sell });
+  state.settings = store.saveSettings({ buyAt: buy, sellAt: -sell, tune: $('tune-mode').value === 'manual' ? 'manual' : 'auto', mode: $('signal-mode').value === 'dip' ? 'dip' : 'standard' });
   markChanged();
+  renderSettings();
   $('alert-status').textContent = 'Saved. Signals use the new levels from the next scan.';
   rescoreSignals();
 }
@@ -1374,6 +1419,8 @@ function bind() {
     setTimeout(() => runScan({ force: true }), 0);
   });
   $('buy-at').addEventListener('change', saveThresholds);
+  $('tune-mode').addEventListener('change', saveThresholds);
+  $('signal-mode').addEventListener('change', saveThresholds);
   $('sell-at').addEventListener('change', saveThresholds);
   $('notify-btn').addEventListener('click', toggleNotifications);
   $('quiet-toggle').addEventListener('change', e => { state.settings = store.saveSettings({ quietHours: e.target.checked }); markChanged(); });

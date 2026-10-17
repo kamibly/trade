@@ -17,8 +17,43 @@ export function alertFor(prevAction, action) {
   return action !== 'hold' && action !== prevAction ? action : null;
 }
 
+// ---- Buy and Sell rules ---------------------------------------------------------
+// Settings: tune 'auto' (default) picks thresholds and mode per symbol from its
+// backtest; 'manual' uses buyAt, sellAt and mode for every symbol.
+
+export const autoTune = settings => settings.tune !== 'manual';
+export const manualRule = settings => ({ buy: settings.buyAt, sell: settings.sellAt, mode: settings.mode === 'dip' ? 'dip' : 'standard' });
+
+// What a saved learning depends on besides the candles: change any of it and the backtest runs again.
+export const learnKey = settings => (autoTune(settings)
+  ? `auto:${settings.stopAtr}:${settings.takeAtr}`
+  : `manual:${settings.buyAt}:${settings.sellAt}:${settings.mode || 'standard'}:${settings.stopAtr}:${settings.takeAtr}`);
+
+const brief = r => (r ? { ret: Number(r.totalReturn.toFixed(4)), trades: r.trades.length + (r.open ? 1 : 0) } : null);
+
+// The backtest options for these settings (`votes` reuses a vote matrix).
+export const backtestOptions = (settings, votes) => ({
+  thresholds: manualRule(settings), stopAtr: settings.stopAtr, takeAtr: settings.takeAtr, tune: autoTune(settings), votes,
+});
+
+// Method weights and, when tuning is on, this symbol's rule, from its backtest.
+// result: { weights, rule, test: { tuned, standard }, key } (weights null when the history is too short)
+export const learn = (S, settings) => learnedFrom(backtest(S, backtestOptions(settings)), settings);
+
+export function learnedFrom(bt, settings) {
+  return {
+    weights: bt ? bt.weights : null,
+    rule: bt && bt.rule ? bt.rule : null,
+    test: bt && bt.tuned ? { tuned: brief(bt.tuned), standard: brief(bt.standard), from: bt.testFrom } : null,
+    key: learnKey(settings),
+  };
+}
+
+// The rule a symbol trades with now.
+export const ruleOf = (settings, learned) => (autoTune(settings) && learned && learned.rule ? learned.rule : manualRule(settings));
+
 // Compact copy of a signal for storage and the Signals tab.
-export function summarize(item, sig, tf) {
+export function summarize(item, sig, tf, learned = null) {
   return {
     key: `${item.type}:${item.symbol}`,
     symbol: item.symbol,
@@ -35,8 +70,13 @@ export function summarize(item, sig, tf) {
     stop: sig.stop,
     take: sig.take,
     top: sig.top,
+    rule: sig.rule,
+    ctx: sig.ctx,
+    tuned: autoTuned(learned),
   };
 }
+
+const autoTuned = learned => (learned && learned.rule ? { test: learned.test } : null);
 
 // deps: { getCandles, saveCandles, fetchCandles, getWeight?, saveWeight?, getModels? } so tests can stub them.
 export async function scanItem(item, tf, settings, thresholds, deps, signal) {
@@ -53,18 +93,16 @@ export async function scanItem(item, tf, settings, thresholds, deps, signal) {
   }
   if (saved.candles.length < MIN_CANDLES) return { error: `Only ${saved.candles.length} candles, ${MIN_CANDLES} needed` };
   const S = analyze(saved.candles, { models: deps.getModels?.(tf) });
-  let weights;
+  let learned = null;
   if (deps.getWeight) {
     const w = deps.getWeight(item, tf);
-    if (w && Date.now() - w.at < WEIGHTS_MAX_AGE_MS) weights = w.weights;
+    if (w && Date.now() - w.at < WEIGHTS_MAX_AGE_MS && w.key === learnKey(settings)) learned = w;
     else {
-      const bt = backtest(S, { thresholds, stopAtr: settings.stopAtr, takeAtr: settings.takeAtr });
-      if (bt) {
-        weights = bt.weights;
-        deps.saveWeight?.(item, tf, weights);
-      }
+      learned = learn(S, settings);
+      deps.saveWeight?.(item, tf, learned);
     }
   }
-  const sig = signalAt(S, saved.candles.length - 1, { thresholds, weights, stopAtr: settings.stopAtr, takeAtr: settings.takeAtr });
-  return sig ? { result: summarize(item, sig, tf) } : { error: 'Not enough history' };
+  const rule = learned ? ruleOf(settings, learned) : thresholds;
+  const sig = signalAt(S, saved.candles.length - 1, { thresholds: rule, weights: (learned && learned.weights) || undefined, stopAtr: settings.stopAtr, takeAtr: settings.takeAtr });
+  return sig ? { result: summarize(item, sig, tf, learned) } : { error: 'Not enough history' };
 }

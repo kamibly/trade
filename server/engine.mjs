@@ -9,9 +9,8 @@ import { TIMEFRAMES } from './js/candles.js';
 import { readFile } from 'node:fs/promises';
 import { fetchCandles, yahooCandles, yahooPrice, fetchCryptoTop } from './js/data.js';
 import { analyze, signalAt, baseVotesAt, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
-import { featureNames, featureVector, sequence, label } from './js/ml.js';
-import { backtest } from './js/backtest.js';
-import { summarize, alertFor, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
+import { featureNames, featureVector, sequence, label, turnLabels } from './js/ml.js';
+import { summarize, alertFor, learn, learnKey, ruleOf, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
 import * as paper from './js/paper.js';
 import { formatMoney } from './js/format.js';
@@ -48,26 +47,25 @@ async function candlesFor(item, tf, settings, deps) {
   }
 }
 
-// Scores one symbol, re-learning its method weights from the backtest once a day.
-// `models` are this timeframe's ML models; new models mean new weights.
+// Scores one symbol, re-learning its method weights (and, with tuning on, its
+// thresholds and mode) from the backtest once a day, or when the settings or
+// the ML models change.
 async function score(item, tf, settings, weightsCache, deps, models) {
   const { candles } = await candlesFor(item, tf, settings, deps);
   if (candles.length < MIN_CANDLES) throw new Error(`Only ${candles.length} candles, ${MIN_CANDLES} needed`);
-  const thresholds = { buy: settings.buyAt, sell: settings.sellAt };
   const S = analyze(candles, { models });
   const wKey = `${key(item)}:${tf}`;
   const modelsAt = (models && models.trainedAt) || null;
   let w = weightsCache[wKey];
-  if (!w || deps.now() - w.at >= WEIGHTS_MAX_AGE_MS || (w.modelsAt || null) !== modelsAt) {
-    const bt = backtest(S, { thresholds, stopAtr: settings.stopAtr, takeAtr: settings.takeAtr });
-    w = { at: deps.now(), modelsAt, weights: bt ? bt.weights : null };
+  if (!w || deps.now() - w.at >= WEIGHTS_MAX_AGE_MS || (w.modelsAt || null) !== modelsAt || w.key !== learnKey(settings)) {
+    w = { at: deps.now(), modelsAt, ...learn(S, settings) };
     weightsCache[wKey] = w;
   }
   const sig = signalAt(S, candles.length - 1, {
-    thresholds, weights: w.weights || undefined, stopAtr: settings.stopAtr, takeAtr: settings.takeAtr,
+    thresholds: ruleOf(settings, w), weights: w.weights || undefined, stopAtr: settings.stopAtr, takeAtr: settings.takeAtr,
   });
   if (!sig) throw new Error('Not enough history');
-  return { ...summarize(item, sig, tf), at: deps.now() };
+  return { ...summarize(item, sig, tf, w), at: deps.now() };
 }
 
 // Runs `fn` over `items` with a few at a time, so big scans finish without hammering a source.
@@ -320,7 +318,8 @@ async function trainingItems(job, deps) {
 
 // Training data for the ML models: one row per candle that has a known outcome.
 // job: { tf, items, settings, total }
-// result: { tf, features, symbols, rows: { key, t, x, seq, y, ret }[], errors }
+// result: { tf, features, symbols, rows: { key, t, x, seq, y, ret, yb, yt }[], errors }
+// (yb and yt are the turning-point labels, null for the last candles)
 export async function runDataset(job, deps = defaultDeps) {
   const { tf, settings } = job;
   const names = featureNames(METHOD_IDS);
@@ -338,7 +337,11 @@ export async function runDataset(job, deps = defaultDeps) {
         const seq = sequence(S, i);
         if (!seq) continue;
         const x = featureVector(S, i, baseVotesAt(S, i), names).map(v => (Number.isFinite(v) ? Number(v.toFixed(5)) : null));
-        rows.push({ key: key(item), t: candles[i].time, x, seq: seq.map(r => r.map(v => Number(v.toFixed(4)))), y, ret: S.close[i + 10] / S.close[i] - 1 });
+        const turn = turnLabels(S, i, settings);
+        rows.push({
+          key: key(item), t: candles[i].time, x, seq: seq.map(r => r.map(v => Number(v.toFixed(4)))), y, ret: S.close[i + 10] / S.close[i] - 1,
+          yb: turn ? turn.bottom : null, yt: turn ? turn.top : null,
+        });
       }
     } catch (e) {
       errors[key(item)] = e.message;

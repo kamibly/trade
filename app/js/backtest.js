@@ -3,7 +3,7 @@
 // become method weights. The newer part (the test part), which the weights
 // never saw, then trades the signals so the results are not fitted to the past.
 
-import { votesAt, scoreVotes, actionFor, MIN_CANDLES, DEFAULT_THRESHOLDS } from './signals.js';
+import { votesAt, scoreVotes, actionFor, contextAt, MIN_CANDLES, DEFAULT_THRESHOLDS } from './signals.js';
 
 export const FEE = 0.001; // 0.1% per side, roughly a cheap broker or exchange
 const MIN_VOTE = 0.3; // only count votes with a clear opinion
@@ -48,7 +48,7 @@ export function weightsFrom(stats) {
 // Long-only trading of the score between start and end. Enters at the close of
 // the candle whose score crosses into buy; exits on the stop, the target or a
 // sell score. If one candle touches both stop and target, the stop counts.
-export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLDS, stopAtr = 2, takeAtr = 3, fee = FEE } = {}) {
+export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLDS, stopAtr = 2, takeAtr = 3, fee = FEE, ctx } = {}) {
   const c = S.candles;
   const trades = [];
   let equity = 1;
@@ -75,7 +75,7 @@ export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLD
     }
     const s = scores[i];
     if (!ok(s)) continue;
-    const action = actionFor(s, thresholds);
+    const action = actionFor(s, thresholds, thresholds.mode === 'dip' ? (ctx ? ctx[i] : contextAt(S, i)) : null);
     if (pos && action === 'sell') close(i, S.close[i], 'sell signal');
     else if (!pos && action === 'buy' && prev !== 'buy' && ok(S.atr[i])) {
       const entry = S.close[i];
@@ -97,8 +97,40 @@ export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLD
   };
 }
 
-// The whole walk-forward run for one symbol and timeframe.
-export function backtest(S, { thresholds = DEFAULT_THRESHOLDS, horizon = 10, trainShare = 0.6, stopAtr = 2, takeAtr = 3, votes } = {}) {
+// ---- Threshold tuning ---------------------------------------------------------
+
+export const TUNE_BUY = [15, 20, 25, 30, 35, 40, 50, 60];
+export const TUNE_SELL = [-15, -20, -25, -30, -35, -40, -50, -60];
+const MIN_TUNE_TRADES = 3;
+
+// Tuning score: return, less half the worst drop, so one lucky trade with a
+// deep slump doesn't beat a steadier pair.
+const merit = r => r.totalReturn - 0.5 * r.maxDrawdown;
+const tradeCount = r => r.trades.length + (r.open ? 1 : 0);
+
+// The best { buy, sell, mode } between start and end, or null when no pair
+// made at least 3 trades there. `modes` limits which modes are tried.
+export function tuneRule(S, scores, start, end, { stopAtr = 2, takeAtr = 3, modes = ['standard', 'dip'] } = {}) {
+  const ctx = S.candles.map((_, i) => (i >= start && i < end ? contextAt(S, i) : null));
+  let best = null;
+  for (const mode of modes) {
+    for (const buy of TUNE_BUY) {
+      for (const sell of TUNE_SELL) {
+        const rule = { buy, sell, mode };
+        const r = simulate(S, scores, start, end, { thresholds: rule, stopAtr, takeAtr, ctx });
+        if (tradeCount(r) < MIN_TUNE_TRADES) continue;
+        const m = merit(r);
+        if (!best || m > best.merit + 1e-9) best = { rule, merit: m, result: r };
+      }
+    }
+  }
+  return best;
+}
+
+// The whole walk-forward run for one symbol and timeframe. With `tune`, the
+// thresholds (and the mode, unless `thresholds.mode` is fixed by `tune ===
+// 'thresholds'`) are picked on the training part and checked on the test part.
+export function backtest(S, { thresholds = DEFAULT_THRESHOLDS, horizon = 10, trainShare = 0.6, stopAtr = 2, takeAtr = 3, votes, tune = false } = {}) {
   const n = S.candles.length;
   const first = MIN_CANDLES - 1;
   if (n - first < 120) return null;
@@ -108,14 +140,24 @@ export function backtest(S, { thresholds = DEFAULT_THRESHOLDS, horizon = 10, tra
   const weights = weightsFrom(stats);
   const scoresWith = w => votes.map((v, i) => (v.length ? scoreVotes(v, w) : NaN));
   const opts = { thresholds, stopAtr, takeAtr };
-  return {
+  const weightedScores = scoresWith(weights);
+  const out = {
     candles: n,
     trainFrom: S.candles[first].time,
     testFrom: S.candles[split].time,
     testCandles: n - split,
     stats,
     weights,
-    weighted: simulate(S, scoresWith(weights), split, n, opts),
+    weighted: simulate(S, weightedScores, split, n, opts),
     equal: simulate(S, scoresWith({}), split, n, opts),
   };
+  if (tune) {
+    const modes = tune === 'thresholds' ? [thresholds.mode || 'standard'] : ['standard', 'dip'];
+    const best = tuneRule(S, weightedScores, first, split, { stopAtr, takeAtr, modes });
+    out.rule = best ? best.rule : { ...DEFAULT_THRESHOLDS, mode: modes[0] };
+    out.tunedTrain = best ? best.result : null;
+    out.tuned = simulate(S, weightedScores, split, n, { ...opts, thresholds: out.rule });
+    out.standard = simulate(S, weightedScores, split, n, { ...opts, thresholds: { ...DEFAULT_THRESHOLDS, mode: 'standard' } });
+  }
+  return out;
 }

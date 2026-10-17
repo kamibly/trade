@@ -80,6 +80,30 @@ export function label(S, i) {
   return S.close[i + HORIZON] / S.close[i] - 1 > 2 * FEE ? 1 : 0;
 }
 
+// Turning points: from candle i's close, does a trade with the app's stop and
+// target work out? `bottom` is 1 when the price reaches +takeAtr ATR before
+// -stopAtr ATR within TURN_HORIZON candles (a good buy); `top` is 1 when it
+// falls takeAtr ATR before rising stopAtr ATR (a good place to sell). If one
+// candle touches both, the stop counts, like the backtest. null near the end.
+export const TURN_HORIZON = 30;
+
+export function turnLabels(S, i, { stopAtr = 2, takeAtr = 3 } = {}) {
+  const atr = S.atr[i];
+  if (i + TURN_HORIZON >= S.close.length || !ok(atr) || atr <= 0) return null;
+  const c = S.close[i];
+  const outcome = (win, lose) => {
+    for (let j = i + 1; j <= i + TURN_HORIZON; j++) {
+      if (lose(S.candles[j])) return 0;
+      if (win(S.candles[j])) return 1;
+    }
+    return 0;
+  };
+  return {
+    bottom: outcome(b => b.high >= c + takeAtr * atr, b => b.low <= c - stopAtr * atr),
+    top: outcome(b => b.low <= c - takeAtr * atr, b => b.high >= c + stopAtr * atr),
+  };
+}
+
 // ---- LightGBM ----------------------------------------------------------------
 
 // model.trees: [{ nodes: [[feature, threshold, left, right, defaultLeft, missing]], leaves: [values] }]
@@ -148,7 +172,16 @@ export function lstmProbability(model, seq) {
 
 // ---- Votes --------------------------------------------------------------------
 
-export const usable = m => !!m && m.test && m.test.hit > MIN_HIT && m.test.n >= 200;
+// Direction models must beat a coin flip. Turning-point models (their test has
+// `base`, how often the outcome happens anyway) must beat that by TURN_EDGE.
+export const TURN_EDGE = 0.03;
+export const usable = m => !!m && !!m.test && m.test.n >= 200
+  && (Number.isFinite(m.test.base) ? m.test.hit >= m.test.base + TURN_EDGE : m.test.hit > MIN_HIT);
+
+export const TURN_MODELS = {
+  bottom: { name: 'Bottom finder (ML)', sign: 1, what: 'a buy here reaches its target before its stop' },
+  top: { name: 'Top finder (ML)', sign: -1, what: 'the price falls to a target before rising to a stop' },
+};
 
 // Votes are measured from where the model's predictions usually sit (center)
 // and how far they spread (scale), both set on its training data. Real prices
@@ -208,6 +241,17 @@ export function mlVotes(S, i, baseVotes, models) {
     if (seq) {
       const p = lstmProbability(lstm, seq);
       out.push({ id: 'lstm', name: 'LSTM neural network', group: 'ml', vote: voteFor(p, lstm), note: describe(p, lstm) });
+    }
+  }
+  // Turning-point models only speak up: "not a bottom" is not a reason to sell.
+  for (const [id, t] of Object.entries(TURN_MODELS)) {
+    const m = models[id];
+    if (!usable(m)) continue;
+    const p = lgbmProbability(m, featureVector(S, i, baseVotes, m.features));
+    const v = Math.max(0, voteFor(p, m));
+    if (v > 0) {
+      out.push({ id, name: t.name, group: 'ml', vote: t.sign * v,
+        note: `${pct(p)} chance ${t.what} (usually ${pct(m.test.base)}) · right ${pct(m.test.hit)} of its clear calls in its test` });
     }
   }
   return out;
