@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.9.6 (crypto around the clock)';
+export const APP_VERSION = '0.9.7 (crypto around the clock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1344,7 +1344,7 @@ function paperAccount() {
 function stepPaper(tf, alerts) {
   if (serverOn()) return; // the server trades the paper account
   const signals = Object.fromEntries(Object.entries(state.signals).filter(([, s]) => s.tf === tf));
-  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct });
+  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct, budgets: paper.PHONE_BUDGETS });
   store.savePaper(state.paper);
   for (const ev of events) {
     toast(ev.kind === 'open'

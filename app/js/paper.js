@@ -5,7 +5,17 @@
 import { FEE } from './backtest.js';
 
 export const DEFAULT_START = 10_000;
-export const MAX_POSITIONS = 10;
+// Each source of trades has its own share of the account and its own
+// positions, so none can crowd out the others and the By setup table compares
+// them fairly. Without a server the phone trades only its alerts.
+export const BUDGETS = {
+  opportunities: { share: 0.4, max: 5, name: 'Opportunities' },
+  stockIdeas: { share: 0.2, max: 5, name: 'Stock buy ideas' },
+  cryptoIdeas: { share: 0.2, max: 5, name: 'Crypto buy ideas' },
+  alerts: { share: 0.2, max: 5, name: 'Watchlist alerts' },
+};
+export const PHONE_BUDGETS = { alerts: { share: 1, max: 10, name: 'Watchlist alerts' } };
+export const MAX_POSITIONS = Object.values(BUDGETS).reduce((n, b) => n + b.max, 0);
 const DAY_MS = 86400_000;
 
 const ok = Number.isFinite;
@@ -15,13 +25,13 @@ export function newAccount(start = DEFAULT_START, now = Date.now()) {
   return { start, cash: start, createdAt: now, positions: [], trades: [], history: [{ t: now, equity: start }] };
 }
 
-// Size so that hitting the stop loses `riskPct` of equity, capped at 20% of
-// equity per position and at the cash on hand.
-export function positionSize({ equity, cash, entry, stop, riskPct = 1 }) {
+// Size so that hitting the stop loses `riskPct` of equity, capped at `cap`
+// of equity per position (20%, or the budget's equal slot) and at the cash on hand.
+export function positionSize({ equity, cash, entry, stop, riskPct = 1, cap = 0.2 }) {
   const perUnit = entry - stop;
   if (!(entry > 0) || !(perUnit > 0) || !(cash > 0)) return 0;
   const byRisk = (equity * riskPct) / 100 / perUnit;
-  const byCap = (equity * 0.2) / entry;
+  const byCap = (equity * cap) / entry;
   const byCash = cash / (entry * (1 + FEE));
   return Math.max(0, Math.min(byRisk, byCap, byCash));
 }
@@ -42,8 +52,24 @@ function closePosition(acc, p, price, reason, now) {
 // What opened a position: 'signal' (a Buy signal) or an opportunity setup.
 export const setupOf = p => p.setup || 'signal';
 
-function open(acc, s, { key, riskPct, now, prices, setup, until, id }) {
-  const qty = positionSize({ equity: equity(acc, prices), cash: acc.cash, entry: s.entry, stop: s.stop, riskPct });
+// Which budget a trade or idea draws on.
+export function bucketOf(x) {
+  const setup = x.setup || 'signal';
+  if (setup === 'signal') return 'alerts';
+  if (setup === 'scan') return x.type === 'crypto' ? 'cryptoIdeas' : 'stockIdeas';
+  return 'opportunities';
+}
+
+// Room for one more position in this idea's budget: { cap } or null when full.
+function room(acc, x, budgets) {
+  const b = budgets[bucketOf(x)];
+  if (!b) return null;
+  const used = acc.positions.filter(p => bucketOf(p) === bucketOf(x)).length;
+  return used < b.max ? { cap: Math.min(0.2, b.share / b.max) } : null;
+}
+
+function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap }) {
+  const qty = positionSize({ equity: equity(acc, prices), cash: acc.cash, entry: s.entry, stop: s.stop, riskPct, cap });
   const cost = qty * s.entry * (1 + FEE);
   if (cost < 1) return null;
   acc.cash = round2(acc.cash - cost);
@@ -54,7 +80,7 @@ function open(acc, s, { key, riskPct, now, prices, setup, until, id }) {
 // One step after a scan. `signals` maps key → { symbol, type, action, entry, stop, take },
 // `alerts` maps key → 'buy' | 'sell' for actions that just changed this scan.
 // Returns the events (paper buys and sells) and updates `acc` in place.
-export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now() }) {
+export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS }) {
   const events = [];
   const prices = Object.fromEntries(Object.entries(signals).map(([k, s]) => [k, s.entry]));
   // Exits first so the freed cash can fund new buys.
@@ -69,8 +95,10 @@ export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now() 
   }
   for (const [key, action] of Object.entries(alerts)) {
     const s = signals[key];
-    if (action !== 'buy' || !s || acc.positions.some(p => p.key === key) || acc.positions.length >= MAX_POSITIONS) continue;
-    const ev = open(acc, s, { key, riskPct, now, prices, setup: 'signal' });
+    if (action !== 'buy' || !s || acc.positions.some(p => p.key === key)) continue;
+    const slot = room(acc, { setup: 'signal' }, budgets);
+    if (!slot) continue;
+    const ev = open(acc, s, { key, riskPct, now, prices, setup: 'signal', cap: slot.cap });
     if (ev) events.push(ev);
   }
   mark(acc, prices, now);
@@ -78,11 +106,11 @@ export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now() 
 }
 
 // Opens paper trades for the market scan's opportunities, best expected
-// result first, up to MAX_POSITIONS open at once. Each opportunity is taken
+// result first, within each one's budget (see BUDGETS). Each opportunity is taken
 // once; it is sold at its stop, its target or after its holding period
 // (trading days for stocks, calendar days for crypto).
 // opportunities: [{ id, setup, key, symbol, type, entry, stop, take, hold, ev }]
-export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now() } = {}) {
+export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS } = {}) {
   const events = [];
   acc.taken ||= [];
   const prices = {};
@@ -91,12 +119,13 @@ export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now() }
   // marked ideas they had no cash for, which then were never bought.
   const traded = new Set([...acc.positions, ...acc.trades].map(p => p.key));
   for (const o of list) {
-    if (acc.positions.length >= MAX_POSITIONS) break;
+    const slot = room(acc, o, budgets);
+    if (!slot) continue;
     if ((acc.taken.includes(o.id) && traded.has(o.key)) || acc.positions.some(p => p.key === o.key)) continue;
     if (!(o.entry > 0) || !(o.stop < o.entry)) continue;
     // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
     const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
-    const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id });
+    const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: slot.cap });
     // Without the cash to buy it, the idea is tried again next scan.
     if (!ev) continue;
     acc.taken.push(o.id);

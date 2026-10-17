@@ -142,7 +142,9 @@ the learned models expect.
   ideas (sold at the stop, the target or when a later scan says Sell). Paper
   trades are tagged with what opened them (a Buy signal, a market scan idea or
   one of the opportunity setups below), and the Paper tab shows trades, win
-  rate, return and worst drop for each. At most 10 positions are open at once.
+  rate, return and worst drop for each. Each source has its own budget: opportunities 40% of the account,
+  stock buy ideas, crypto buy ideas and watchlist alerts 20% each, up to 5
+  positions each in equal slots.
 
 Holdings and the paper account live on the phone and are in the backup file.
 With your server connected, the watchlist and holdings also sync to it.

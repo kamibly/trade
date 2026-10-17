@@ -142,12 +142,14 @@ test('opportunities: fresh triggers with the setup track record, and one digest 
   assert.equal(off.records.insider.n, 0);
 });
 
-test('paper: opportunities are tagged, capped at 10 positions, and sold when their time is up', () => {
+test('paper: opportunities are tagged, kept to their budget, and sold when their time is up', () => {
   const acc = paper.newAccount(100_000, 0);
   const opps = Array.from({ length: 12 }, (_, k) => ({ id: `ranking:stock:S${k}:1`, setup: k % 2 ? 'ranking' : 'insider', key: `stock:S${k}`, symbol: `S${k}`, type: 'stock', entry: 100, stop: 80, take: 130, hold: 10, ev: k / 100 }));
   const events = paper.openSetups(acc, opps, { riskPct: 1, now: 0 });
-  assert.equal(events.length, paper.MAX_POSITIONS);
-  assert.equal(acc.positions.length, 10);
+  assert.equal(events.length, paper.BUDGETS.opportunities.max);
+  assert.equal(acc.positions.length, 5);
+  // Equal slots: 40% of the account over 5 positions.
+  assert.ok(acc.positions.every(p => p.qty * p.entry <= 8000 + 1)); // at most 40% over 5 positions
   // Best expected result first: S11 and S10 got in, S0 and S1 didn't.
   assert.ok(acc.positions.some(p => p.key === 'stock:S11') && !acc.positions.some(p => p.key === 'stock:S0'));
   assert.equal(acc.positions.find(p => p.key === 'stock:S11').setup, 'ranking');
@@ -160,11 +162,12 @@ test('paper: opportunities are tagged, capped at 10 positions, and sold when the
   const signals = Object.fromEntries(acc.positions.map(p => [p.key, { entry: 101, action: 'sell' }]));
   assert.equal(paper.step(acc, { signals, now: 86400_000 }).length, 0);
   const out = paper.step(acc, { signals, now: 15 * 86400_000 });
-  assert.equal(out.length, 10);
+  assert.equal(out.length, 5);
   assert.ok(out.every(e => e.reason === 'time'));
   const table = paper.bySetup(acc);
   assert.deepEqual(table.map(r => r.setup).sort(), ['insider', 'ranking']);
-  assert.ok(table.every(r => r.trades === 5 && r.winRate === 1 && r.ret > 0));
+  assert.deepEqual(table.map(r => r.trades).sort(), [2, 3]);
+  assert.ok(table.every(r => r.winRate === 1 && r.ret > 0));
 });
 
 test('paper engine mode opens the scan opportunities', async () => {
@@ -224,4 +227,24 @@ test('an idea marked taken by an older version but never traded is bought', asyn
   acc.taken = ['insider:stock:AAPL:1'];
   const idea = { id: 'insider:stock:AAPL:1', setup: 'insider', key: 'stock:AAPL', symbol: 'AAPL', type: 'stock', entry: 100, stop: 95, take: 110, hold: 20, ev: 0.02 };
   assert.equal(paper.openSetups(acc, [idea], { now: 1 }).length, 1);
+});
+
+test('paper: each source has its own budget, so opportunities cannot crowd out buy ideas', () => {
+  const acc = paper.newAccount(10_000, 0);
+  const idea = (setup, type, k) => ({ id: `${setup}:${type}:X${k}:1`, setup, key: `${type}:X${k}`, symbol: `X${k}`, type, entry: 100, stop: 90, take: 130, ev: 0.5 });
+  const opps = Array.from({ length: 14 }, (_, k) => idea('ranking', 'stock', k));
+  const stocks = Array.from({ length: 7 }, (_, k) => idea('scan', 'stock', 100 + k));
+  const coins = Array.from({ length: 9 }, (_, k) => idea('scan', 'crypto', 200 + k));
+  paper.openSetups(acc, opps, { now: 1 });
+  paper.openSetups(acc, [...coins, ...stocks], { now: 1 });
+  const count = b => acc.positions.filter(p => paper.bucketOf(p) === b).length;
+  assert.equal(count('opportunities'), 5);
+  assert.equal(count('stockIdeas'), 5);
+  assert.equal(count('cryptoIdeas'), 5);
+  // Watchlist alerts still have their own 5 slots and 20%.
+  const signals = { 'stock:W': { symbol: 'W', type: 'stock', entry: 50, stop: 45, take: 60, action: 'buy' } };
+  assert.equal(paper.step(acc, { signals, alerts: { 'stock:W': 'buy' }, now: 2 }).length, 1);
+  const w = acc.positions.find(p => p.key === 'stock:W');
+  assert.ok(Math.abs(w.qty * w.entry - 400) < 1); // 20% / 5 = 4% of $10,000
+  assert.ok(acc.cash > 0);
 });
