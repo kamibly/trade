@@ -144,7 +144,23 @@ the learned models expect.
   one of the opportunity setups below), and the Paper tab shows trades, win
   rate, return and worst drop for each. Each source has its own budget: opportunities 40% of the account,
   stock buy ideas, crypto buy ideas and watchlist alerts 20% each, up to 5
-  positions each in equal slots.
+  positions each in equal slots. Once two sources have 50 closed trades, the
+  one with the best average trade takes up to 5 points a week from the worst,
+  within 10% to 50%.
+- **Trade filter.** The weekly training also builds a LightGBM filter from the
+  backtest's candles that looked like a Buy (equal-weight score at least +15):
+  for each, did a trade reach its target before its stop within 30 candles, and
+  what did it make after fees. It sees the votes, the indicators, how many
+  methods agree and the market's trend (SPY or Bitcoin against its 200-day
+  average). It trains on all but the newest year and is tested on that year;
+  it is used only if the trades it keeps made money and beat all trades by 0.3
+  points on average. The server's paper account then skips buy ideas and
+  watchlist Buys it expects to lose and sizes the rest from 0.5× to 1.5× of a
+  slot. Opportunities keep their own test. A second, hidden account trades the
+  same ideas without the filter; after 100 closed trades the filter had a say
+  on, it stays on only if the filtered account is ahead (then the Paper tab
+  says it is ready to choose stops and targets too). Switch it off under Risk
+  in Settings.
 
 Holdings and the paper account live on the phone and are in the backup file.
 With your server connected, the watchlist and holdings also sync to it.

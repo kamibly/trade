@@ -34,6 +34,7 @@ export const DEFAULT_SETTINGS = {
   quietHours: true,
   riskPct: 1,
   paperStart: 10000,
+  tradeFilter: true, // the server's paper account skips and sizes ideas by the trade filter
   stopAtr: 2,
   takeAtr: 3,
   serverUrl: '',

@@ -20,7 +20,9 @@ The Trade app's helper on your OCI VM. It runs next to jobspy-service and:
   open, plus once in the evening, and shows the best buy and sell ideas from
   both scans in the app's Signals tab;
 - trains four machine-learning models per timeframe (LightGBM, an LSTM
-  network, and bottom and top finders) every week and shares them with the app;
+  network, and bottom and top finders) every week and shares them with the app,
+  plus a daily trade filter that the paper account uses once it passes its
+  test on the newest year (an unfiltered shadow account judges it);
 - tunes each symbol's buy and sell levels once a day (see the main README);
 - keeps your watchlist, holdings and alert settings in sync between phones.
 

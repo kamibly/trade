@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.10.2 (paper charts)';
+export const APP_VERSION = '0.11.0 (trade filter)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -615,8 +615,23 @@ function modelsCard(models, bt) {
     row('LSTM', models.lstm, 'lstm'),
     row('Bottom finder', models.bottom, 'bottom'),
     row('Top finder', models.top, 'top'),
+    filterRow(models.filter),
     el('p', { class: 'muted small', text: `The bottom finder learns whether a buy here reached its target before its stop; the top finder, whether the price fell to a target before rising to a stop. They only push the score their way. LightGBM and the LSTM vote only if right more than half the time on at least 200 clear test calls; the finders, only if right ${Math.round(TURN_EDGE * 100)} points more often than the outcome happens anyway. Like every method, the backtest then weights them by how often they were right.` }));
 }
+
+// The trade filter's test on the newest year of Buy-looking candles it never trained on.
+function filterRow(m) {
+  const t = m && m.test;
+  if (!t) return el('div', { class: 'bt-row' }, el('span', { text: 'Trade filter' }), el('span', { class: 'muted', text: 'not trained' }));
+  return el('div', {},
+    el('div', { class: 'bt-row' },
+      el('span', { text: 'Trade filter' }),
+      el('span', { class: t.passed ? 'good' : 'muted', text: `${t.passed ? 'passed' : 'not used'} · kept ${t.kept} of ${t.n} test trades` })),
+    el('p', { class: 'muted small', text: `In its test year, the trades it kept made ${fmtPct(t.keptAvg)} each on average after fees (won ${Math.round(t.keptWin * 100)}%), against ${fmtPct(t.allAvg)} for all of them (won ${Math.round(t.allWin * 100)}%) and ${fmtPct(t.skippedAvg)} for the ones it skipped.${t.passed ? ' The paper account uses it.' : ` Not used: ${t.why}.`}` }));
+}
+
+// The trade filter's view of a buy idea, for its card.
+const filterText = f => `Trade filter: ${Math.round(f.p * 100)}% chance of the target before the stop, ${f.size > 0 ? `expects ${fmtPct(f.ev)} after fees${f.size !== 1 ? `, sized ×${f.size.toFixed(1)}` : ''}` : `expects a loss (${fmtPct(f.ev)})`}`;
 
 function methodNote(v, bt) {
   const s = bt && bt.stats[v.id];
@@ -882,6 +897,8 @@ function scanLine(m) {
 function paperNote(li, sig) {
   if (!serverPaperOn() || sig.action !== 'buy') return li;
   const acc = state.serverPaper.paper;
+  const filter = sig.filter || ((state.serverSignals || {})[sig.key] || {}).filter;
+  if (filter) li.append(el('div', { class: 'sub', text: filterText(filter) }));
   if ((acc.positions || []).some(p => p.key === sig.key)) {
     li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
   } else if (acc.skips && acc.skips[sig.key]) {
@@ -1406,8 +1423,9 @@ function renderPaper() {
         stat('Closed trades', String(sum.trades)),
         stat('Won', sum.trades ? `${Math.round(sum.winRate * 100)}%` : '–'),
         stat('Worst drop', fmtPct(-sum.maxDrawdown)))),
-    equityChart(acc, sum.equity),
-    bySetupTable(acc),
+    equityChart(acc, sum.equity, onServer ? state.serverPaper.shadow : null),
+    onServer ? filterTrialCard(state.serverPaper) : null,
+    bySetupTable(acc, onServer ? state.serverPaper.budgets : null),
     el('h2', { class: 'section', text: `Open (${acc.positions.length})` }),
     pnlBars(priced),
     acc.positions.length
@@ -1422,6 +1440,7 @@ function renderPaper() {
             stat('Gain/loss', Number.isFinite(pnl) ? signed(pnl) : '–', upDown(pnl))),
           el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
           el('div', { class: 'sub', text: `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
+          p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
           el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}` }))))
       : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
     events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
@@ -1454,19 +1473,22 @@ function svg(tag, attrs = {}, ...children) {
 }
 
 // The account's value over time against what it started with: green above, red below.
-function equityChart(acc, now) {
+// A grey line shows the same account without the trade filter, from when it began.
+function equityChart(acc, now, shadow) {
   const pts = [...acc.history.map(h => ({ t: h.t, v: h.equity })), { t: Date.now(), v: now }]
     .filter(p => Number.isFinite(p.v) && p.t >= acc.createdAt - 60_000);
   if (pts.length < 2) return null;
+  const spts = shadow ? shadow.history.map(h => ({ t: h.t, v: h.equity })).filter(p => Number.isFinite(p.v) && p.t >= pts[0].t) : [];
   const W = 600, H = 170, padL = 4, padR = 4, padT = 10, padB = 22;
   const t0 = pts[0].t, t1 = pts.at(-1).t;
-  const vs = [...pts.map(p => p.v), acc.start];
+  const vs = [...pts.map(p => p.v), ...spts.map(p => p.v), acc.start];
   let lo = Math.min(...vs), hi = Math.max(...vs);
   const pad = Math.max((hi - lo) * 0.1, acc.start * 0.002);
   lo -= pad; hi += pad;
   const x = t => padL + (t1 > t0 ? (t - t0) / (t1 - t0) : 1) * (W - padL - padR);
   const y = v => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
-  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const path = list => list.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const line = path(pts);
   const base = y(acc.start);
   const area = `${line}L${x(t1).toFixed(1)},${base.toFixed(1)}L${x(t0).toFixed(1)},${base.toFixed(1)}Z`;
   const id = `eq${Math.random().toString(36).slice(2, 8)}`;
@@ -1485,9 +1507,40 @@ function equityChart(acc, now) {
       svg('line', { x1: padL, x2: W - padR, y1: base, y2: base, stroke: 'var(--muted)', 'stroke-dasharray': '4 4', 'stroke-width': 1 }),
       svg('path', { d: line, fill: 'none', stroke: 'var(--up)', 'stroke-width': 2, 'clip-path': `url(#${id}a)` }),
       svg('path', { d: line, fill: 'none', stroke: 'var(--down)', 'stroke-width': 2, 'clip-path': `url(#${id}b)` }),
+      spts.length > 1 ? svg('path', { d: path(spts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.5, 'stroke-dasharray': '6 3' }) : null,
       svg('text', { x: padL, y: H - 6, fill: 'var(--muted)', 'font-size': 20 }, day(t0)),
       svg('text', { x: W - padR, y: H - 6, fill: 'var(--muted)', 'font-size': 20, 'text-anchor': 'end' }, 'now')),
-    el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.` }));
+    el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.${spts.length > 1 ? ' Grey line: the same account without the trade filter.' : ''}` }));
+}
+
+// The filtered account against the same account without the filter, on the
+// trades both opened since the comparison began.
+function filterTrialCard(sp) {
+  const t = sp.filterTrial;
+  if (!t || !sp.shadow) return null;
+  const since = new Date(t.since).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const prices = sp.prices || {};
+  const status = t.result === 'ahead'
+    ? 'The filter has proved itself: ready to let it choose stops and targets.'
+    : t.result === 'behind'
+      ? 'The filter did worse than trading without it, so it is switched off. Starting the paper account over gives it a new trial.'
+      : t.judged
+        ? `Testing: ${t.judged} of the ${t.need} closed trades it needs before it is judged.`
+        : 'Waiting for its first trades. It has a say only once it has passed its own test on your server.';
+  const line = (name, trades, pnl, acc) => el('tr', {},
+    el('td', { text: name }),
+    el('td', { text: String(trades) }),
+    el('td', { class: upDown(pnl), text: signed(pnl) }),
+    el('td', { text: formatMoney(paper.equity(acc, prices)) }));
+  return el('div', { class: 'card' },
+    el('h3', { text: 'Trade filter' }),
+    el('p', { class: t.result === 'ahead' ? 'small good' : 'small', text: status }),
+    el('div', { class: 'table-wrap' }, el('table', { class: 'setups' },
+      el('thead', {}, el('tr', {}, ...['Account', 'Closed trades', `Gain/loss since ${since}`, 'Value now'].map(h => el('th', { text: h })))),
+      el('tbody', {},
+        line('With the filter', t.trades, t.pnl, sp.paper),
+        line('Without it', t.shadowTrades, t.shadowPnl, sp.shadow)))),
+    el('p', { class: 'muted small', text: `Both accounts take the same ideas; the one without the filter buys every one, the same size as before. After ${t.need} closed trades the filter had a say on, it stays on only if it is ahead.` }));
 }
 
 // Each open trade's gain or loss in dollars, biggest first.
@@ -1505,7 +1558,7 @@ function pnlBars(rows) {
 }
 
 // Trades, win rate, return and worst drop for each way the account trades.
-function bySetupTable(acc) {
+function bySetupTable(acc, budgets) {
   const rows = paper.bySetup(acc);
   if (!rows.length || (rows.length === 1 && rows[0].setup === 'signal')) return null;
   return el('div', { class: 'card' },
@@ -1518,7 +1571,8 @@ function bySetupTable(acc) {
         el('td', { text: r.trades ? `${Math.round(r.winRate * 100)}%` : '–' }),
         el('td', { class: upDown(r.ret), text: r.trades ? fmtPct(r.ret) : '–' }),
         el('td', { text: r.trades ? fmtPct(-r.maxDrawdown) : '–' })))))),
-    el('p', { class: 'muted small', text: 'Return is on the starting amount. Opportunity trades sell at their stop, their target or the end of their holding period.' }));
+    el('p', { class: 'muted small', text: 'Return is on the starting amount. Opportunity trades sell at their stop, their target or the end of their holding period.' }),
+    budgets && budgets.shares ? el('p', { class: 'muted small', text: `Share of the account each source can use: ${Object.entries(paper.BUDGETS).map(([k, b]) => `${b.name} ${Math.round((budgets.shares[k] ?? b.share) * 100)}%`).join(', ')}. Once two sources have 50 closed trades, the one with the best average trade takes up to 5 points a week from the worst, within 10% to 50%.` }) : null);
 }
 
 async function resetPaper() {
@@ -1563,6 +1617,7 @@ function renderSettings() {
   $('take-atr').value = state.settings.takeAtr;
   $('risk-pct').value = state.settings.riskPct;
   $('paper-start').value = state.settings.paperStart;
+  $('filter-toggle').checked = state.settings.tradeFilter !== false;
   $('server-url').value = state.settings.serverUrl;
   $('server-key').value = state.settings.serverKey;
   renderNotifyStatus();
@@ -1750,6 +1805,11 @@ function bind() {
   $('sell-at').addEventListener('change', saveThresholds);
   $('notify-btn').addEventListener('click', toggleNotifications);
   $('quiet-toggle').addEventListener('change', e => { state.settings = store.saveSettings({ quietHours: e.target.checked }); markChanged(); });
+  $('filter-toggle').addEventListener('change', e => {
+    state.settings = store.saveSettings({ tradeFilter: e.target.checked });
+    markChanged();
+    $('risk-status').textContent = 'Saved. The paper account uses it from the next check.';
+  });
   $('server-save').addEventListener('click', saveServer);
   $('server-push').addEventListener('click', toggleServerPush);
   $('server-test').addEventListener('click', testServerPush);
