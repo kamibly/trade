@@ -1,11 +1,11 @@
 // Talks to your own trade-service on the OCI server: it sends alerts while the
-// app is closed, scans the S&P 500 and top 50 crypto, and keeps the watchlist
+// app is closed, scans the S&P 500 and every actively traded coin, and keeps the watchlist
 // and holdings in sync between phones. Every call carries the server key.
 
 export class ServerError extends Error {}
 
 // Settings that travel with the watchlist and holdings.
-export const SYNCED_SETTINGS = ['alertTf', 'tune', 'mode', 'buyAt', 'sellAt', 'stopAtr', 'takeAtr', 'quietHours', 'riskPct', 'paperStart'];
+export const SYNCED_SETTINGS = ['alertTf', 'tune', 'mode', 'buyAt', 'sellAt', 'stopAtr', 'takeAtr', 'quietHours', 'riskPct', 'paperStart', 'setups'];
 
 export function cleanUrl(raw) {
   let url = String(raw || '').trim().replace(/\/+$/, '');
@@ -103,6 +103,18 @@ export async function unsubscribePush(settings) {
   const { endpoint } = sub;
   await sub.unsubscribe();
   await serverFetch(settings, '/push/unsubscribe', { method: 'POST', body: { endpoint } }).catch(() => {});
+}
+
+// The service worker reads the server address and key from here to send
+// your Useful / Not useful ratings straight from a notification.
+export const SW_CONFIG_CACHE = 'config-trade';
+
+export async function saveWorkerConfig(settings) {
+  if (typeof caches === 'undefined') return;
+  try {
+    const cache = await caches.open(SW_CONFIG_CACHE);
+    await cache.put('./server-config', new Response(JSON.stringify({ serverUrl: settings.serverUrl || '', serverKey: settings.serverKey || '' }), { headers: { 'Content-Type': 'application/json' } }));
+  } catch { /* the buttons in the app still work */ }
 }
 
 export async function currentEndpoint() {

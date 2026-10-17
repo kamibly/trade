@@ -86,7 +86,7 @@ test('paper position size: 1% risk, capped at 20% of equity and at cash', () => 
 test('paper account buys on a buy alert and sells on target, stop or sell', () => {
   const acc = paper.newAccount(10000, 0);
   const sig = (entry, action = 'hold') => ({ symbol: 'BTC', type: 'crypto', action, entry, stop: 90, take: 130 });
-  let ev = paper.step(acc, { signals: { 'crypto:BTC': sig(100, 'buy') }, alerts: { 'crypto:BTC': 'buy' }, now: 1 });
+  let ev = paper.step(acc, { signals: { 'crypto:BTC': sig(100, 'buy') }, alerts: { 'crypto:BTC': 'buy' }, now: 1, budgets: paper.PHONE_BUDGETS });
   assert.equal(ev[0].kind, 'open');
   assert.equal(acc.positions.length, 1);
   assert.ok(acc.cash < 10000 && acc.cash > 8900);
@@ -101,7 +101,7 @@ test('paper account buys on a buy alert and sells on target, stop or sell', () =
   assert.equal(s.winRate, 1);
   assert.ok(s.totalReturn > 0.03);
 
-  paper.step(acc, { signals: { 'crypto:BTC': sig(100, 'buy') }, alerts: { 'crypto:BTC': 'buy' }, now: 4 });
+  paper.step(acc, { signals: { 'crypto:BTC': sig(100, 'buy') }, alerts: { 'crypto:BTC': 'buy' }, now: 4, budgets: paper.PHONE_BUDGETS });
   ev = paper.step(acc, { signals: { 'crypto:BTC': sig(95, 'sell') }, now: 5 });
   assert.equal(ev[0].reason, 'sell signal');
   assert.ok(ev[0].pnl < 0);

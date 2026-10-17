@@ -31,6 +31,24 @@ export const learnKey = settings => (autoTune(settings)
 
 const brief = r => (r ? { ret: Number(r.totalReturn.toFixed(4)), trades: r.trades.length + (r.open ? 1 : 0) } : null);
 
+// The track record of the rule a symbol trades with, on the test part of its
+// backtest: { n, wins, avg, days } (days: average time in a trade).
+export function tradeRecord(r) {
+  if (!r || !r.trades.length) return null;
+  const n = r.trades.length;
+  const sum = r.trades.reduce((a, t) => a + t.ret, 0);
+  const days = r.trades.reduce((a, t) => a + (t.exitTime - t.entryTime), 0) / n / 86400;
+  return { n, wins: r.trades.filter(t => t.ret > 0).length, avg: Number((sum / n).toFixed(5)), days: Number(days.toFixed(2)) };
+}
+
+// "This signal on AAPL: won 14 of 21 test trades, average +2.1% over about 9 days."
+export function tradeRecordLine(symbol, rec) {
+  if (!rec || !rec.n) return '';
+  const span = rec.days >= 1 ? `${Math.round(rec.days)} day${Math.round(rec.days) === 1 ? '' : 's'}` : `${Math.max(1, Math.round(rec.days * 24))} hours`;
+  const avg = `${rec.avg > 0 ? '+' : ''}${(rec.avg * 100).toFixed(1)}%`;
+  return `This signal on ${symbol}: won ${rec.wins} of ${rec.n} test trades, average ${avg} over about ${span}.`;
+}
+
 // The backtest options for these settings (`votes` reuses a vote matrix).
 export const backtestOptions = (settings, votes) => ({
   thresholds: manualRule(settings), stopAtr: settings.stopAtr, takeAtr: settings.takeAtr, tune: autoTune(settings), votes,
@@ -45,6 +63,7 @@ export function learnedFrom(bt, settings) {
     weights: bt ? bt.weights : null,
     rule: bt && bt.rule ? bt.rule : null,
     test: bt && bt.tuned ? { tuned: brief(bt.tuned), standard: brief(bt.standard), from: bt.testFrom } : null,
+    record: bt ? tradeRecord(bt.rule ? bt.tuned : bt.weighted) : null,
     key: learnKey(settings),
   };
 }
@@ -73,6 +92,7 @@ export function summarize(item, sig, tf, learned = null) {
     rule: sig.rule,
     ctx: sig.ctx,
     tuned: autoTuned(learned),
+    record: (learned && learned.record) || null,
   };
 }
 

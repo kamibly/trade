@@ -8,12 +8,15 @@ the server and the phone agree on every score. This module runs it with Node.
 Environment variables:
     VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT  - app notifications
     TRADE_TZ           - time zone for quiet hours and scan times, default America/Toronto
-    MARKET_SCAN_TIMES  - when the S&P 500 and top-50 crypto scan runs, default hourly while the
+    CRYPTO_SCAN_MINUTES - how often the crypto scan runs, around the clock, default 15
+    MARKET_SCAN_TIMES  - when the S&P 500 scan runs, default every 30 minutes while the
                          US market is open plus 20:00: "09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00"
     TWELVE_DATA_KEY    - optional; backup for stocks Yahoo Finance can't serve
     DATA_DIR           - where trade.json is kept, default /data
     TRAIN_AT           - when the machine-learning models retrain each week, default "Sun 03:00"
     TRAIN_SYMBOLS      - how many charts the models learn from, default 120
+    SEC_CONTACT        - your email, which the SEC asks for in its requests; insider buying
+                         and earnings dates load only once it is set (see events.py)
 """
 import json
 import logging
@@ -32,7 +35,7 @@ VAPID_PUBLIC_KEY = os.environ.get("VAPID_PUBLIC_KEY", "")
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT", "mailto:you@example.com")
 TZ_NAME = os.environ.get("TRADE_TZ", "America/Toronto")
-DEFAULT_SCAN_TIMES = "09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00"
+DEFAULT_SCAN_TIMES = "09:45,10:15,10:45,11:15,11:45,12:15,12:45,13:15,13:45,14:15,14:45,15:15,15:45,20:00"
 MARKET_SCAN_TIMES = os.environ.get("MARKET_SCAN_TIMES", DEFAULT_SCAN_TIMES)
 TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
@@ -55,7 +58,14 @@ QUIET_START, QUIET_END = 22, 7
 TIMEFRAMES = set(WATCH_EVERY)
 
 _lock = threading.RLock()
-_run_locks = {"watch": threading.Lock(), "market": threading.Lock(), "train": threading.Lock()}
+_run_locks = {name: threading.Lock() for name in ("watch", "market", "crypto", "pulse", "train", "events")}
+CRYPTO_SCAN_MINUTES = int(os.environ.get("CRYPTO_SCAN_MINUTES", "15") or 15)
+UNIVERSE_EVERY_MS = 20 * 3600_000  # the crypto list is rebuilt about once a day
+PULSE_EVERY_MS = 60_000            # fast-move watch
+SP500_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500.csv")
+SETUP_IDS = ("insider", "earnings", "ranking", "crowd")
+EVENTS_EVERY_MS = 3600_000   # outside data for the setups (insiders, earnings, crowd)
+MUTE_VOTES, MUTE_AT = 10, 7  # "Not useful" on 7 of the last 10 ratings mutes a setup's alerts
 
 
 def tz() -> ZoneInfo:
@@ -88,12 +98,20 @@ def _empty_state() -> dict:
         "marketWeights": {},
         "watch": {"lastRunAt": None, "errors": {}, "lastAlerts": []},
         "lastMarketSlot": None,
+        "scans": {},              # the latest stock scan and crypto scan; "market" shows both
+        "lastCryptoSlot": None,
+        "cryptoUniverse": None,   # coins the crypto scan covers, rebuilt daily
+        "cryptoLevels": {},       # each coin's price and ATR at its last scan, for the fast-move watch
+        "pulse": {"lastRunAt": None},
         "training": {"lastRunAt": None, "results": {}},  # last model training per timeframe
         "lastTrainSlot": None,
         "paper": None,            # the paper-trading account (runs here, shown in the app)
         "paperEvents": [],        # its latest buys and sells
         "prices": {"lastRunAt": None, "values": {}, "errors": {}},
         "watchSoonAt": None,      # a check asked for after a settings or watchlist change
+        "events": {"lastRunAt": None},  # last refresh of the setups' outside data
+        "announced": [],          # opportunity and warning ids already sent
+        "feedback": {},           # setup -> your latest ratings, True for useful
     }
 
 
@@ -196,6 +214,7 @@ def clean_profile(raw: dict) -> dict:
             "quietHours": bool(s.get("quietHours", True)),
             "riskPct": _num(s.get("riskPct"), 1, 0.1, 5),
             "paperStart": round(_num(s.get("paperStart"), 10000, 100, 10_000_000)),
+            "setups": {k: bool((s.get("setups") or {}).get(k, True)) if isinstance(s.get("setups"), dict) else True for k in SETUP_IDS},
         },
         "updatedAt": int(_num(raw.get("updatedAt"), now_ms(), 0, 1e15)),
     }
@@ -297,16 +316,74 @@ def in_quiet_hours(when: datetime) -> bool:
     return when.hour >= QUIET_START or when.hour < QUIET_END
 
 
-def deliver(alerts: List[dict], quiet: bool, when: Optional[datetime] = None) -> int:
-    """Sends alerts; during quiet hours only urgent ones (stop-loss hits)."""
+def deliver(alerts: List[dict], quiet: bool, when: Optional[datetime] = None, muted: Optional[set] = None) -> int:
+    """Sends alerts; during quiet hours only urgent ones (stop-loss hits).
+    Alerts from setups you muted are skipped. Setup alerts carry the
+    Useful and Not useful buttons."""
     when = when or datetime.now(tz())
+    muted = muted or set()
     sent = 0
     for a in alerts:
         if quiet and in_quiet_hours(when) and not a.get("urgent"):
             continue
+        setups = a.get("setups") or []
+        if setups and all(x in muted for x in setups):
+            continue
         payload = {"title": a["title"], "body": a["body"], "tag": f"{a.get('kind')}:{a.get('key', '')}", "hash": a.get("hash", "signals")}
+        if setups:
+            payload["feedback"] = {"setups": setups, "id": a.get("id") or ",".join(a.get("ids") or []) or payload["tag"]}
         sent += send_to_all(payload)
     return sent
+
+
+# ---------------------------------------------------------------------------
+# Your ratings of alerts
+# ---------------------------------------------------------------------------
+
+def muted_setups(state: dict) -> set:
+    """Setups whose alerts you rated "Not useful" 7 or more times of the last 10."""
+    out = set()
+    for setup, votes in (state.get("feedback") or {}).items():
+        last = votes[-MUTE_VOTES:]
+        if sum(1 for v in last if not v) >= MUTE_AT:
+            out.add(setup)
+    return out
+
+
+FEEDBACK_SETUPS = SETUP_IDS + ("signal",)
+
+
+def add_feedback(setups: List[str], useful: bool) -> dict:
+    setups = [x for x in dict.fromkeys(setups or []) if x in FEEDBACK_SETUPS]
+    if not setups:
+        raise ValueError("Unknown alert type")
+
+    def apply(st):
+        fb = st.setdefault("feedback", {})
+        for x in setups:
+            fb[x] = (fb.get(x, []) + [bool(useful)])[-MUTE_VOTES:]
+
+    return setups_info(update_state(apply))
+
+
+def unmute(setup: str) -> dict:
+    """Turns a muted setup's alerts back on, starting its ratings over."""
+    if setup not in FEEDBACK_SETUPS:
+        raise ValueError("Unknown alert type")
+    return setups_info(update_state(lambda st: st.setdefault("feedback", {}).pop(setup, None)))
+
+
+def setups_info(state: dict) -> dict:
+    """For the app: your ratings, what is muted and whether each data source loaded."""
+    import events
+    fb = state.get("feedback") or {}
+    return {
+        "votes": {k: {"useful": sum(1 for v in fb[k] if v), "notUseful": sum(1 for v in fb[k] if not v)} for k in fb},
+        "muted": sorted(muted_setups(state)),
+        "sources": events.statuses(events_dir()),
+        "secContact": bool(events.SEC_CONTACT),
+        "eventsAt": (state.get("events") or {}).get("lastRunAt"),
+    }
 
 
 def send_test(endpoint: Optional[str]) -> int:
@@ -374,7 +451,7 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
                 clear_watch_soon(st, started)
             update_state(failed)
             return None
-        sent = deliver(result["alerts"], profile["settings"]["quietHours"])
+        sent = deliver(result["alerts"], profile["settings"]["quietHours"], muted=muted_setups(state))
 
         def apply(st):
             st["signals"].update(result["signals"])
@@ -421,7 +498,9 @@ def reset_paper(start: Optional[float] = None) -> dict:
         st["paper"], st["paperEvents"] = acc, []
 
     with _run_locks["watch"]:  # not while a check is changing the account
-        return update_state(apply)["paper"]
+        acc = update_state(apply)["paper"]
+    _spawn(offer_ideas)
+    return acc
 
 
 def us_market_open(now: Optional[datetime] = None) -> bool:
@@ -489,8 +568,19 @@ def run_prices(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dic
         lock.release()
 
 
-def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
-    lock = _run_locks["market"]
+SCOPES = ("stocks", "crypto")
+SCOPE_PREFIX = {"stocks": "stock:", "crypto": "crypto:"}
+
+
+def _scope_part(d: dict, scope: str) -> dict:
+    return {k: v for k, v in (d or {}).items() if k.startswith(SCOPE_PREFIX[scope])}
+
+
+def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = run_engine, scope: str = "stocks",
+               only: Optional[List[str]] = None) -> Optional[dict]:
+    """The S&P 500 scan (scope "stocks") or the crypto scan (scope "crypto").
+    `only` rescores just those crypto symbols after a fast move."""
+    lock = _run_locks["market" if scope == "stocks" else "crypto"]
     if not lock.acquire(blocking=False):
         return None
     try:
@@ -498,26 +588,311 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
         profile = state.get("profile")
         if not profile:
             return None
-        job = {"mode": "market", "settings": engine_settings(profile), "prev": state["marketActions"], "weights": state["marketWeights"], "models": load_models("1D")}
+        import events
+        muted = muted_setups(state)
+        job = {
+            "mode": "market", "scope": scope, "settings": engine_settings(profile),
+            "prev": _scope_part(state["marketActions"], scope), "weights": _scope_part(state["marketWeights"], scope), "models": load_models("1D"),
+            "events": events.load_events(events_dir()),
+            "enabled": profile["settings"].get("setups") or {},
+            "held": sorted(held_keys(state)),
+            "announced": state.get("announced", []),
+            "muted": sorted(muted),
+            "buyStarts": _scope_part(state.get("buyStarts"), scope),
+        }
+        if scope == "crypto":
+            job["items"] = crypto_items(state)
+            if only:
+                job["only"] = only
         try:
             result = engine(job, 3000)
         except Exception as e:
-            logger.exception("Market scan failed")
-            update_state(lambda st: st.update(market={**(st.get("market") or {}), "error": str(e), "failedAt": now_ms()}))
+            logger.exception("%s scan failed", scope)
+
+            def failed(st):
+                scans = st.setdefault("scans", {})
+                scans[scope] = {**(scans.get(scope) or {}), "error": str(e), "failedAt": now_ms()}
+                st["market"] = merged_market(scans)
+            update_state(failed)
             return None
-        if result.get("alert") and state["subscriptions"]:
-            deliver([result["alert"]], profile["settings"]["quietHours"])
+        announced = set(state.get("announced", []))
+        warnings = [w for w in result.get("warnings", []) if w["id"] not in announced]
+        push = [a for a in [result.get("alert"), result.get("digest")] + warnings if a]
+        if push and state["subscriptions"]:
+            deliver(push, profile["settings"]["quietHours"], muted=muted)
+        new_ids = (result["digest"]["ids"] if result.get("digest") else []) + [w["id"] for w in warnings]
 
         def apply(st):
-            st["marketActions"] = result.pop("actions", {})
-            st["marketWeights"] = result.pop("weights", {})
+            actions, weights = result.pop("actions", {}), result.pop("weights", {})
+            levels = result.pop("levels", {})
+            starts = result.pop("buyStarts", {})
+            # Each scan replaces only its own symbols' saved actions and weights.
+            other = "crypto" if scope == "stocks" else "stocks"
+            if only:
+                st["marketActions"] = {**st["marketActions"], **actions}
+                st["marketWeights"] = {**st["marketWeights"], **weights}
+                st["cryptoLevels"] = {**st.get("cryptoLevels", {}), **levels}
+                st["buyStarts"] = {**{k: v for k, v in (st.get("buyStarts") or {}).items() if k not in only}, **starts}
+            else:
+                st["buyStarts"] = {**_scope_part(st.get("buyStarts"), other), **starts}
+                st["marketActions"] = {**_scope_part(st["marketActions"], other), **actions}
+                st["marketWeights"] = {**_scope_part(st["marketWeights"], other), **weights}
+                if scope == "crypto":
+                    st["cryptoLevels"] = levels
             result["reason"] = reason
-            st["market"] = result
+            view = {k: v for k, v in result.items() if k not in ("scanBuys", "scanSells")}
+            view["paperBuys"] = result.get("scanBuys") or []
+            scans = st.setdefault("scans", {})
+            scans[scope] = rescored(scans.get(scope), view, only) if only else view
+            st["market"] = merged_market(scans)
+            remember(st, new_ids)
 
         update_state(apply)
+        # Both markets' current ideas, so one missed earlier (the account was
+        # busy, short of cash or just reset) is tried again on every scan.
+        opps, buys = current_ideas(load_state())
+        paper_opportunities(opps, engine, buys, result.get("scanSells") or [])
         return result
     finally:
         lock.release()
+
+
+def current_ideas(state: dict):
+    """The opportunities and buy ideas (within 1 ATR of their start) of the
+    latest stock and crypto scans, for the paper account."""
+    scans = state.get("scans") or {}
+    opps = (state.get("market") or {}).get("opportunities") or []
+    starts = state.get("buyStarts") or {}
+    buys = sorted((b for x in scans.values() for b in _paper_buys(x or {}, starts)), key=lambda b: -(b.get("ev") or 0))
+    return opps, buys
+
+
+def _paper_buys(scan: dict, starts: dict) -> List[dict]:
+    """A scan's buy ideas for the paper account. A scan saved by an older
+    version has no paperBuys (stocks scan only on weekdays, so one can stay
+    that way for days): they are rebuilt from its buy list."""
+    if "paperBuys" in scan:
+        return scan["paperBuys"]
+    out = []
+    for r in scan.get("buys") or []:
+        start = starts.get(r["key"]) or {"at": scan.get("at") or 0, "entry": r.get("entry")}
+        out.append({"id": f"scan:{r['key']}:{start['at']}", "setup": "scan", "key": r["key"], "symbol": r.get("symbol"),
+                    "type": r.get("type"), "entry": r.get("entry"), "stop": r.get("stop"), "take": r.get("take"),
+                    "ev": (r.get("score") or 0) / 100,
+                    "ranAway": bool(r.get("entry") and start.get("entry") and r["entry"] > start["entry"] + (r.get("atr") or 0))})
+    return out
+
+
+def offer_ideas(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """Right after a reset: buy the current ideas without waiting for a scan."""
+    opps, buys = current_ideas(load_state())
+    return paper_opportunities(opps, engine, buys, [])
+
+
+def run_crypto(reason: str = "schedule", engine: Callable[[dict, int], dict] = run_engine, only: Optional[List[str]] = None) -> Optional[dict]:
+    return run_market(reason, engine, scope="crypto", only=only)
+
+
+def rescored(old: Optional[dict], new: dict, only: List[str]) -> dict:
+    """A full scan's result with a few symbols scored again."""
+    if not old or not old.get("at"):
+        return new
+    keys = set(only)
+    out = dict(old)
+    out["buys"] = sorted([r for r in old.get("buys", []) if r["key"] not in keys] + new.get("buys", []), key=lambda r: -(r.get("score") or 0))[:100]
+    out["sells"] = sorted([r for r in old.get("sells", []) if r["key"] not in keys] + new.get("sells", []), key=lambda r: r.get("score") or 0)[:100]
+    out["newBuys"], out["newSells"] = new.get("newBuys", []), new.get("newSells", [])
+    out["paperBuys"] = [b for b in old.get("paperBuys", []) if b["key"] not in keys] + new.get("paperBuys", [])
+    out["rescoredAt"] = new.get("at")
+    return out
+
+
+def _merge_records(parts: List[dict]) -> dict:
+    out = {}
+    for recs in parts:
+        for k, r in (recs or {}).items():
+            o = out.setdefault(k, {"n": 0, "wins": 0, "sum": 0.0})
+            o["n"] += r.get("n", 0)
+            o["wins"] += r.get("wins", 0)
+            o["sum"] += r.get("avg", 0) * r.get("n", 0)
+    return {k: {"n": o["n"], "wins": o["wins"], "avg": round(o["sum"] / o["n"], 5) if o["n"] else 0} for k, o in out.items()}
+
+
+def merged_market(scans: dict) -> Optional[dict]:
+    """What the app shows: the latest stock scan and crypto scan together."""
+    stocks, crypto = scans.get("stocks") or {}, scans.get("crypto") or {}
+    done = [x for x in (stocks, crypto) if x.get("at")]
+    if not done:
+        errs = [x.get("error") for x in (stocks, crypto) if x.get("error")]
+        return {"error": "; ".join(errs)} if errs else None
+    both = lambda k: [r for x in done for r in (x.get(k) or [])]  # noqa: E731
+    opps = sorted(both("opportunities"), key=lambda o: (not o.get("proven"), -(o.get("ev") or 0)))
+    out = {
+        "at": max(x["at"] for x in done),
+        "scanned": sum(x.get("scanned", 0) for x in done),
+        "total": sum(x.get("total", 0) for x in done),
+        "buys": sorted(both("buys"), key=lambda r: -(r.get("score") or 0))[:200],
+        "sells": sorted(both("sells"), key=lambda r: r.get("score") or 0)[:200],
+        "newBuys": both("newBuys"),
+        "newSells": both("newSells"),
+        "errors": {k: v for x in done for k, v in (x.get("errors") or {}).items()},
+        "opportunities": opps[:30],
+        "warnings": both("warnings"),
+        "stocksAt": stocks.get("at"), "stocksScanned": stocks.get("scanned"),
+        "cryptoAt": crypto.get("rescoredAt") or crypto.get("at"), "cryptoScanned": crypto.get("scanned"), "cryptoTotal": crypto.get("total"),
+    }
+    if any(x.get("records") for x in done):
+        out["records"] = _merge_records([x.get("records") for x in done])
+        out["counts"] = {k: sum((x.get("counts") or {}).get(k, 0) for x in done) for k in out["records"]}
+    errs = [f"{name} scan failed: {x['error']}" for name, x in (("Stock", stocks), ("Crypto", crypto)) if x.get("error")]
+    if errs:
+        out["error"] = "; ".join(errs)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Crypto around the clock
+# ---------------------------------------------------------------------------
+
+def crypto_items(state: dict) -> Optional[List[dict]]:
+    """Every qualifying coin on Coinbase and Kraken, refreshed once a day;
+    None (the top 50) when neither exchange has answered yet."""
+    import crypto
+    uni = state.get("cryptoUniverse") or {}
+    if uni.get("items") and now_ms() - (uni.get("at") or 0) < UNIVERSE_EVERY_MS:
+        return uni["items"]
+    try:
+        items = crypto.universe(crypto.fetch_tickers())
+        if len(items) < 20:
+            raise RuntimeError(f"only {len(items)} coins qualified")
+        update_state(lambda st: st.update(cryptoUniverse={"at": now_ms(), "items": items, "error": None}))
+        return items
+    except Exception as e:
+        logger.warning("Crypto list failed: %s", e)
+        update_state(lambda st: st.update(cryptoUniverse={**(st.get("cryptoUniverse") or {}), "error": str(e), "failedAt": now_ms()}))
+        return uni.get("items") or None
+
+
+def run_pulse(fetch: Optional[Callable[[], dict]] = None, engine: Callable[[dict, int], dict] = run_engine) -> List[str]:
+    """Every minute: all crypto prices in two requests. A coin that moved
+    1.5 ATR or more since its last scan is scored again right away."""
+    import crypto
+    lock = _run_locks["pulse"]
+    if not lock.acquire(blocking=False):
+        return []
+    try:
+        state = load_state()
+        update_state(lambda st: st.update(pulse={**(st.get("pulse") or {}), "lastRunAt": now_ms()}))
+        if not state.get("profile") or not state.get("cryptoLevels"):
+            return []
+        try:
+            tickers = (fetch or crypto.fetch_tickers)()
+        except Exception as e:
+            update_state(lambda st: st.update(pulse={**(st.get("pulse") or {}), "error": str(e)}))
+            return []
+        movers = crypto.fast_movers({s: t["price"] for s, t in tickers.items()}, state["cryptoLevels"])
+        update_state(lambda st: st.update(pulse={**(st.get("pulse") or {}), "lastRunAt": now_ms(), "error": None, "movers": movers[:20],
+                                                 **({"lastMoveAt": now_ms()} if movers else {})}))
+        if movers:
+            _spawn(lambda: run_crypto("fast move", engine=engine, only=movers[:30]))
+        return movers
+    finally:
+        lock.release()
+
+
+def crypto_slot(now: int) -> int:
+    """Which crypto scan slot `now` is in: every CRYPTO_SCAN_MINUTES, a minute after the candle edge."""
+    return (now - CLOSE_DELAY_MS) // (CRYPTO_SCAN_MINUTES * 60_000)
+
+
+def crypto_due(state: dict, now: int) -> bool:
+    return bool(state.get("profile")) and state.get("lastCryptoSlot") != crypto_slot(now)
+
+
+def pulse_due(state: dict, now: int) -> bool:
+    return bool(state.get("cryptoLevels")) and now - ((state.get("pulse") or {}).get("lastRunAt") or 0) >= PULSE_EVERY_MS
+
+
+def events_dir() -> str:
+    return os.path.join(DATA_DIR, "events")
+
+
+def held_keys(state: dict) -> set:
+    """What you hold and what the paper account holds."""
+    profile = state.get("profile") or {}
+    return {h["key"] for h in profile.get("holdings", [])} | {p["key"] for p in (state.get("paper") or {}).get("positions", [])}
+
+
+def remember(st: dict, ids: List[str]) -> None:
+    """Ids of alerts sent, so each opportunity or warning goes out once."""
+    if ids:
+        st["announced"] = (st.get("announced", []) + [i for i in ids if i not in st.get("announced", [])])[-500:]
+
+
+def paper_opportunities(opportunities: List[dict], engine: Callable[[dict, int], dict] = run_engine,
+                        scan_buys: Optional[List[dict]] = None, scan_sells: Optional[List[dict]] = None) -> Optional[dict]:
+    """The paper account takes the scan's opportunities and new buy ideas, and
+    sells its scan trades that turned Sell (in the watch lock, since watch runs
+    change the same account)."""
+    scan_buys, scan_sells = scan_buys or [], scan_sells or []
+    if not opportunities and not scan_buys and not scan_sells:
+        return None
+    lock = _run_locks["watch"]
+    if not lock.acquire(timeout=900):
+        logger.warning("Paper account busy; the opportunities wait for the next scan")
+        return None
+    try:
+        state = load_state()
+        profile = state.get("profile")
+        if not profile:
+            return None
+        acc = state.get("paper") or new_paper(profile)
+        held = {p["key"] for p in acc.get("positions", []) if p.get("setup") == "scan"}
+        sells = [s for s in scan_sells if s["key"] in held]
+        if not opportunities and not scan_buys and not sells:
+            return None
+        job = {"mode": "paper", "paper": acc, "opportunities": opportunities, "scanBuys": scan_buys, "scanSells": sells, "riskPct": profile["settings"].get("riskPct", 1)}
+        try:
+            result = engine(job, 120)
+        except Exception:
+            logger.exception("Paper opportunities failed")
+            return None
+        update_state(lambda st: save_paper(st, result))
+        return result
+    finally:
+        lock.release()
+
+
+def run_events(reason: str = "schedule", refresher: Optional[Callable] = None) -> Optional[dict]:
+    """Hourly: the setups' outside data, then earnings warnings for what you hold."""
+    import events
+    lock = _run_locks["events"]
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        update_state(lambda st: st.update(events={**(st.get("events") or {}), "lastRunAt": now_ms()}))
+        try:
+            status = (refresher or events.refresh)(events_dir(), events.sp500_ciks(SP500_FILE))
+        except Exception as e:
+            logger.exception("Event data refresh failed")
+            status = {"error": str(e)}
+        state = load_state()
+        profile = state.get("profile")
+        if not profile:
+            return status
+        today = datetime.now(NEW_YORK).date()
+        announced = set(state.get("announced", []))
+        warnings = [w for w in events.earnings_warnings(events.next_earnings(events_dir()), held_keys(state), today) if w["id"] not in announced]
+        if warnings and state["subscriptions"]:
+            deliver(warnings, profile["settings"]["quietHours"])
+        update_state(lambda st: remember(st, [w["id"] for w in warnings]))
+        return {**status, "warnings": warnings}
+    finally:
+        lock.release()
+
+
+def events_due(state: dict, now: int) -> bool:
+    return bool(state.get("profile")) and now - ((state.get("events") or {}).get("lastRunAt") or 0) >= EVENTS_EVERY_MS
 
 
 # ---------------------------------------------------------------------------
@@ -561,6 +936,7 @@ def run_train(reason: str = "schedule", trainer: Callable[[dict, int], dict] = r
         profile = load_state().get("profile")
         if not profile:
             return None
+        update_state(lambda st: st["training"].update(runningSince=now_ms()))
         results = {}
         for tf in train_timeframes(profile):
             job = {"tf": tf, "items": watch_items(profile), "settings": engine_settings(profile), "total": TRAIN_SYMBOLS}
@@ -622,7 +998,11 @@ def train_due(state: dict, now: datetime) -> Optional[str]:
 
 
 def run_in_background(what: str) -> None:
-    target = {"market": run_market, "train": run_train}.get(what, run_watch)
+    if what == "market":  # both scans
+        for fn in (run_market, run_crypto):
+            threading.Thread(target=fn, args=("manual",), daemon=True).start()
+        return
+    target = {"crypto": run_crypto, "train": run_train, "events": run_events}.get(what, run_watch)
     threading.Thread(target=target, args=("manual",), daemon=True).start()
 
 
@@ -643,7 +1023,10 @@ def scan_times() -> List[str]:
 
 
 def due_market_slot(now: datetime, last_slot: Optional[str]) -> Optional[str]:
-    """The latest scan time today that has passed and hasn't run yet."""
+    """The latest scan time today that has passed and hasn't run yet.
+    Weekdays only: stocks don't trade at the weekend, and crypto has its own scan."""
+    if now.weekday() >= 5:
+        return None
     due = None
     for t in scan_times():
         h, m = (int(x) for x in t.split(":"))
@@ -655,11 +1038,11 @@ def due_market_slot(now: datetime, last_slot: Optional[str]) -> Optional[str]:
 
 def next_market_at(now: Optional[datetime] = None) -> str:
     now = now or datetime.now(tz())
-    for day in (0, 1):
+    for day in range(4):  # over a weekend, Monday's first scan
         for t in scan_times():
             h, m = (int(x) for x in t.split(":"))
             slot = (now + timedelta(days=day)).replace(hour=h, minute=m, second=0, microsecond=0)
-            if slot > now:
+            if slot > now and slot.weekday() < 5:
                 return slot.isoformat()
     return ""
 
@@ -716,6 +1099,14 @@ def start_scheduler() -> None:
                 if slot:
                     update_state(lambda st: st.update(lastMarketSlot=slot))
                     _spawn(run_market)
+                if crypto_due(state, now):
+                    cslot = crypto_slot(now)
+                    update_state(lambda st: st.update(lastCryptoSlot=cslot))
+                    _spawn(run_crypto)
+                elif pulse_due(state, now):
+                    _spawn(run_pulse)
+                if events_due(state, now):
+                    _spawn(run_events)
                 train = train_due(state, datetime.now(tz()))
                 if train:
                     update_state(lambda st: st.update(lastTrainSlot=train))

@@ -305,3 +305,32 @@ h3 { font-size: 15px; margin: 0 0 8px; }
 .bt-row:first-of-type { border-top: 0; }
 .bt-row span:last-child { text-align: right; font-variant-numeric: tabular-nums; }
 .market-title { font-size: 14px; color: var(--muted); margin: 12px 0 8px; }
+
+/* Opportunities */
+.opp .why { font-size: 14px; margin: 6px 0 2px; }
+.badge.proven { color: var(--up); border-color: currentColor; }
+.feedback { display: flex; gap: 8px; margin-top: 8px; }
+.feedback button { flex: 1; padding: 6px 8px; font-size: 13px; }
+.feedback button.chosen { border-color: var(--accent); color: var(--accent); }
+details.report { margin: 8px 0 4px; }
+details.report summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+table.setups { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+table.setups th, table.setups td { text-align: right; padding: 5px 4px; border-top: 1px solid var(--line); }
+table.setups th:first-child, table.setups td:first-child { text-align: left; }
+table.setups th { color: var(--muted); font-weight: 600; }
+.table-wrap { overflow-x: auto; }
+
+/* Paper tab */
+.equity-chart { display: block; width: 100%; height: auto; margin-top: 6px; }
+.money-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px 12px; margin: 6px 0 4px; }
+.money-row div { display: grid; }
+.money-row dt { font-size: 11px; color: var(--muted); }
+.money-row dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pnl-row { display: grid; grid-template-columns: 64px 1fr auto; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
+.pnl-sym { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pnl-track { position: relative; height: 12px; border-radius: 6px; background: var(--panel-2); }
+.pnl-track::after { content: ''; position: absolute; left: 50%; top: -2px; bottom: -2px; width: 1px; background: var(--line); }
+.pnl-fill { position: absolute; top: 0; bottom: 0; }
+.pnl-fill.up { left: 50%; background: var(--up); border-radius: 0 6px 6px 0; }
+.pnl-fill.down { right: 50%; background: var(--down); border-radius: 6px 0 0 6px; }
+.pnl-val { font-variant-numeric: tabular-nums; text-align: right; min-width: 112px; }

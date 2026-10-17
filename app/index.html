@@ -26,6 +26,7 @@
         <button type="button" id="scan-btn" class="ghost">Scan now</button>
       </div>
       <p class="notice small">Signals combine 30 methods into one score. They support your decisions and are often wrong. Check the chart before acting.</p>
+      <div id="opps-body"></div>
       <div id="signals-body"></div>
       <div id="market-body"></div>
     </section>
@@ -161,8 +162,16 @@
       </div>
 
       <div class="card">
+        <h2>Opportunities</h2>
+        <p class="muted small">Setups your server looks for across the S&amp;P 500 and every actively traded coin, using more than the price chart. A setup sends alerts only after it made money on average, after fees, in at least 30 past cases. The paper account trades all of them, so you can compare.</p>
+        <div id="setup-switches"></div>
+        <p id="setups-status" class="small" role="status"></p>
+        <div id="setups-muted"></div>
+      </div>
+
+      <div class="card">
         <h2>Your server</h2>
-        <p class="muted small">Your trade-service on OCI sends alerts while the app is closed, scans the S&amp;P 500 and top 50 crypto, and keeps your watchlist and holdings in sync between phones. The README in the repo's server folder shows how to set it up.</p>
+        <p class="muted small">Your trade-service on OCI sends alerts while the app is closed, scans the S&amp;P 500 and every actively traded coin, and keeps your watchlist and holdings in sync between phones. The README in the repo's server folder shows how to set it up.</p>
         <label class="field">
           <span>Server address</span>
           <input id="server-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://your-server:8898">
@@ -175,6 +184,7 @@
           <button type="button" id="server-save" class="primary">Save and connect</button>
           <button type="button" id="server-push">Turn on server alerts</button>
           <button type="button" id="server-test" class="ghost">Send a test alert</button>
+          <button type="button" id="server-train" class="ghost">Train the models now</button>
         </div>
         <p id="server-status" class="small" role="status"></p>
         <p id="server-info" class="muted small"></p>

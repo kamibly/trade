@@ -454,8 +454,15 @@ def main() -> None:
     started = time.time()
     header, data = load_dataset(job)
     settings = job.get("settings") or {}
-    models = train_models(data, header["features"], job["tf"], header.get("symbols"),
-                          stop_atr=settings.get("stopAtr", 2), take_atr=settings.get("takeAtr", 3))
+    try:
+        models = train_models(data, header["features"], job["tf"], header.get("symbols"),
+                              stop_atr=settings.get("stopAtr", 2), take_atr=settings.get("takeAtr", 3))
+    except ValueError as e:
+        errors = header.get("errors") or {}
+        if not errors:
+            raise
+        first = next(iter(errors.values()))
+        raise ValueError(f"{e}; {len(errors)} of {header.get('symbols')} charts could not be loaded ({first})") from None
     save_models(job["tf"], models)
     out = summary(models)
     out["seconds"] = round(time.time() - started)

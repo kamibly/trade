@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fromYahoo } from '../app/js/candles.js';
-import { runWatch, runMarket, runPrices, parseSp500 } from '../server/engine.mjs';
+import { runWatch, runMarket, runPrices, parseSp500, politely } from '../server/engine.mjs';
 import { newAccount } from '../app/js/paper.js';
 
 function series(n, drift, vol = 0.02, seed = 42) {
@@ -97,12 +97,72 @@ test('market scan uses the saved S&P list offline and only announces new ideas',
   assert.equal(first.scanned, first.total);
   assert.ok(first.buys.some(b => b.key === 'stock:MMM'));
   assert.equal(first.alert, null); // nothing was scanned before
+  // The opportunity setups run on the same charts and report their records.
+  assert.deepEqual(Object.keys(first.records).sort(), ['crowd', 'earnings', 'insider', 'ranking']);
+  assert.ok(Array.isArray(first.opportunities) && Array.isArray(first.warnings));
 
   const prev = { ...first.actions, 'stock:MMM': 'hold', 'crypto:BTC': 'buy' };
   const second = await runMarket({ settings, prev, weights: first.weights }, d);
   assert.deepEqual(second.newBuys, ['stock:MMM']);
   assert.match(second.alert.title, /1 new buy idea$/);
   assert.match(second.alert.body, /^Buy: MMM \+\d+/);
+});
+
+test('crypto scan covers the given coins only, and a fast-move rescore scores just the movers', async () => {
+  const up = series(300, 0.006, 0.01, 3);
+  let stocks = 0;
+  const d = deps({}, {
+    yahooCandles: async () => { stocks++; return { candles: up, source: 'stub' }; },
+    fetchCryptoTop: async () => { throw new Error('should use the given list'); },
+    fetchCandles: async () => ({ candles: up, source: 'stub' }),
+  });
+  const items = ['BTC', 'SOL', 'DOGE'].map(symbol => ({ type: 'crypto', symbol, name: symbol }));
+  const full = await runMarket({ scope: 'crypto', items, settings, prev: {}, weights: {} }, d);
+  assert.equal(full.scope, 'crypto');
+  assert.equal(full.total, 3);
+  assert.equal(stocks, 0);
+  assert.deepEqual(Object.keys(full.levels).sort(), ['crypto:BTC', 'crypto:DOGE', 'crypto:SOL']);
+  assert.ok(full.levels['crypto:SOL'].entry > 0 && full.levels['crypto:SOL'].atr > 0);
+  const quick = await runMarket({ scope: 'crypto', items, only: ['crypto:SOL'], settings, prev: { 'crypto:SOL': 'hold' }, weights: full.weights }, d);
+  assert.deepEqual(Object.keys(quick.actions), ['crypto:SOL']);
+  assert.deepEqual(quick.newBuys, ['crypto:SOL']);
+  assert.match(quick.alert.title, /^Crypto scan: 1 new buy idea$/);
+  assert.equal(quick.scanBuys[0].setup, 'scan');
+
+  // Every buy idea goes to the paper account, once per idea, while the price is
+  // within 1 ATR of where the idea began.
+  const ids = full.scanBuys.map(b => b.id);
+  assert.equal(ids.length, full.buys.length);
+  const again = await runMarket({ scope: 'crypto', items, settings, prev: full.actions, weights: full.weights, buyStarts: full.buyStarts }, d);
+  assert.deepEqual(again.scanBuys.map(b => b.id), ids); // same ideas, same ids
+  const key0 = full.buys[0].key;
+  const ranAway = { ...full.buyStarts, [key0]: { at: 1, entry: full.buys[0].entry - 2 * full.buys[0].atr } };
+  const later = await runMarket({ scope: 'crypto', items, settings, prev: full.actions, weights: full.weights, buyStarts: ranAway }, d);
+  assert.ok(later.scanBuys.find(b => b.key === key0).ranAway);
+  assert.ok(!full.scanBuys.some(b => b.ranAway));
+  assert.deepEqual(later.buyStarts[key0], ranAway[key0]);
+});
+
+test('Yahoo calls are spaced, wait out a 429 together, and stop asking after the last retry', async () => {
+  let t = 0;
+  let paused = 0;
+  const waits = [];
+  const cooldown = { get: async () => paused, set: async until => { paused = until; } };
+  const opts = { gap: 100, waits: [1000, 5000], giveUp: 60_000, now: () => t, wait: async ms => { waits.push(ms); t += ms; }, cooldown };
+  const limited = Object.assign(new Error('query1.finance.yahoo.com answered 429'), { status: 429 });
+  let fails = 1;
+  const calls = [];
+  const get = politely(async s => { calls.push([s, t]); if (fails-- > 0) throw limited; return s; }, opts);
+  assert.equal(await get('A'), 'A'); // a 429, a 1 s pause, then the answer
+  assert.deepEqual(calls, [['A', 0], ['A', 1000]]);
+  assert.equal(await get('B'), 'B');
+  assert.equal(calls.at(-1)[1], 1100); // spaced by the gap
+  fails = 9;
+  await assert.rejects(get('C'), /429/);
+  await assert.rejects(get('D'), /429/); // blocked: no new request
+  assert.equal(calls.filter(([s]) => s === 'D').length, 0);
+  const other = Object.assign(new Error('no such symbol'), { status: 404 });
+  await assert.rejects(politely(async () => { throw other; }, opts)(), /no such symbol/);
 });
 
 test('app sync helpers: direction, merge and profile', async () => {

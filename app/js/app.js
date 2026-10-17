@@ -9,7 +9,8 @@ import * as F from './forecast.js';
 import {
   analyze, signalAt, scoreVotes, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
 } from './signals.js';
-import { scanItem, alertFor, manualRule, autoTune, learnKey, backtestOptions, learnedFrom, ruleOf } from './scanner.js';
+import { scanItem, alertFor, manualRule, autoTune, learnKey, backtestOptions, learnedFrom, ruleOf, tradeRecordLine } from './scanner.js';
+import { SETUPS, recordLine, proven as setupProven, MIN_PROVEN } from './setups.js';
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
 import { voteMatrix, backtest } from './backtest.js';
 import * as paper from './paper.js';
@@ -18,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.7.0 (tuned signals)';
+export const APP_VERSION = '0.10.2 (paper charts)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -65,6 +66,7 @@ const state = {
   syncTimer: null,
   serverStatus: null,
   scan: { busy: false, done: 0, total: 0, at: 0, errors: {}, abort: null },
+  rated: {}, // opportunity id -> true (useful) or false, rated on this phone
 };
 
 // Small DOM helper: text always goes in as text, never as HTML.
@@ -117,7 +119,7 @@ function findItem(key) {
   const own = trackedItems().find(i => store.itemKey(i) === key);
   if (own) return own;
   // Symbols from the server's market scan open as charts too.
-  const m = state.market && [...(state.market.buys || []), ...(state.market.sells || [])].find(x => x.key === key);
+  const m = state.market && [...(state.market.buys || []), ...(state.market.sells || []), ...(state.market.opportunities || [])].find(x => x.key === key);
   return m ? { type: m.type, symbol: m.symbol, name: m.name } : undefined;
 }
 const serverOn = () => !!(state.settings.serverUrl && state.settings.serverKey);
@@ -662,6 +664,7 @@ function signalCard(sig) {
     scoreMeter(sig.score),
     el('div', { class: 'sub', text: `${Math.round(sig.confidence * 100)}% agree · ${levelsLine(sig)}` }),
     sig.tuned && sig.rule ? el('div', { class: 'sub', text: tunedLine(sig) }) : null,
+    sig.action === 'buy' && sig.record ? el('div', { class: 'sub', text: tradeRecordLine(sig.symbol, sig.record) }) : null,
     sig.top && sig.top.length ? el('div', { class: 'sub', text: `Led by ${sig.top.join(', ')}` }) : null);
 }
 
@@ -689,22 +692,156 @@ function renderSignals() {
   const errors = Object.entries(scan.errors);
   const section = (title, list, empty) => [
     el('h2', { class: 'section', text: `${title} (${list.length})` }),
-    list.length ? el('ul', { class: 'list' }, ...list.map(signalCard)) : el('p', { class: 'muted small', text: empty }),
+    list.length ? el('ul', { class: 'list' }, ...list.map(sig => paperNote(signalCard(sig), sig))) : el('p', { class: 'muted small', text: empty }),
   ];
   $('signals-body').replaceChildren(
-    ...section('Buy ideas', buys, 'No symbol is a Buy right now.'),
-    ...section('Sell ideas', sells, 'No symbol is a Sell right now.'),
-    ...section('Watching', holds, 'Nothing else scanned yet.'),
+    ...section(`Your watchlist: Buy on ${TIMEFRAMES[tf].label}`, buys, 'No symbol is a Buy right now.'),
+    ...section(`Your watchlist: Sell on ${TIMEFRAMES[tf].label}`, sells, 'No symbol is a Sell right now.'),
+    ...section('Your watchlist: no signal', holds, 'Nothing else scanned yet.'),
     errors.length ? el('p', { class: 'muted small', text: `Could not score: ${errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ')}` }) : '',
   );
+  renderOpportunities();
   renderMarket();
+}
+
+// ---- Opportunities (from the server's market scan) -------------------------------
+
+const setupName = id => (id === 'signal' ? 'Buy and Sell signals' : id === 'scan' ? 'Market scan ideas' : SETUPS[id] ? SETUPS[id].name : id);
+const holdText = o => `${o.hold} ${o.type === 'stock' ? 'trading days' : 'days'}`;
+
+async function rateSetup(setups, useful, id) {
+  try {
+    const { setups: info } = await srv.serverFetch(state.settings, '/feedback', { method: 'POST', body: { setups, useful, id } });
+    if (id) state.rated[id] = useful;
+    state.market = { ...state.market, setupsInfo: info };
+    store.saveMarket(state.market);
+    const muted = setups.filter(x => info.muted.includes(x));
+    toast(muted.length ? `Thanks. ${setupName(muted[0])} alerts are now muted; turn them back on in Settings.` : 'Thanks, your rating is saved.');
+    renderOpportunities();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function unmuteSetup(setup) {
+  try {
+    const { setups: info } = await srv.serverFetch(state.settings, '/setups/unmute', { method: 'POST', body: { setup } });
+    state.market = { ...state.market, setupsInfo: info };
+    store.saveMarket(state.market);
+    toast(`${setupName(setup)} alerts are back on.`);
+    renderOpportunities();
+    renderSetupSettings();
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+function feedbackButtons(setups, id) {
+  const rated = state.rated[id];
+  const button = (label, useful) => el('button', {
+    type: 'button',
+    class: rated === useful ? 'chosen' : '',
+    text: label,
+    onclick: e => { e.stopPropagation(); rateSetup(setups, useful, id); },
+  });
+  return el('div', { class: 'feedback' }, button('Useful', true), button('Not useful', false));
+}
+
+function opportunityCard(o) {
+  const item = { type: o.type, symbol: o.symbol, name: o.name };
+  const symbolRec = o.symbolRecord && o.symbolRecord.n >= 3
+    ? `On ${o.symbol}: ${o.symbolRecord.wins} of ${o.symbolRecord.n} past cases made money, average ${fmtPct(o.symbolRecord.avg)}.` : '';
+  return el('li', { class: 'signal opp', onclick: () => { state.chartTf = '1D'; openChart(item, true); } },
+    el('div', { class: 'signal-top' },
+      el('div', { class: 'sym' }, o.symbol, el('span', { class: 'badge', text: o.type === 'stock' ? 'Stock' : 'Crypto' }),
+        el('span', { class: o.proven ? 'badge proven' : 'badge', text: o.proven ? 'Proven' : 'Watching, not proven' })),
+      el('div', { class: `score ${o.ev > 0 ? 'up' : 'down'}`, text: fmtPct(o.ev) })),
+    el('div', { class: 'sub', text: setupName(o.setup) }),
+    el('p', { class: 'why', text: o.why }),
+    el('div', { class: 'sub', text: recordLine(o.record, o.hold) }),
+    symbolRec ? el('div', { class: 'sub', text: symbolRec }) : null,
+    el('div', { class: 'sub', text: `Entry ${formatMoney(o.entry)} · Stop ${formatMoney(o.stop)} · Target ${formatMoney(o.take)} · hold up to ${holdText(o)}` }),
+    feedbackButtons([o.setup], o.id));
+}
+
+function setupReport(m) {
+  const records = m.records || {};
+  const info = m.setupsInfo || {};
+  const sources = info.sources || {};
+  const enabled = state.settings.setups || {};
+  const row = id => {
+    const r = records[id] || { n: 0, wins: 0, avg: 0 };
+    const status = enabled[id] === false ? 'Off' : (info.muted || []).includes(id) ? 'Muted' : setupProven(r) ? 'Proven' : r.n < MIN_PROVEN ? 'Too few cases' : 'Loses money';
+    return el('tr', {},
+      el('td', { text: SETUPS[id].name }),
+      el('td', { text: String(r.n) }),
+      el('td', { text: r.n ? `${Math.round((r.wins / r.n) * 100)}%` : '–' }),
+      el('td', { text: r.n ? fmtPct(r.avg) : '–' }),
+      el('td', { text: status }));
+  };
+  const SOURCE_NAMES = { insiders: 'SEC insider filings', earnings: 'SEC earnings dates', calendar: 'Nasdaq earnings calendar', fng: 'Fear & Greed index', funding: 'Kraken funding rates' };
+  const sourceLines = Object.entries(SOURCE_NAMES).filter(([k]) => sources[k]).map(([k, label]) => {
+    const st = sources[k];
+    return el('li', { class: 'sub', text: `${label}: ${st.ok ? `loaded (${st.count})` : 'not loaded'}${st.at ? `, ${timeAgo(st.at)}` : ''}${st.error ? `. ${st.error}` : ''}` });
+  });
+  return el('details', { class: 'report' },
+    el('summary', { text: 'Setup report' }),
+    el('p', { class: 'muted small', text: 'Every past case of each setup on the scanned symbols\' daily charts: bought at the close, sold at the stop, the target or the end of the holding period, after fees. A setup sends alerts once it is proven: at least 30 cases with a positive average.' }),
+    el('div', { class: 'table-wrap' }, el('table', { class: 'setups' },
+      el('thead', {}, el('tr', {}, ...['Setup', 'Cases', 'Won', 'Average', 'Status'].map(t => el('th', { text: t })))),
+      el('tbody', {}, ...Object.keys(SETUPS).map(row)))),
+    sourceLines.length ? el('ul', { class: 'list compact' }, ...sourceLines) : el('p', { class: 'muted small', text: 'The data sources load within an hour of the server starting.' }),
+    info.secContact === false ? el('p', { class: 'small', text: 'Insider buying and earnings dates need SEC_CONTACT (your email) in the server\'s compose file.' }) : null);
+}
+
+async function runMarketNow(button) {
+  button.disabled = true;
+  try {
+    await srv.serverFetch(state.settings, '/run', { method: 'POST', body: { what: 'market' } });
+    button.textContent = 'Scanning on your server; this takes a few minutes';
+    // Check back for the result while the scan runs.
+    for (const wait of [3, 6, 10, 15]) setTimeout(() => refreshMarket({ force: true }), wait * 60_000);
+  } catch (e) {
+    button.disabled = false;
+    toast(e.message);
+  }
+}
+
+function renderOpportunities() {
+  const body = $('opps-body');
+  const m = state.market;
+  if (!serverOn()) {
+    body.replaceChildren();
+    return;
+  }
+  // A scan from before the server had the setups (or none yet): say when they arrive.
+  if (!m || !m.at || !m.records) {
+    const failed = m && m.error ? ` The last scan failed: ${m.error}` : '';
+    body.replaceChildren(
+      el('h2', { class: 'section', text: 'Opportunities' }),
+      el('p', { class: 'muted small', text: `Your server finds opportunities in its scans: crypto every 15 minutes around the clock, stocks every 30 minutes while the US market is open and at 20:00. They appear here after the next scan.${failed}` }),
+      el('button', { type: 'button', class: 'ghost', text: 'Run the scans now', onclick: e => runMarketNow(e.currentTarget) }));
+    return;
+  }
+  const opps = m.opportunities || [];
+  const muted = (m.setupsInfo && m.setupsInfo.muted) || [];
+  const warnings = m.warnings || [];
+  body.replaceChildren(...[
+    el('h2', { class: 'section', text: `Opportunities (${opps.length})` }),
+    el('p', { class: 'muted small', text: `Ranked by the average result of past cases after fees, from the scan ${timeAgo(m.at)}.` }),
+    muted.length ? el('p', { class: 'small', text: `Muted after your ratings: ${muted.map(setupName).join(', ')}. They still show here; turn their alerts back on in Settings.` }) : null,
+    warnings.length ? el('ul', { class: 'list' }, ...warnings.map(w => el('li', { class: 'signal' }, el('div', { class: 'sym', text: w.title }), el('div', { class: 'sub', text: w.body })))) : null,
+    opps.length ? el('ul', { class: 'list' }, ...opps.slice(0, 15).map(opportunityCard))
+      : el('p', { class: 'muted small', text: 'No setup fired on the newest candles. The report below shows how each one did in the past.' }),
+    setupReport(m),
+  ].filter(Boolean));
 }
 
 function renderMarket() {
   const m = state.market;
   const body = $('market-body');
   if (!serverOn()) {
-    body.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server in Settings to see buy and sell ideas from the whole S&P 500 and the top 50 crypto.' }));
+    body.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server in Settings to see buy and sell ideas from the whole S&P 500 and every actively traded coin.' }));
     return;
   }
   if (!m || !m.at) {
@@ -716,18 +853,49 @@ function renderMarket() {
   const card = sig => {
     const li = signalCard(sig);
     if (fresh.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge', text: 'New' }));
-    return li;
+    return paperNote(li, sig);
   };
-  const list = (title, rows, empty) => [
-    el('h3', { class: 'market-title', text: `${title} (${rows.length})` }),
-    rows.length ? el('ul', { class: 'list' }, ...rows.slice(0, 10).map(card)) : el('p', { class: 'muted small', text: empty }),
-  ];
+  // The 10 strongest, then a button for the rest.
+  const list = (title, rows, empty) => {
+    if (!rows.length) return [el('h3', { class: 'market-title', text: `${title} (0)` }), el('p', { class: 'muted small', text: empty })];
+    const ul = el('ul', { class: 'list' }, ...rows.slice(0, 10).map(card));
+    const more = rows.length > 10 ? el('button', { type: 'button', class: 'ghost', text: `Show all ${rows.length}`, onclick: e => { ul.append(...rows.slice(10).map(card)); e.currentTarget.remove(); } }) : null;
+    return [el('h3', { class: 'market-title', text: `${title} (${rows.length})` }), ul, more].filter(Boolean);
+  };
   body.replaceChildren(
     el('h2', { class: 'section', text: 'Market scan' }),
-    el('p', { class: 'muted small', text: `${m.scanned} of ${m.total} symbols from the S&P 500 and top 50 crypto on the daily chart, scanned ${timeAgo(m.at)} by your server.` }),
-    ...list('Buy ideas', m.buys || [], 'No buy ideas in the last scan.'),
-    ...list('Sell ideas', m.sells || [], 'No sell ideas in the last scan.'),
+    el('p', { class: 'muted small', text: scanLine(m) }),
+    ...list('Market buy ideas (1D)', m.buys || [], 'No buy ideas in the last scan.'),
+    ...list('Market sell ideas (1D)', m.sells || [], 'No sell ideas in the last scan.'),
   );
+}
+
+function scanLine(m) {
+  if (!m.cryptoAt && !m.stocksAt) return `${m.scanned} of ${m.total} symbols on the daily chart, scanned ${timeAgo(m.at)} by your server.`;
+  const crypto = m.cryptoAt ? `${m.cryptoScanned} coins ${timeAgo(m.cryptoAt)}` : 'crypto not yet';
+  const stocks = m.stocksAt ? `${m.stocksScanned} S&P 500 stocks ${timeAgo(m.stocksAt)}` : 'stocks not yet';
+  return `Daily chart, scanned by your server: ${crypto} (every 15 minutes, day and night), ${stocks}.`;
+}
+
+// Buy ideas the server's paper account holds get a PAPER tag; the others say
+// why it didn't buy them.
+function paperNote(li, sig) {
+  if (!serverPaperOn() || sig.action !== 'buy') return li;
+  const acc = state.serverPaper.paper;
+  if ((acc.positions || []).some(p => p.key === sig.key)) {
+    li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
+  } else if (acc.skips && acc.skips[sig.key]) {
+    li.append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[sig.key]}.` }));
+  } else {
+    // The server buys on its own score, which can differ from this phone's.
+    const s = (state.serverSignals || {})[sig.key];
+    const why = !state.serverSignals ? null
+      : !s ? 'the server has not scored it yet'
+        : s.action !== 'buy' ? `the server rates it ${s.action === 'sell' ? 'Sell' : 'Hold'} (${fmtScore(s.score)}${s.tf ? ` on ${s.tf}` : ''}, price ${formatMoney(s.entry)}${s.candleTime ? `, candle of ${new Date(s.candleTime * 1000).toLocaleDateString()}` : ''}${s.source ? ` from ${s.source}` : ''}${s.at ? `, scored ${new Date(s.at).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : ''})`
+          : null;
+    if (why) li.append(el('div', { class: 'sub', text: `Not in paper trading: ${why}.` }));
+  }
+  return li;
 }
 
 // ---- Your server ---------------------------------------------------------------
@@ -772,10 +940,11 @@ async function refreshMarket({ force = false } = {}) {
   if (!serverOn() || !navigator.onLine) return;
   if (!force && state.market && Date.now() - (state.market.fetchedAt || 0) < MARKET_REFRESH_MS) return;
   try {
-    const { market, modelsAt = {} } = await srv.serverFetch(state.settings, '/signals');
-    state.market = market ? { ...market, fetchedAt: Date.now() } : { fetchedAt: Date.now() };
+    const { signals = {}, market, modelsAt = {}, setups = null } = await srv.serverFetch(state.settings, '/signals');
+    state.serverSignals = signals; // the server's own watchlist scores, which paper-trade
+    state.market = market ? { ...market, setupsInfo: setups, fetchedAt: Date.now() } : { setupsInfo: setups, fetchedAt: Date.now() };
     store.saveMarket(state.market);
-    if (state.view === 'signals') renderMarket();
+    if (state.view === 'signals') { renderOpportunities(); renderMarket(); }
     await refreshModels(modelsAt);
     await refreshPaper();
   } catch (e) {
@@ -812,31 +981,67 @@ function renderServer() {
   $('server-push').textContent = state.settings.serverPush ? 'Turn off server alerts' : 'Turn on server alerts';
   $('server-push').disabled = !serverOn();
   $('server-test').hidden = !state.settings.serverPush;
+  $('server-train').disabled = !serverOn() || trainingNow(st);
   const info = $('server-info');
   if (!serverOn()) { info.textContent = 'Not connected.'; return; }
   if (!st) { info.textContent = 'Checking your server…'; return; }
   if (st.error) { info.textContent = st.error; return; }
   const w = st.watch || {};
   const errs = Object.keys(w.errors || {}).length;
+  const failed = Object.entries(w.errors || {}).map(([key, msg]) => `${key.split(':').pop()}: ${String(msg).slice(0, 120)}`).join('; ');
   info.textContent = [
     `Connected (version ${st.version}).`,
     st.pushEnabled ? `${st.devices} phone${st.devices === 1 ? '' : 's'} get alerts.` : 'Notification keys are not set on the server yet.',
-    w.lastRunAt ? `Watchlist and holdings checked ${timeAgo(w.lastRunAt)}, right after every candle closes and every ${st.watchEveryMinutes} minutes in between${errs ? `, ${errs} symbol${errs === 1 ? '' : 's'} failed` : ''}.` : 'Watchlist checks start within a few minutes.',
+    w.lastRunAt ? `Watchlist and holdings checked ${timeAgo(w.lastRunAt)}, right after every candle closes and every ${st.watchEveryMinutes} minutes in between${errs ? `, ${errs} symbol${errs === 1 ? '' : 's'} failed (${failed})` : ''}.` : 'Watchlist checks start within a few minutes.',
     st.prices && st.prices.lastRunAt ? `Stop-losses and targets checked every minute, last ${timeAgo(st.prices.lastRunAt)}.` : '',
-    st.market.lastRunAt ? `Market scan ${timeAgo(st.market.lastRunAt)}.` : '',
-    st.market.nextAt ? `Next market scan ${new Date(st.market.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '',
+    cryptoLine(st.crypto),
+    st.market.lastRunAt ? `Stock scan ${timeAgo(st.market.lastRunAt)}.` : '',
+    st.market.nextAt ? `Next stock scan ${new Date(st.market.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '',
     modelsLine(st),
   ].filter(Boolean).join(' ');
 }
 
+function cryptoLine(c) {
+  if (!c) return '';
+  if (!c.lastRunAt) return `Crypto scan every ${c.everyMinutes} minutes, starting shortly.`;
+  return [
+    `Crypto scan every ${c.everyMinutes} minutes around the clock, last ${timeAgo(c.lastRunAt)}: ${c.scanned} of ${c.total} coins traded on Coinbase or Kraken.`,
+    c.listError ? `The coin list could not be refreshed: ${c.listError}.` : '',
+    c.pulseAt ? `Fast moves watched every minute${c.lastMoveAt ? `, last one rescored ${timeAgo(c.lastMoveAt)}` : ''}.` : '',
+  ].filter(Boolean).join(' ');
+}
+
+// The server marks a training run as started; a run takes up to an hour per
+// timeframe, so after 5 hours it counts as stopped (the server restarted).
+function trainingNow(st) {
+  const t = st && st.training;
+  return Boolean(t && t.runningSince && Date.now() - t.runningSince < 5 * 3600_000);
+}
+
+async function trainNow() {
+  const status = $('server-status');
+  $('server-train').disabled = true;
+  try {
+    await srv.serverFetch(state.settings, '/run', { method: 'POST', body: { what: 'train' } });
+    status.textContent = 'Training started on your server. It takes 10 to 30 minutes per chart timeframe; this page shows the results when it finishes.';
+    status.className = 'small good';
+    setTimeout(loadServerStatus, 5000);
+  } catch (e) {
+    $('server-train').disabled = false;
+    status.textContent = e.message;
+    status.className = 'small bad';
+  }
+}
+
 function modelsLine(st) {
+  if (trainingNow(st)) return `Training the models now, started ${timeAgo(st.training.runningSince)}.`;
   const models = Object.entries(st.models || {});
   const failed = Object.entries((st.training && st.training.results) || {}).filter(([, r]) => r.error);
   const next = st.training && st.training.nextAt ? ` Next training ${new Date(st.training.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '';
   if (!models.length) return `${failed.length ? `Model training failed: ${failed[0][1].error}.` : 'Machine-learning models are not trained yet.'}${next}`;
   const pct = t => (t ? `${Math.round(t.hit * 100)}%${t.usable ? '' : ' (not used)'}` : 'none');
   const turns = m => (m.bottom || m.top ? `, bottom finder ${pct(m.bottom)}, top finder ${pct(m.top)}` : '');
-  return `${models.map(([tf, m]) => `${TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf}: LightGBM ${pct(m.lgbm)}, LSTM ${pct(m.lstm)}${turns(m)} right in their test, trained ${timeAgo(m.trainedAt)}.`).join(' ')}${failed.length ? ` Last training of ${failed.map(([tf]) => tf).join(', ')} failed.` : ''}${next}`;
+  return `${models.map(([tf, m]) => `${TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf}: LightGBM ${pct(m.lgbm)}, LSTM ${pct(m.lstm)}${turns(m)} right in their test, trained ${timeAgo(m.trainedAt)}.`).join(' ')}${failed.length ? ` Last training failed: ${failed.map(([tf, r]) => `${tf}: ${r.error}`).join('; ')}.` : ''}${next}`;
 }
 
 async function saveServer() {
@@ -868,6 +1073,7 @@ async function saveServer() {
     status.className = 'small bad';
     return;
   }
+  srv.saveWorkerConfig(state.settings);
   status.textContent = 'Connected. Your watchlist and holdings now sync with the server.';
   status.className = 'small good';
   await syncNow();
@@ -1140,6 +1346,7 @@ async function refreshPaper() {
     state.serverPaper = { ...r, fetchedAt: Date.now() };
     store.saveServerPaper(state.serverPaper);
     if (state.view === 'portfolio' && state.pfTab === 'paper') renderPaper();
+    if (state.view === 'signals') renderSignals();
   } catch (e) {
     console.warn('Paper account fetch failed', e);
   }
@@ -1157,7 +1364,7 @@ function paperAccount() {
 function stepPaper(tf, alerts) {
   if (serverOn()) return; // the server trades the paper account
   const signals = Object.fromEntries(Object.entries(state.signals).filter(([, s]) => s.tf === tf));
-  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct });
+  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct, budgets: paper.PHONE_BUDGETS });
   store.savePaper(state.paper);
   for (const ev of events) {
     toast(ev.kind === 'open'
@@ -1174,6 +1381,15 @@ function renderPaper() {
   const sum = paper.summary(acc, prices);
   const events = onServer ? state.serverPaper.events || [] : [];
   const fmtTime = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const open = acc.positions.map(p => {
+    const price = prices[p.key];
+    const value = Number.isFinite(price) ? p.qty * price : NaN;
+    return { p, price, value, pnl: value - p.cost, ret: value / p.cost - 1 };
+  });
+  const invested = open.reduce((t, o) => t + (Number.isFinite(o.value) ? o.value : o.p.cost), 0);
+  const priced = open.filter(o => Number.isFinite(o.value));
+  const openCost = priced.reduce((t, o) => t + o.p.cost, 0);
+  const openPnl = priced.length ? priced.reduce((t, o) => t + o.pnl, 0) : NaN;
   // replaceChildren() writes a null child as the text "null", so drop the empty sections.
   $('paper-body').replaceChildren(...[
     el('div', { class: 'card' },
@@ -1184,22 +1400,29 @@ function renderPaper() {
       el('div', { class: 'big', text: formatMoney(sum.equity) }),
       el('dl', { class: 'stats' },
         stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
+        stat('Invested now', formatMoney(invested)),
+        stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
         stat('Cash', formatMoney(acc.cash)),
         stat('Closed trades', String(sum.trades)),
         stat('Won', sum.trades ? `${Math.round(sum.winRate * 100)}%` : '–'),
         stat('Worst drop', fmtPct(-sum.maxDrawdown)))),
+    equityChart(acc, sum.equity),
+    bySetupTable(acc),
     el('h2', { class: 'section', text: `Open (${acc.positions.length})` }),
+    pnlBars(priced),
     acc.positions.length
-      ? el('ul', { class: 'list' }, ...acc.positions.map(p => {
-        const price = prices[p.key];
-        const pnl = Number.isFinite(price) ? p.qty * price - p.cost : NaN;
-        return el('li', { class: 'holding', onclick: () => { const item = findItem(p.key); if (item) openChart(item, true); } },
+      ? el('ul', { class: 'list' }, ...open.map(({ p, price, value, pnl, ret }) =>
+        el('li', { class: 'holding paper-card', onclick: () => { const item = findItem(p.key); if (item) openChart(item, true); } },
           el('div', { class: 'signal-top' },
             el('div', { class: 'sym', text: p.symbol }),
-            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? `${pnl >= 0 ? '+' : ''}${formatMoney(pnl)}` : '–' })),
-          el('div', { class: 'sub', text: `${Number(p.qty.toPrecision(6))} at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
-          el('div', { class: 'sub', text: `Stop ${formatMoney(p.stop)} · Target ${formatMoney(p.take)} · since ${fmtTime(p.openedAt)}` }));
-      }))
+            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? fmtPct(ret) : '–' })),
+          el('dl', { class: 'money-row' },
+            stat('Invested', formatMoney(p.cost)),
+            stat('Worth now', Number.isFinite(value) ? formatMoney(value) : '–'),
+            stat('Gain/loss', Number.isFinite(pnl) ? signed(pnl) : '–', upDown(pnl))),
+          el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
+          el('div', { class: 'sub', text: `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
+          el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}` }))))
       : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
     events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
     events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 10).map(ev => el('li', { class: 'holding' },
@@ -1209,10 +1432,93 @@ function renderPaper() {
       ? el('ul', { class: 'list compact' }, ...acc.trades.slice(-30).reverse().map(t => el('li', { class: 'holding' },
         el('div', { class: 'signal-top' },
           el('div', { class: 'sym', text: t.symbol }),
-          el('span', { class: changeClass(t.pnl), text: `${t.pnl >= 0 ? '+' : ''}${formatMoney(t.pnl)} (${fmtPct(t.ret)})` })),
-        el('div', { class: 'sub', text: `${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }))))
+          el('span', { class: changeClass(t.pnl), text: `${signed(t.pnl)} (${fmtPct(t.ret)})` })),
+        el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
+        el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason === 'time' ? 'holding period over' : t.reason}` }),
+        el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }))))
       : el('p', { class: 'muted small', text: 'No closed paper trades yet.' }),
   ].filter(Boolean));
+}
+
+const signed = v => `${v >= 0 ? '+' : '−'}${formatMoney(Math.abs(v))}`;
+// What a closed trade cost; older trades didn't keep it.
+const costOf = t => (Number.isFinite(t.cost) ? t.cost : t.ret ? t.pnl / t.ret : t.qty * t.entry);
+const fmtQty = p => `${Number(p.qty.toPrecision(4))} ${p.type === 'crypto' ? 'coins' : p.qty === 1 ? 'share' : 'shares'}`;
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs = {}, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v !== undefined && v !== null) node.setAttribute(k, v);
+  for (const c of children.flat()) if (c) node.append(c);
+  return node;
+}
+
+// The account's value over time against what it started with: green above, red below.
+function equityChart(acc, now) {
+  const pts = [...acc.history.map(h => ({ t: h.t, v: h.equity })), { t: Date.now(), v: now }]
+    .filter(p => Number.isFinite(p.v) && p.t >= acc.createdAt - 60_000);
+  if (pts.length < 2) return null;
+  const W = 600, H = 170, padL = 4, padR = 4, padT = 10, padB = 22;
+  const t0 = pts[0].t, t1 = pts.at(-1).t;
+  const vs = [...pts.map(p => p.v), acc.start];
+  let lo = Math.min(...vs), hi = Math.max(...vs);
+  const pad = Math.max((hi - lo) * 0.1, acc.start * 0.002);
+  lo -= pad; hi += pad;
+  const x = t => padL + (t1 > t0 ? (t - t0) / (t1 - t0) : 1) * (W - padL - padR);
+  const y = v => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const base = y(acc.start);
+  const area = `${line}L${x(t1).toFixed(1)},${base.toFixed(1)}L${x(t0).toFixed(1)},${base.toFixed(1)}Z`;
+  const id = `eq${Math.random().toString(36).slice(2, 8)}`;
+  const day = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const change = now - acc.start;
+  return el('div', { class: 'card' },
+    el('div', { class: 'signal-top' },
+      el('h3', { text: 'Account value' }),
+      el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
+    svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
+      svg('defs', {},
+        svg('clipPath', { id: `${id}a` }, svg('rect', { x: 0, y: 0, width: W, height: base })),
+        svg('clipPath', { id: `${id}b` }, svg('rect', { x: 0, y: base, width: W, height: H - base }))),
+      svg('path', { d: area, fill: 'var(--up)', 'fill-opacity': 0.15, 'clip-path': `url(#${id}a)` }),
+      svg('path', { d: area, fill: 'var(--down)', 'fill-opacity': 0.15, 'clip-path': `url(#${id}b)` }),
+      svg('line', { x1: padL, x2: W - padR, y1: base, y2: base, stroke: 'var(--muted)', 'stroke-dasharray': '4 4', 'stroke-width': 1 }),
+      svg('path', { d: line, fill: 'none', stroke: 'var(--up)', 'stroke-width': 2, 'clip-path': `url(#${id}a)` }),
+      svg('path', { d: line, fill: 'none', stroke: 'var(--down)', 'stroke-width': 2, 'clip-path': `url(#${id}b)` }),
+      svg('text', { x: padL, y: H - 6, fill: 'var(--muted)', 'font-size': 20 }, day(t0)),
+      svg('text', { x: W - padR, y: H - 6, fill: 'var(--muted)', 'font-size': 20, 'text-anchor': 'end' }, 'now')),
+    el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.` }));
+}
+
+// Each open trade's gain or loss in dollars, biggest first.
+function pnlBars(rows) {
+  if (!rows.length) return null;
+  const sorted = [...rows].sort((a, b) => b.pnl - a.pnl);
+  const max = Math.max(...sorted.map(r => Math.abs(r.pnl)), 0.01);
+  return el('div', { class: 'card pnl-bars' },
+    el('h3', { text: 'Gain or loss on each open trade' }),
+    ...sorted.map(r => el('div', { class: 'pnl-row' },
+      el('span', { class: 'pnl-sym', text: r.p.symbol }),
+      el('span', { class: 'pnl-track' },
+        el('span', { class: `pnl-fill ${r.pnl >= 0 ? 'up' : 'down'}`, style: `width:${(Math.abs(r.pnl) / max * 50).toFixed(1)}%` })),
+      el('span', { class: `pnl-val ${upDown(r.pnl)}`, text: `${signed(r.pnl)} (${fmtPct(r.ret)})` }))));
+}
+
+// Trades, win rate, return and worst drop for each way the account trades.
+function bySetupTable(acc) {
+  const rows = paper.bySetup(acc);
+  if (!rows.length || (rows.length === 1 && rows[0].setup === 'signal')) return null;
+  return el('div', { class: 'card' },
+    el('h3', { text: 'By setup' }),
+    el('div', { class: 'table-wrap' }, el('table', { class: 'setups' },
+      el('thead', {}, el('tr', {}, ...['Setup', 'Trades', 'Won', 'Return', 'Worst drop'].map(t => el('th', { text: t })))),
+      el('tbody', {}, ...rows.map(r => el('tr', {},
+        el('td', { text: `${setupName(r.setup)}${r.open ? ` (${r.open} open)` : ''}` }),
+        el('td', { text: String(r.trades) }),
+        el('td', { text: r.trades ? `${Math.round(r.winRate * 100)}%` : '–' }),
+        el('td', { class: upDown(r.ret), text: r.trades ? fmtPct(r.ret) : '–' }),
+        el('td', { text: r.trades ? fmtPct(-r.maxDrawdown) : '–' })))))),
+    el('p', { class: 'muted small', text: 'Return is on the starting amount. Opportunity trades sell at their stop, their target or the end of their holding period.' }));
 }
 
 async function resetPaper() {
@@ -1260,8 +1566,28 @@ function renderSettings() {
   $('server-url').value = state.settings.serverUrl;
   $('server-key').value = state.settings.serverKey;
   renderNotifyStatus();
+  renderSetupSettings();
   renderServer();
   if (serverOn()) loadServerStatus();
+}
+
+function renderSetupSettings() {
+  const on = state.settings.setups || {};
+  $('setup-switches').replaceChildren(...Object.entries(SETUPS).map(([id, s]) => {
+    const input = el('input', { type: 'checkbox' });
+    input.checked = on[id] !== false;
+    input.addEventListener('change', () => {
+      state.settings = store.saveSettings({ setups: { ...state.settings.setups, [id]: input.checked } });
+      markChanged();
+      $('setups-status').textContent = 'Saved. The next market scan uses it.';
+    });
+    return el('label', { class: 'switch' }, input, el('span', { text: `${s.name}${s.kind === 'stock' ? ' (stocks)' : s.kind === 'crypto' ? ' (crypto)' : ''}` }));
+  }));
+  const info = (state.market && state.market.setupsInfo) || {};
+  const muted = info.muted || [];
+  $('setups-muted').replaceChildren(...muted.map(id => el('div', { class: 'row' },
+    el('span', { class: 'small', text: `${setupName(id)} alerts are muted: you rated 7 of the last 10 "Not useful".` }),
+    el('button', { type: 'button', class: 'ghost', text: 'Turn back on', onclick: () => unmuteSetup(id) }))));
 }
 
 function saveRisk() {
@@ -1427,6 +1753,7 @@ function bind() {
   $('server-save').addEventListener('click', saveServer);
   $('server-push').addEventListener('click', toggleServerPush);
   $('server-test').addEventListener('click', testServerPush);
+  $('server-train').addEventListener('click', trainNow);
 
   $('key-save').addEventListener('click', saveKey);
   $('key-show').addEventListener('click', () => {
@@ -1493,6 +1820,7 @@ function start() {
   refreshMarket({ force: true });
   if (state.settings.showCad) refreshFx();
   registerServiceWorker();
+  if (serverOn()) srv.saveWorkerConfig(state.settings);
 }
 
 start();

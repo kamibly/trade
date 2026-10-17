@@ -106,7 +106,7 @@ def test_paper_reset_and_hourly_scans():
     assert c.post("/paper/reset", json={"start": 5}, headers=KEY).status_code == 400
     assert c.get("/paper").status_code == 401
     times = service.scan_times()
-    assert len([t for t in times if "10:00" <= t <= "16:00"]) == 6  # hourly while the market is open
+    assert len([t for t in times if "10:00" <= t <= "16:00"]) == 12  # every 30 minutes while the market is open
 
 
 def test_a_change_gets_checked_within_a_minute(monkeypatch):
@@ -142,3 +142,16 @@ def test_profile_tuning_settings_and_training_every_timeframe():
     assert service.train_timeframes(p) == ["15m", "1D", "1W", "1h"]
     p["settings"]["alertTf"] = "1h"
     assert service.train_timeframes(p) == ["1h", "1D", "15m", "1W"]
+
+
+def test_train_now_marks_the_run_and_clears_it_when_done():
+    service.set_profile(PROFILE)
+    seen = []
+
+    def trainer(job, timeout):
+        seen.append(service.load_state()["training"].get("runningSince"))
+        return {"tf": job["tf"]}
+    service.run_train("manual", trainer=trainer)
+    assert seen and all(seen)  # marked while it ran
+    t = service.load_state()["training"]
+    assert "runningSince" not in t and t["reason"] == "manual" and set(t["results"]) == {"15m", "1D", "1W", "1h"}

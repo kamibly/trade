@@ -138,14 +138,56 @@ the learned models expect.
   every candle close, stop-loss and target every minute); otherwise it trades
   only while the app is open.
 
+- **By setup.** The server's paper account also buys the market scan's new buy
+  ideas (sold at the stop, the target or when a later scan says Sell). Paper
+  trades are tagged with what opened them (a Buy signal, a market scan idea or
+  one of the opportunity setups below), and the Paper tab shows trades, win
+  rate, return and worst drop for each. Each source has its own budget: opportunities 40% of the account,
+  stock buy ideas, crypto buy ideas and watchlist alerts 20% each, up to 5
+  positions each in equal slots.
+
 Holdings and the paper account live on the phone and are in the backup file.
 With your server connected, the watchlist and holdings also sync to it.
+
+## Opportunities
+
+With your server connected, the top of the Signals tab lists opportunities from
+four setups that read more than the price chart, ranked by how past cases did:
+
+- **Insider buying (stocks):** 2 or more officers or directors bought shares on
+  the open market within 30 days, $100,000 or more in total (SEC Form 4).
+- **Earnings drift (stocks):** on the first session after earnings, a gap up of
+  at least 1 ATR, a close in the top half of the day's range and at least twice
+  normal volume. Held up to 20 trading days.
+- **Market leader on a pullback:** in the top 10% of the S&P 500 (6-month
+  strength without the last month, against SPY and its sector) or of the top
+  crypto (against Bitcoin), in its own uptrend, after a short pullback, while
+  the market is healthy. Held up to 10 days.
+- **Crowd extreme (crypto):** Fear & Greed at 15 or below (BTC, ETH), or
+  Kraken funding in its lowest 5% of the past year. Greed at 85 or more, or
+  funding in its top 5%, sends a caution for crypto you hold instead.
+
+Every past case on the scanned charts builds each setup's track record (bought
+at the close, sold at the stop, target or end of the holding period, after
+fees). A setup sends notifications only once it is proven: 30 or more cases with
+a positive average. The rest show as "watching, not proven". One digest per scan
+carries up to 5 new opportunities. Held stocks also get a warning 2 trading days
+before earnings, and an alert on an earnings gap down.
+
+Buy alerts carry their own track record from the symbol's backtest ("won 14 of
+21 test trades, average +2.1%"). Opportunity and signal alerts have Useful and
+Not useful buttons; a kind of alert rated Not useful 7 times out of the last 10
+is muted until you turn it back on in Settings, where each setup also has a
+switch. The Setup report under the list shows each setup's record and whether
+each data source loaded.
 
 ## Your OCI server
 
 [`server/`](server/) is trade-service, a Docker container that runs next to
-jobspy-service. It sends alerts while the app is closed, scans the S&P 500 and
-top 50 crypto every hour while the US market is open, checks your holdings'
+jobspy-service. It sends alerts while the app is closed, scans every
+actively traded coin on Coinbase and Kraken every 15 minutes around the clock
+(and rescores any coin that jumps or drops 1.5 ATR within the minute), scans
+the S&P 500 every 30 minutes while the US market is open, checks your holdings'
 stop-losses and targets every minute, runs paper trading around the clock,
 trains the machine-learning models weekly, and
 syncs your watchlist and holdings. It scores
@@ -162,6 +204,9 @@ so its signals match the phone's. Only that folder goes to the VM, as
 | Crypto candles | Coinbase Exchange, then Kraken, then CoinGecko as backups |
 | Crypto prices and top-50 list | CoinGecko |
 | USD to CAD | Frankfurter (European Central Bank), Coinbase as backup |
+| Insider buying, earnings dates | SEC EDGAR (server, needs `SEC_CONTACT`) |
+| Upcoming earnings | Nasdaq earnings calendar (server) |
+| Crypto crowd | alternative.me Fear & Greed, Kraken Futures funding (server) |
 
 Charts use [TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/)
 (Apache 2.0, in `app/vendor/`).

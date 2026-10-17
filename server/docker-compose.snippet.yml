@@ -23,12 +23,23 @@ services:
       VAPID_SUBJECT: "mailto:you@example.com"
       # Quiet hours (22:00 to 07:00) and scan times use this time zone
       TRADE_TZ: "America/Toronto"
-      # When the S&P 500 and top-50 crypto scan runs (local time)
-      MARKET_SCAN_TIMES: "09:45,10:45,11:45,12:45,13:45,14:45,15:45,20:00"
+      # When the S&P 500 scan runs on weekdays (local time)
+      MARKET_SCAN_TIMES: "09:45,10:15,10:45,11:15,11:45,12:15,12:45,13:15,13:45,14:15,14:45,15:15,15:45,20:00"
+      # How often the crypto scan runs, around the clock
+      CRYPTO_SCAN_MINUTES: "15"
       # Optional backup for stocks Yahoo Finance can't serve
       TWELVE_DATA_KEY: ""
+      # Optional: when Yahoo or Nasdaq refuse the VM, send their requests through
+      # this proxy for 30 minutes, such as a Tailscale container with a home
+      # exit node (http:// or socks5://).
+      # The proxy container must share a Docker network with this one.
+      STOCK_PROXY: ""
       # When the machine-learning models retrain each week (local time)
       TRAIN_AT: "Sun 03:00"
+      # Your email address. The SEC asks every program that reads its filings to
+      # name a contact; insider buying and earnings dates load once it is set.
+      # It stays on your server and is only sent to the SEC.
+      SEC_CONTACT: ""
     # Training briefly needs about 1 GB; this keeps it from starving jobspy-service.
     mem_limit: 1500m
     volumes:
