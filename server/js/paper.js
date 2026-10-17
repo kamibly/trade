@@ -44,7 +44,7 @@ function closePosition(acc, p, price, reason, now) {
   const value = p.qty * price * (1 - FEE);
   acc.cash = round2(acc.cash + value);
   const pnl = value - p.cost;
-  acc.trades.push({ key: p.key, symbol: p.symbol, type: p.type, qty: p.qty, entry: p.entry, exit: price, openedAt: p.openedAt, closedAt: now, pnl: round2(pnl), ret: pnl / p.cost, reason, setup: setupOf(p) });
+  acc.trades.push({ key: p.key, symbol: p.symbol, type: p.type, qty: p.qty, entry: p.entry, cost: p.cost, exit: price, openedAt: p.openedAt, closedAt: now, pnl: round2(pnl), ret: pnl / p.cost, reason, setup: setupOf(p) });
   acc.positions = acc.positions.filter(x => x !== p);
   return { kind: 'close', symbol: p.symbol, key: p.key, price, pnl: round2(pnl), reason, setup: setupOf(p) };
 }

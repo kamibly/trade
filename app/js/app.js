@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.9.11 (crypto around the clock)';
+export const APP_VERSION = '0.10.0 (paper charts)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1381,6 +1381,15 @@ function renderPaper() {
   const sum = paper.summary(acc, prices);
   const events = onServer ? state.serverPaper.events || [] : [];
   const fmtTime = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const open = acc.positions.map(p => {
+    const price = prices[p.key];
+    const value = Number.isFinite(price) ? p.qty * price : NaN;
+    return { p, price, value, pnl: value - p.cost, ret: value / p.cost - 1 };
+  });
+  const invested = open.reduce((t, o) => t + (Number.isFinite(o.value) ? o.value : o.p.cost), 0);
+  const priced = open.filter(o => Number.isFinite(o.value));
+  const openCost = priced.reduce((t, o) => t + o.p.cost, 0);
+  const openPnl = priced.length ? priced.reduce((t, o) => t + o.pnl, 0) : NaN;
   // replaceChildren() writes a null child as the text "null", so drop the empty sections.
   $('paper-body').replaceChildren(...[
     el('div', { class: 'card' },
@@ -1391,24 +1400,29 @@ function renderPaper() {
       el('div', { class: 'big', text: formatMoney(sum.equity) }),
       el('dl', { class: 'stats' },
         stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
+        stat('Invested now', formatMoney(invested)),
+        stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
         stat('Cash', formatMoney(acc.cash)),
         stat('Closed trades', String(sum.trades)),
         stat('Won', sum.trades ? `${Math.round(sum.winRate * 100)}%` : '–'),
         stat('Worst drop', fmtPct(-sum.maxDrawdown)))),
+    equityChart(acc, sum.equity),
     bySetupTable(acc),
     el('h2', { class: 'section', text: `Open (${acc.positions.length})` }),
+    pnlBars(priced),
     acc.positions.length
-      ? el('ul', { class: 'list' }, ...acc.positions.map(p => {
-        const price = prices[p.key];
-        const pnl = Number.isFinite(price) ? p.qty * price - p.cost : NaN;
-        return el('li', { class: 'holding', onclick: () => { const item = findItem(p.key); if (item) openChart(item, true); } },
+      ? el('ul', { class: 'list' }, ...open.map(({ p, price, value, pnl, ret }) =>
+        el('li', { class: 'holding paper-card', onclick: () => { const item = findItem(p.key); if (item) openChart(item, true); } },
           el('div', { class: 'signal-top' },
             el('div', { class: 'sym', text: p.symbol }),
-            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? `${pnl >= 0 ? '+' : ''}${formatMoney(pnl)}` : '–' })),
-          el('div', { class: 'sub', text: `${Number(p.qty.toPrecision(6))} at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
-          el('div', { class: 'sub', text: `Stop ${formatMoney(p.stop)} · Target ${formatMoney(p.take)} · since ${fmtTime(p.openedAt)}${p.until ? ` · sells by ${fmtTime(p.until)}` : ''}` }),
-          el('div', { class: 'sub', text: setupName(paper.setupOf(p)) }));
-      }))
+            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? `${signed(pnl)} (${fmtPct(ret)})` : '–' })),
+          el('dl', { class: 'money-row' },
+            stat('Invested', formatMoney(p.cost)),
+            stat('Worth now', Number.isFinite(value) ? formatMoney(value) : '–'),
+            stat('Gain/loss', Number.isFinite(pnl) ? signed(pnl) : '–', upDown(pnl))),
+          el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
+          el('div', { class: 'sub', text: `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
+          el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}` }))))
       : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
     events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
     events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 10).map(ev => el('li', { class: 'holding' },
@@ -1418,10 +1432,76 @@ function renderPaper() {
       ? el('ul', { class: 'list compact' }, ...acc.trades.slice(-30).reverse().map(t => el('li', { class: 'holding' },
         el('div', { class: 'signal-top' },
           el('div', { class: 'sym', text: t.symbol }),
-          el('span', { class: changeClass(t.pnl), text: `${t.pnl >= 0 ? '+' : ''}${formatMoney(t.pnl)} (${fmtPct(t.ret)})` })),
-        el('div', { class: 'sub', text: `${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason === 'time' ? 'holding period over' : t.reason} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)} · ${setupName(t.setup || 'signal')}` }))))
+          el('span', { class: changeClass(t.pnl), text: `${signed(t.pnl)} (${fmtPct(t.ret)})` })),
+        el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
+        el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason === 'time' ? 'holding period over' : t.reason}` }),
+        el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }))))
       : el('p', { class: 'muted small', text: 'No closed paper trades yet.' }),
   ].filter(Boolean));
+}
+
+const signed = v => `${v >= 0 ? '+' : '−'}${formatMoney(Math.abs(v))}`;
+// What a closed trade cost; older trades didn't keep it.
+const costOf = t => (Number.isFinite(t.cost) ? t.cost : t.ret ? t.pnl / t.ret : t.qty * t.entry);
+const fmtQty = p => `${Number(p.qty.toPrecision(4))} ${p.type === 'crypto' ? 'coins' : p.qty === 1 ? 'share' : 'shares'}`;
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svg(tag, attrs = {}, ...children) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v !== undefined && v !== null) node.setAttribute(k, v);
+  for (const c of children.flat()) if (c) node.append(c);
+  return node;
+}
+
+// The account's value over time against what it started with: green above, red below.
+function equityChart(acc, now) {
+  const pts = [...acc.history.map(h => ({ t: h.t, v: h.equity })), { t: Date.now(), v: now }]
+    .filter(p => Number.isFinite(p.v) && p.t >= acc.createdAt - 60_000);
+  if (pts.length < 2) return null;
+  const W = 600, H = 170, padL = 4, padR = 4, padT = 10, padB = 22;
+  const t0 = pts[0].t, t1 = pts.at(-1).t;
+  const vs = [...pts.map(p => p.v), acc.start];
+  let lo = Math.min(...vs), hi = Math.max(...vs);
+  const pad = Math.max((hi - lo) * 0.1, acc.start * 0.002);
+  lo -= pad; hi += pad;
+  const x = t => padL + (t1 > t0 ? (t - t0) / (t1 - t0) : 1) * (W - padL - padR);
+  const y = v => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const base = y(acc.start);
+  const area = `${line}L${x(t1).toFixed(1)},${base.toFixed(1)}L${x(t0).toFixed(1)},${base.toFixed(1)}Z`;
+  const id = `eq${Math.random().toString(36).slice(2, 8)}`;
+  const day = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const change = now - acc.start;
+  return el('div', { class: 'card' },
+    el('div', { class: 'signal-top' },
+      el('h3', { text: 'Account value' }),
+      el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
+    svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
+      svg('defs', {},
+        svg('clipPath', { id: `${id}a` }, svg('rect', { x: 0, y: 0, width: W, height: base })),
+        svg('clipPath', { id: `${id}b` }, svg('rect', { x: 0, y: base, width: W, height: H - base }))),
+      svg('path', { d: area, fill: 'var(--up)', 'fill-opacity': 0.15, 'clip-path': `url(#${id}a)` }),
+      svg('path', { d: area, fill: 'var(--down)', 'fill-opacity': 0.15, 'clip-path': `url(#${id}b)` }),
+      svg('line', { x1: padL, x2: W - padR, y1: base, y2: base, stroke: 'var(--muted)', 'stroke-dasharray': '4 4', 'stroke-width': 1 }),
+      svg('path', { d: line, fill: 'none', stroke: 'var(--up)', 'stroke-width': 2, 'clip-path': `url(#${id}a)` }),
+      svg('path', { d: line, fill: 'none', stroke: 'var(--down)', 'stroke-width': 2, 'clip-path': `url(#${id}b)` }),
+      svg('text', { x: padL, y: H - 6, fill: 'var(--muted)', 'font-size': 20 }, day(t0)),
+      svg('text', { x: W - padR, y: H - 6, fill: 'var(--muted)', 'font-size': 20, 'text-anchor': 'end' }, 'now')),
+    el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.` }));
+}
+
+// Each open trade's gain or loss in dollars, biggest first.
+function pnlBars(rows) {
+  if (!rows.length) return null;
+  const sorted = [...rows].sort((a, b) => b.pnl - a.pnl);
+  const max = Math.max(...sorted.map(r => Math.abs(r.pnl)), 0.01);
+  return el('div', { class: 'card pnl-bars' },
+    el('h3', { text: 'Gain or loss on each open trade' }),
+    ...sorted.map(r => el('div', { class: 'pnl-row' },
+      el('span', { class: 'pnl-sym', text: r.p.symbol }),
+      el('span', { class: 'pnl-track' },
+        el('span', { class: `pnl-fill ${r.pnl >= 0 ? 'up' : 'down'}`, style: `width:${(Math.abs(r.pnl) / max * 50).toFixed(1)}%` })),
+      el('span', { class: `pnl-val ${upDown(r.pnl)}`, text: `${signed(r.pnl)} (${fmtPct(r.ret)})` }))));
 }
 
 // Trades, win rate, return and worst drop for each way the account trades.
