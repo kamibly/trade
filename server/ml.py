@@ -101,12 +101,46 @@ class Data:
         return self.take(np.flatnonzero(np.isfinite(getattr(self, target))))
 
 
+class FilterData:
+    """The trade filter's rows: candles that looked like a Buy, with how the trade ended."""
+
+    def __init__(self, keys, t, x, win, ret, tp, sp, fee):
+        self.keys, self.t, self.x, self.win, self.ret, self.tp, self.sp, self.fee = keys, t, x, win, ret, tp, sp, fee
+
+    def __len__(self):
+        return len(self.t)
+
+    def take(self, idx) -> "FilterData":
+        return FilterData(self.keys[idx], self.t[idx], self.x[idx], self.win[idx], self.ret[idx], self.tp[idx], self.sp[idx], self.fee[idx])
+
+
+def _filter_data(fkeys, ft, frows) -> FilterData:
+    import numpy as np
+    num = lambda v: math.nan if v is None else v
+    if not frows:
+        e = np.array([])
+        return FilterData(np.array([], dtype=object), np.array([], dtype=np.int64), np.zeros((0, 0)), e, e, e, e, e)
+    return FilterData(np.array(fkeys, dtype=object), np.array(ft, dtype=np.int64),
+                      np.stack([np.array([num(v) for v in f["x"]], dtype=np.float64) for f in frows]),
+                      np.array([f["win"] for f in frows], dtype=np.float32),
+                      np.array([f["ret"] for f in frows], dtype=np.float64),
+                      np.array([f["tp"] for f in frows], dtype=np.float64),
+                      np.array([f["sp"] for f in frows], dtype=np.float64),
+                      np.array([f.get("fee", FEE) for f in frows], dtype=np.float64))
+
+
 def to_data(rows) -> Data:
-    """Builds the arrays from an iterable of engine rows, one row at a time."""
+    """Builds the arrays from an iterable of engine rows, one row at a time.
+    Trade filter rows (a row's "f") end up in the result's `filt`."""
     import numpy as np
     keys, t, x, seq, y, ret, yb, yt = [], [], [], [], [], [], [], []
+    fkeys, ft, frows = [], [], []
     num = lambda v: math.nan if v is None else v
     for r in rows:
+        if r.get("f"):
+            fkeys.append(r["key"])
+            ft.append(r["t"])
+            frows.append(r["f"])
         keys.append(r["key"])
         t.append(r["t"])
         x.append(np.array([num(v) for v in r["x"]], dtype=np.float64))
@@ -116,10 +150,13 @@ def to_data(rows) -> Data:
         yb.append(num(r.get("yb")))
         yt.append(num(r.get("yt")))
     if not t:
-        return Data(np.array([], dtype=object), np.array([], dtype=np.int64), np.zeros((0, 0)), np.zeros((0, 0, 2), dtype=np.float32), np.array([], dtype=np.float32), np.array([]))
-    return Data(np.array(keys, dtype=object), np.array(t, dtype=np.int64), np.stack(x), np.stack(seq),
-                np.array(y, dtype=np.float32), np.array(ret, dtype=np.float64),
-                np.array(yb, dtype=np.float32), np.array(yt, dtype=np.float32))
+        data = Data(np.array([], dtype=object), np.array([], dtype=np.int64), np.zeros((0, 0)), np.zeros((0, 0, 2), dtype=np.float32), np.array([], dtype=np.float32), np.array([]))
+    else:
+        data = Data(np.array(keys, dtype=object), np.array(t, dtype=np.int64), np.stack(x), np.stack(seq),
+                    np.array(y, dtype=np.float32), np.array(ret, dtype=np.float64),
+                    np.array(yb, dtype=np.float32), np.array(yt, dtype=np.float32))
+    data.filt = _filter_data(fkeys, ft, frows)
+    return data
 
 
 def load_dataset(job: dict, timeout: int = 3000):
@@ -438,13 +475,83 @@ def train_models(data: Data, features: List[str], tf: str, symbols: Optional[int
     }
 
 
+# ---------------------------------------------------------------------------
+# Trade filter
+# ---------------------------------------------------------------------------
+
+FILTER_TEST_DAYS = 365          # the newest year tests it; it never trains on it
+FILTER_GAP_DAYS = 45            # train rows' trades end before the test starts (30 candles, weekends)
+FILTER_MIN_TEST, FILTER_MIN_KEPT = 300, 100
+FILTER_EDGE = 0.003             # kept trades must beat all trades by 0.3 points on average
+
+
+def filter_ev(p, f: FilterData):
+    """Expected result after fees: chance × gain at the target − the rest × loss at the stop − fees."""
+    import numpy as np
+    p = np.asarray(p, dtype=np.float64)
+    return p * f.tp - (1 - p) * f.sp - 2 * f.fee
+
+
+def filter_test(p, f: FilterData) -> dict:
+    """On the held-back trades: the ones the filter keeps (expected result above
+    zero) against all of them and the ones it skips. It passes when it keeps
+    enough trades, they average above zero, and beat all trades by FILTER_EDGE."""
+    import numpy as np
+    ev = filter_ev(p, f)
+    kept = ev > 0
+    n, nk = int(len(f)), int(kept.sum())
+    avg = lambda m: round(float(f.ret[m].mean()), 5) if m.any() else 0.0
+    win = lambda m: round(float(f.win[m].mean()), 4) if m.any() else 0.0
+    out = {"n": n, "kept": nk, "allAvg": avg(np.ones(n, dtype=bool)), "keptAvg": avg(kept), "skippedAvg": avg(~kept),
+           "allWin": win(np.ones(n, dtype=bool)), "keptWin": win(kept),
+           "medianEv": round(float(np.median(ev[kept])), 5) if nk else 0.0}
+    out["passed"] = bool(n >= FILTER_MIN_TEST and nk >= FILTER_MIN_KEPT and out["keptAvg"] > 0
+                         and out["keptAvg"] - out["allAvg"] >= FILTER_EDGE)
+    if not out["passed"]:
+        out["why"] = ("too few test trades" if n < FILTER_MIN_TEST else "it kept too few trades" if nk < FILTER_MIN_KEPT
+                      else "the trades it kept lost money on average" if out["keptAvg"] <= 0
+                      else "the trades it kept did not beat all trades by enough")
+    return out
+
+
+def train_filter(f: FilterData, features: List[str]) -> Optional[dict]:
+    """Trains on everything up to a year before the newest row, tests on that
+    year, and returns the model with its test (used only if it passed)."""
+    import numpy as np
+    import lightgbm as lgb
+    if len(f) < MIN_TRAIN_ROWS:
+        return None
+    order = np.argsort(f.t, kind="stable")
+    f = f.take(order)
+    cutoff = int(f.t[-1]) - FILTER_TEST_DAYS * 86400
+    train = f.take(np.flatnonzero(f.t <= cutoff - FILTER_GAP_DAYS * 86400))
+    test = f.take(np.flatnonzero(f.t > cutoff))
+    if len(train) < MIN_TRAIN_ROWS or len(test) < 50:
+        return None
+    k = int(len(train) * 0.85)
+    params = {
+        "objective": "binary", "learning_rate": 0.05, "num_leaves": 15, "min_data_in_leaf": 100,
+        "feature_fraction": 0.8, "bagging_fraction": 0.8, "bagging_freq": 1, "lambda_l2": 1.0,
+        "verbose": -1, "seed": SEED, "num_threads": 2,
+    }
+    dfit = lgb.Dataset(train.x[:k], label=train.win[:k])
+    dvalid = lgb.Dataset(train.x[k:], label=train.win[k:], reference=dfit)
+    booster = lgb.train(params, dfit, num_boost_round=300, valid_sets=[dvalid],
+                        callbacks=[lgb.early_stopping(30, verbose=False)])
+    best = booster.best_iteration or booster.current_iteration()
+    model = export_lgbm(booster, features, best)
+    model["test"] = filter_test(booster.predict(test.x, num_iteration=best), test)
+    model.update({"cutoff": cutoff, "trainRows": len(train), "testRows": len(test)})
+    return model
+
+
 def summary(models: Optional[dict]) -> Optional[dict]:
     """The small part the app and /status show; no weights."""
     if not models:
         return None
     keep = ("tf", "cutoff", "trainedAt", "symbols", "trainRows", "testRows")
     out = {k: models.get(k) for k in keep}
-    for name in ("lgbm", "lstm", *TURN_MODELS):
+    for name in ("lgbm", "lstm", *TURN_MODELS, "filter"):
         out[name] = (models.get(name) or {}).get("test")
     return out
 
@@ -463,6 +570,13 @@ def main() -> None:
             raise
         first = next(iter(errors.values()))
         raise ValueError(f"{e}; {len(errors)} of {header.get('symbols')} charts could not be loaded ({first})") from None
+    if header.get("filterFeatures") and len(data.filt):
+        try:
+            flt = train_filter(data.filt, header["filterFeatures"])
+            if flt:
+                models["filter"] = flt
+        except Exception as e:  # the other models still count
+            sys.stderr.write(f"Trade filter training failed: {e}\n")
     save_models(job["tf"], models)
     out = summary(models)
     out["seconds"] = round(time.time() - started)

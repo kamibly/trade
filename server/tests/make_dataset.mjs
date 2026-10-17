@@ -18,7 +18,7 @@ function series(n, seed) {
 const n = Number(process.argv[2] || 8);
 const items = Array.from({ length: n }, (_, k) => ({ type: 'stock', symbol: `S${k}` }));
 const deps = {
-  yahooCandles: async item => ({ candles: series(Number(process.argv[3] || 600), 7 + Number(item.symbol.slice(1)) * 13) }),
+  yahooCandles: async item => ({ candles: series(Number(process.argv[3] || 600), 7 + (Number(item.symbol.slice(1)) || 99) * 13) }),
   fetchCandles: async () => { throw new Error('offline'); },
   fetchCryptoTop: async () => [],
   now: () => 0,

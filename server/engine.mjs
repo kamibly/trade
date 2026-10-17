@@ -11,7 +11,9 @@ import { join } from 'node:path';
 import { fetchCandles, fetchCryptoTop } from './js/data.js';
 import { stockSources } from './stocks.mjs';
 import { proxiedFetch, fallbackFetch } from './proxy.mjs';
-import { analyze, signalAt, baseVotesAt, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
+import { analyze, signalAt, baseVotesAt, scoreVotes, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
+import { filterNames, filterVector, tradeOutcome, marketTrend, trendAt, judge, MIN_SCORE as FILTER_MIN_SCORE } from './js/filter.js';
+import { feeRate } from './js/fees.js';
 import { featureNames, featureVector, sequence, label, turnLabels } from './js/ml.js';
 import { summarize, alertFor, learn, learnKey, ruleOf, tradeRecordLine, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
@@ -497,9 +499,13 @@ async function trainingItems(job, deps) {
 export async function runDataset(job, deps = defaultDeps) {
   const { tf, settings } = job;
   const names = featureNames(METHOD_IDS);
+  const fnames = filterNames(METHOD_IDS);
   const rows = [];
   const errors = {};
   const items = job.total ? await trainingItems(job, deps) : job.items || [];
+  // The trade filter is daily: it needs the market's trend on each day.
+  const markets = tf === '1D' ? await marketTrends(settings, deps, errors) : null;
+  const round = v => (Number.isFinite(v) ? Number(v.toFixed(5)) : null);
   await pool(items, 4, async item => {
     try {
       const { candles } = await candlesFor(item, tf, settings, deps);
@@ -510,18 +516,50 @@ export async function runDataset(job, deps = defaultDeps) {
         if (y === null) break;
         const seq = sequence(S, i);
         if (!seq) continue;
-        const x = featureVector(S, i, baseVotesAt(S, i), names).map(v => (Number.isFinite(v) ? Number(v.toFixed(5)) : null));
+        const base = baseVotesAt(S, i);
+        const x = featureVector(S, i, base, names).map(round);
         const turn = turnLabels(S, i, settings);
-        rows.push({
+        const row = {
           key: key(item), t: candles[i].time, x, seq: seq.map(r => r.map(v => Number(v.toFixed(4)))), y, ret: S.close[i + 10] / S.close[i] - 1,
           yb: turn ? turn.bottom : null, yt: turn ? turn.top : null,
-        });
+        };
+        // A candle that looks like a Buy: a trade filter row, with how the trade ended.
+        if (markets && scoreVotes(base, {}) >= FILTER_MIN_SCORE) {
+          const out = tradeOutcome(S, i, { ...settings, type: item.type });
+          if (out) {
+            const atrShare = S.atr[i] / S.close[i];
+            const market = trendAt(item.type === 'crypto' ? markets.crypto : markets.stock, candles[i].time);
+            row.f = {
+              x: filterVector(S, i, base, fnames, { type: item.type, market }).map(round),
+              win: out.win, ret: Number(out.ret.toFixed(5)),
+              tp: Number(((settings.takeAtr || 3) * atrShare).toFixed(5)), sp: Number(((settings.stopAtr || 2) * atrShare).toFixed(5)),
+              fee: feeRate(item.type),
+            };
+          }
+        }
+        rows.push(row);
       }
     } catch (e) {
       errors[key(item)] = e.message;
     }
   });
-  return { tf, features: names, symbols: items.length, rows, errors };
+  return { tf, features: names, filterFeatures: markets ? fnames : null, symbols: items.length, rows, errors };
+}
+
+// [time, trend] lists for SPY (stocks) and Bitcoin (crypto), for the trade filter.
+async function marketTrends(settings, deps, errors) {
+  const out = {};
+  for (const [kind, item] of [['stock', { type: 'stock', symbol: 'SPY', name: 'S&P 500' }], ['crypto', { type: 'crypto', symbol: 'BTC', name: 'Bitcoin', geckoId: 'bitcoin' }]]) {
+    try {
+      const { candles } = await candlesFor(item, '1D', settings, deps);
+      const S = analyze(candles);
+      out[kind] = candles.map((c, i) => [c.time, marketTrend(S, i)]).filter(([, v]) => Number.isFinite(v));
+    } catch (e) {
+      errors[`market:${kind}`] = `${item.name}: ${e.message}`;
+      out[kind] = [];
+    }
+  }
+  return out;
 }
 
 async function main() {
