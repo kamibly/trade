@@ -82,12 +82,15 @@ export function tradeOutcome(S, i, { stopAtr = 2, takeAtr = 3, type = 'stock' } 
 
 export const usableFilter = m => !!(m && m.trees && m.test && m.test.passed);
 
-// The filter's view of a buy idea at candle i: { p, ev, size }.
+// The filter's view of a buy idea at candle i: { p, ev, size }, or null when
+// it has no say (no passed model, a candle it could have trained on, or an
+// idea weaker than the candles it learned from).
 // ev = chance × gain at the target − the rest × loss at the stop − fees.
 // size scales the trade's slot from 0.5 to 1.5 by ev against the typical
 // kept trade's (1 at the median).
 export function judge(model, S, i, baseVotes, ctx, { stopAtr = 2, takeAtr = 3 } = {}) {
   if (!usableFilter(model) || !(S.candles[i].time > model.cutoff)) return null;
+  if (scoreVotes(baseVotes, {}) < MIN_SCORE) return null;
   const c = S.close[i];
   const atr = S.atr[i];
   if (!ok(c) || !ok(atr) || atr <= 0) return null;

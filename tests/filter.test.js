@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyze, baseVotesAt, METHOD_IDS } from '../app/js/signals.js';
+import { analyze, baseVotesAt, scoreVotes, METHOD_IDS } from '../app/js/signals.js';
 import { TURN_HORIZON } from '../app/js/ml.js';
 import { filterNames, filterVector, tradeOutcome, trendAt, marketTrend, judge, usableFilter } from '../app/js/filter.js';
 
@@ -60,13 +60,16 @@ test('the filter sees only what was known on the buy day', () => {
 
 test('judge: only a passed model, only after its cutoff, and sizes by expected result', () => {
   const S = analyze(series(300, 0.002));
-  const i = 290;
+  const score = k => scoreVotes(baseVotesAt(S, k), {});
+  const i = [...Array(100).keys()].map(k => 299 - k).find(k => score(k) >= 15);
+  const weak = [...Array(100).keys()].map(k => 299 - k).find(k => score(k) < 15);
   const votes = baseVotesAt(S, i);
   const features = filterNames(METHOD_IDS);
   const model = p => ({ init: Math.log(p / (1 - p)), features, trees: [], cutoff: 0, test: { passed: true, medianEv: 0.01 } });
   assert.equal(usableFilter({ ...model(0.5), test: { passed: false } }), false);
   assert.equal(judge({ ...model(0.5), test: { passed: false } }, S, i, votes, { type: 'stock' }), null);
   assert.equal(judge({ ...model(0.5), cutoff: S.candles[i].time }, S, i, votes, { type: 'stock' }), null);
+  assert.equal(judge(model(0.9), S, weak, baseVotesAt(S, weak), { type: 'stock' }), null); // weaker than what it learned from
   const tp = (3 * S.atr[i]) / S.close[i];
   const sp = (2 * S.atr[i]) / S.close[i];
   const good = judge(model(0.9), S, i, votes, { type: 'stock' });
@@ -76,4 +79,39 @@ test('judge: only a passed model, only after its cutoff, and sizes by expected r
   const bad = judge(model(0.1), S, i, votes, { type: 'stock' });
   assert.ok(bad.ev < 0);
   assert.equal(bad.size, 0);
+});
+
+test('paper trading skips what the filter expects to lose and sizes the rest; the shadow ignores it', async () => {
+  const paper = await import('../app/js/paper.js');
+  const { runPaper } = await import('../server/engine.mjs');
+  const idea = (symbol, filter) => ({ id: `scan:stock:${symbol}:1`, setup: 'scan', key: `stock:${symbol}`, symbol, type: 'stock', entry: 100, stop: 90, take: 115, ev: 0.5, ...(filter ? { filter } : {}) });
+  const ideas = [idea('AAA', { p: 0.2, ev: -0.01, size: 0 }), idea('BBB', { p: 0.7, ev: 0.03, size: 1.5 }), idea('CCC')];
+  const acc = paper.newAccount(10_000, 0);
+  paper.openSetups(acc, ideas, { riskPct: 5, now: 1 });
+  assert.deepEqual(acc.positions.map(p => p.symbol).sort(), ['BBB', 'CCC']);
+  assert.equal(acc.skips['stock:AAA'], 'the trade filter expects a loss');
+  const big = acc.positions.find(p => p.symbol === 'BBB');
+  const plain = acc.positions.find(p => p.symbol === 'CCC');
+  assert.ok(Math.abs(big.qty / plain.qty - 1.5) < 0.02 && big.filter.size === 1.5);
+  const off = paper.newAccount(10_000, 0);
+  paper.openSetups(off, ideas, { riskPct: 5, now: 1, useFilter: false });
+  assert.equal(off.positions.length, 3);
+
+  const job = { paper: paper.newAccount(10_000, 0), shadow: paper.newAccount(10_000, 0), scanBuys: ideas, riskPct: 5, useFilter: true };
+  const out = await runPaper(job, { now: () => 5 });
+  assert.equal(out.paper.positions.length, 2);
+  assert.equal(out.shadow.positions.length, 3);
+  assert.deepEqual(out.paperEvents.map(e => e.symbol).sort(), ['BBB', 'CCC']);
+  const noFilter = await runPaper({ ...job, paper: paper.newAccount(10_000, 0), shadow: null, useFilter: false }, { now: () => 5 });
+  assert.equal(noFilter.paper.positions.length, 3);
+});
+
+test('budgets take the server shares and keep their limits', async () => {
+  const { budgetsWith, BUDGETS } = await import('../app/js/paper.js');
+  assert.equal(budgetsWith(null), BUDGETS);
+  const b = budgetsWith({ opportunities: 0.45, alerts: 0.15 });
+  assert.equal(b.opportunities.share, 0.45);
+  assert.equal(b.alerts.share, 0.15);
+  assert.equal(b.stockIdeas.share, BUDGETS.stockIdeas.share);
+  assert.equal(b.alerts.max, BUDGETS.alerts.max);
 });

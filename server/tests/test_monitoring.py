@@ -155,3 +155,63 @@ def test_train_now_marks_the_run_and_clears_it_when_done():
     assert seen and all(seen)  # marked while it ran
     t = service.load_state()["training"]
     assert "runningSince" not in t and t["reason"] == "manual" and set(t["results"]) == {"15m", "1D", "1W", "1h"}
+
+
+def trade(setup="scan", type_="stock", pnl=10.0, ret=0.01, opened=100, judged=True):
+    return {"key": f"{type_}:X", "setup": setup, "type": type_, "pnl": pnl, "ret": ret, "openedAt": opened, **({"filter": {"size": 1}} if judged else {})}
+
+
+def test_the_shadow_starts_level_and_the_filter_is_judged_after_enough_trades():
+    service.set_profile(PROFILE)
+    st = service.load_state()
+    st["paper"] = {"start": 5000, "cash": 4000, "createdAt": 1, "positions": [{"key": "crypto:SOL", "type": "crypto", "symbol": "SOL"}], "trades": [], "history": []}
+    f = service.paper_fields(st, st["profile"])
+    assert f["shadow"]["cash"] == 4000 and f["shadow"]["positions"] == st["paper"]["positions"] and f["shadow"]["createdAt"] > 1
+    assert f["useFilter"] is True and f["budgets"] is None
+    st["paperShadow"] = {**f["shadow"], "createdAt": 50, "trades": [trade(pnl=4) for _ in range(120)]}
+    assert [i["symbol"] for i in service.price_items({**st, "paper": {"positions": []}}, datetime(2026, 10, 14, 12, tzinfo=NY))] == ["NVDA", "SOL"]  # a holding, and the shadow's position
+    st["paper"]["trades"] = [trade(opened=10)] + [trade(pnl=6) for _ in range(99)]  # one from before the shadow
+    t = service.filter_trial(st)
+    assert t["trades"] == 99 and t["result"] == "testing" and t["shadowTrades"] == 120
+    st["paper"]["trades"].append(trade(pnl=6))
+    st["filterTrial"] = t = service.filter_trial(st, now=777)
+    assert t["result"] == "ahead" and t["decidedAt"] == 777 and t["pnl"] == 600 and t["shadowPnl"] == 480
+    st["paper"]["trades"].append(trade(pnl=-1000))
+    assert service.filter_trial(st)["result"] == "ahead"  # decided once
+    st["filterTrial"] = None
+    st["filterTrial"] = service.filter_trial(st)
+    assert st["filterTrial"]["result"] == "behind"
+    assert service.paper_fields(st, st["profile"])["useFilter"] is False
+    # Trades the filter had no say on (no model yet) don't count.
+    st["filterTrial"] = None
+    st["paper"]["trades"] = [trade(judged=False) for _ in range(200)]
+    assert service.filter_trial(st)["result"] == "testing"
+    off = {**st["profile"], "settings": {**st["profile"]["settings"], "tradeFilter": False}}
+    assert service.paper_fields({**st, "filterTrial": None}, off)["useFilter"] is False
+    assert service.clean_profile({"settings": {}})["settings"]["tradeFilter"] is True
+
+
+def test_budgets_follow_results_a_step_a_week_within_limits():
+    week = service.WEEK_MS
+    st = {"paper": {"trades": [trade("signal", ret=0.03) for _ in range(50)] + [trade("scan", "crypto", ret=-0.01) for _ in range(50)]
+                    + [trade("scan", "stock", ret=0.05) for _ in range(10)]}}
+    b = service.follow_results(st, now=1000)
+    assert b["shares"] == service.BUDGET_SHARES and b["at"] == 1000
+    st["paperBudgets"] = b
+    assert service.follow_results(st, now=1000 + week - 1) is b  # not a week yet
+    for k in range(3):
+        st["paperBudgets"] = service.follow_results(st, now=1000 + (k + 1) * week)
+    s = st["paperBudgets"]["shares"]
+    assert s["alerts"] == 0.3 and s["cryptoIdeas"] == 0.1 and s["stockIdeas"] == 0.2  # stopped at the 10% floor
+    assert abs(sum(s.values()) - 1) < 1e-9 and st["paperBudgets"]["moves"][0]["to"] == "alerts"
+
+
+def test_reset_restarts_the_shadow_and_the_trial():
+    service.set_profile(PROFILE)
+    service.update_state(lambda st: st.update(paperShadow={"x": 1}, filterTrial={"result": "behind"}, paperBudgets={"shares": {}}))
+    TestClient(main.app).post("/paper/reset", json={}, headers=KEY)
+    st = service.load_state()
+    assert st["paperShadow"]["cash"] == st["paper"]["cash"] == 5000
+    assert st["filterTrial"] is None and st["paperBudgets"] is None
+    body = TestClient(main.app).get("/paper", headers=KEY).json()
+    assert body["shadow"]["cash"] == 5000 and "filterTrial" in body and "budgets" in body

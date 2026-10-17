@@ -110,7 +110,9 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
     """The paper-trading account the server runs, with its latest trades."""
     check_api_key(x_api_key)
     state = service.load_state()
-    return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {})}
+    return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {}),
+            "shadow": state.get("paperShadow"), "filterTrial": state.get("filterTrial"), "budgets": state.get("paperBudgets"),
+            "skips": (state.get("paper") or {}).get("skips", {})}
 
 
 @app.post("/paper/reset")
