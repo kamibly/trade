@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.9.8 (crypto around the clock)';
+export const APP_VERSION = '0.9.9 (crypto around the clock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -886,6 +886,14 @@ function paperNote(li, sig) {
     li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
   } else if (acc.skips && acc.skips[sig.key]) {
     li.append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[sig.key]}.` }));
+  } else {
+    // The server buys on its own score, which can differ from this phone's.
+    const s = (state.serverSignals || {})[sig.key];
+    const why = !state.serverSignals ? null
+      : !s ? 'the server has not scored it yet'
+        : s.action !== 'buy' ? `the server rates it ${s.action === 'sell' ? 'Sell' : 'Hold'} (${fmtScore(s.score)}${s.tf ? ` on ${s.tf}` : ''})`
+          : null;
+    if (why) li.append(el('div', { class: 'sub', text: `Not in paper trading: ${why}.` }));
   }
   return li;
 }
@@ -932,7 +940,8 @@ async function refreshMarket({ force = false } = {}) {
   if (!serverOn() || !navigator.onLine) return;
   if (!force && state.market && Date.now() - (state.market.fetchedAt || 0) < MARKET_REFRESH_MS) return;
   try {
-    const { market, modelsAt = {}, setups = null } = await srv.serverFetch(state.settings, '/signals');
+    const { signals = {}, market, modelsAt = {}, setups = null } = await srv.serverFetch(state.settings, '/signals');
+    state.serverSignals = signals; // the server's own watchlist scores, which paper-trade
     state.market = market ? { ...market, setupsInfo: setups, fetchedAt: Date.now() } : { setupsInfo: setups, fetchedAt: Date.now() };
     store.saveMarket(state.market);
     if (state.view === 'signals') { renderOpportunities(); renderMarket(); }
