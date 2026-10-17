@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stockSources, fromNasdaq, nasdaqPriceOf, withToday } from '../server/stocks.mjs';
+import { stockSources, fromNasdaq, nasdaqPriceOf, withToday, withYahooToday } from '../server/stocks.mjs';
+import { fromYahoo } from '../app/js/candles.js';
 
 const yahooChart = closes => ({ chart: { result: [{ timestamp: closes.map((_, i) => 1_700_000_000 + i * 86400), indicators: { quote: [{ open: closes, high: closes, low: closes, close: closes, volume: closes.map(() => 1) }] } }] } });
 const nasdaqRows = n => ({ data: { tradesTable: { rows: Array.from({ length: n }, (_, i) => {
@@ -79,4 +80,16 @@ test("Nasdaq's live quote adds today's candle, which its history table lacks unt
   assert.equal(withToday(hist, { data: { primaryData: { lastSalePrice: '$10.50' } } }).length, 3);
   // No day range: the open and close bound it.
   assert.deepEqual([withToday(hist, { data: { primaryData: { lastSalePrice: '$10.50', lastTradeTimestamp: 'DATA AS OF Jan 5, 2026' } } }).at(-1).low], [10.02]);
+});
+
+test("a Yahoo daily chart a day behind gets today's candle from its own quote", () => {
+  const thu = Date.UTC(2026, 9, 15, 13, 30) / 1000;
+  const json = { chart: { result: [{ meta: { regularMarketPrice: 343.46, regularMarketTime: Date.UTC(2026, 9, 16, 20) / 1000, regularMarketDayHigh: 345, regularMarketDayLow: 340, regularMarketVolume: 5000 },
+    timestamp: [thu - 86400, thu], indicators: { quote: [{ open: [340, 341], high: [343, 344], low: [339, 340], close: [341, 342], volume: [1, 1] }] } }] } };
+  const c = withYahooToday(fromYahoo(json), json);
+  assert.equal(c.length, 3);
+  assert.deepEqual(c.at(-1), { time: Date.UTC(2026, 9, 16, 13, 30) / 1000, open: 342, high: 345, low: 340, close: 343.46, volume: 5000 });
+  // Up to date: unchanged.
+  json.chart.result[0].meta.regularMarketTime = thu + 3600;
+  assert.equal(withYahooToday(fromYahoo(json), json).length, 2);
 });

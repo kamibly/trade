@@ -54,6 +54,29 @@ export function yahooSession(fetchFn = fetch) {
   };
 }
 
+// Yahoo's daily chart can lag a day for some symbols (AAPL on a Friday
+// evening ended at Thursday), while the chart's own quote is current. A day
+// missing from the chart is added from that quote, with the open at the
+// previous close.
+export function withYahooToday(candles, json) {
+  const m = json && json.chart && json.chart.result && json.chart.result[0] && json.chart.result[0].meta;
+  const close = m && Number(m.regularMarketPrice);
+  const at = m && Number(m.regularMarketTime);
+  if (!candles.length || !(close > 0) || !(at > 0)) return candles;
+  const last = candles.at(-1);
+  const day = Math.floor(at / 86400);
+  if (day <= Math.floor(last.time / 86400)) return candles;
+  const open = last.close;
+  const hi = Number(m.regularMarketDayHigh);
+  const lo = Number(m.regularMarketDayLow);
+  const volume = Number(m.regularMarketVolume);
+  return [...candles, {
+    time: day * 86400 + 13.5 * 3600, open, close,
+    high: Math.max(hi > 0 ? hi : 0, open, close), low: Math.min(lo > 0 ? lo : Infinity, open, close),
+    volume: Number.isFinite(volume) ? volume : 0,
+  }];
+}
+
 // ---- Nasdaq -----------------------------------------------------------------
 
 const money = v => Number(String(v ?? '').replace(/[$,\s]/g, ''));
@@ -120,12 +143,13 @@ export function stockSources({ fetchFn = fetch, limitYahoo = f => f, limitNasdaq
   const yahooChart = limitYahoo(async (item, tf) => {
     const [interval, range] = TIMEFRAMES[tf].yahoo;
     const path = `/v8/finance/chart/${yahooSymbol(item.symbol)}?interval=${interval}&range=${range}`;
+    const parse = json => (tf === '1D' ? withYahooToday(fromYahoo(json), json) : fromYahoo(json));
     try {
-      return fromYahoo(await getJson(fetchFn, `https://query1.finance.yahoo.com${path}`));
+      return parse(await getJson(fetchFn, `https://query1.finance.yahoo.com${path}`));
     } catch (e) {
       if (e.status !== 429) throw e;
       try {
-        return fromYahoo(await crumbed(`https://query2.finance.yahoo.com${path}`));
+        return parse(await crumbed(`https://query2.finance.yahoo.com${path}`));
       } catch {
         throw e; // report the first refusal
       }
