@@ -5,7 +5,7 @@
 
 import { copyFile } from 'node:fs/promises';
 
-export const SHARED = ['backtest', 'candles', 'data', 'forecast', 'format', 'indicators', 'limiter', 'ml', 'paper', 'portfolio', 'scanner', 'setups', 'signals'];
+export const SHARED = ['backtest', 'candles', 'data', 'fees', 'forecast', 'format', 'indicators', 'limiter', 'ml', 'paper', 'portfolio', 'scanner', 'setups', 'signals'];
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   for (const name of SHARED) await copyFile(new URL(`../app/js/${name}.js`, import.meta.url), new URL(`../server/js/${name}.js`, import.meta.url));

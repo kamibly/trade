@@ -118,7 +118,7 @@ async function score(item, tf, settings, weightsCache, deps, models, onS) {
   const modelsAt = (models && models.trainedAt) || null;
   let w = weightsCache[wKey];
   if (!w || deps.now() - w.at >= WEIGHTS_MAX_AGE_MS || (w.modelsAt || null) !== modelsAt || w.key !== learnKey(settings)) {
-    w = { at: deps.now(), modelsAt, ...learn(S, settings) };
+    w = { at: deps.now(), modelsAt, ...learn(S, settings, item.type) };
     weightsCache[wKey] = w;
   }
   const sig = signalAt(S, candles.length - 1, {

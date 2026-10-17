@@ -2,7 +2,7 @@
 // signals with fake money, so you can see how they would have done before
 // trusting them with real money. Long only, no leverage, prices in USD.
 
-import { FEE } from './backtest.js';
+import { feeOf } from './fees.js';
 
 export const DEFAULT_START = 10_000;
 // Each source of trades has its own share of the account and its own
@@ -27,12 +27,14 @@ export function newAccount(start = DEFAULT_START, now = Date.now()) {
 
 // Size so that hitting the stop loses `riskPct` of equity, capped at `cap`
 // of equity per position (20%, or the budget's equal slot) and at the cash on hand.
-export function positionSize({ equity, cash, entry, stop, riskPct = 1, cap = 0.2 }) {
+export function positionSize({ equity, cash, entry, stop, riskPct = 1, cap = 0.2, type = 'stock' }) {
   const perUnit = entry - stop;
   if (!(entry > 0) || !(perUnit > 0) || !(cash > 0)) return 0;
   const byRisk = (equity * riskPct) / 100 / perUnit;
   const byCap = (equity * cap) / entry;
-  const byCash = cash / (entry * (1 + FEE));
+  // All the cash less the buy's fee (a stock's $1 minimum, or crypto's 0.4%).
+  const all = cash / entry;
+  const byCash = (cash - feeOf(type, all, entry)) / entry;
   return Math.max(0, Math.min(byRisk, byCap, byCash));
 }
 
@@ -41,7 +43,7 @@ export function equity(acc, prices = {}) {
 }
 
 function closePosition(acc, p, price, reason, now) {
-  const value = p.qty * price * (1 - FEE);
+  const value = p.qty * price - feeOf(p.type, p.qty, price);
   acc.cash = round2(acc.cash + value);
   const pnl = value - p.cost;
   acc.trades.push({ key: p.key, symbol: p.symbol, type: p.type, qty: p.qty, entry: p.entry, cost: p.cost, exit: price, openedAt: p.openedAt, closedAt: now, pnl: round2(pnl), ret: pnl / p.cost, reason, setup: setupOf(p) });
@@ -69,9 +71,10 @@ function room(acc, x, budgets) {
 }
 
 function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap }) {
-  const qty = positionSize({ equity: equity(acc, prices), cash: acc.cash, entry: s.entry, stop: s.stop, riskPct, cap });
-  const cost = qty * s.entry * (1 + FEE);
-  if (cost < 1) return null;
+  const qty = positionSize({ equity: equity(acc, prices), cash: acc.cash, entry: s.entry, stop: s.stop, riskPct, cap, type: s.type });
+  const cost = qty * s.entry + feeOf(s.type, qty, s.entry);
+  // Under $10 the fees outweigh the trade.
+  if (!(qty > 0) || cost < 10 || cost > acc.cash + 0.005) return null;
   acc.cash = round2(acc.cash - cost);
   acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}) });
   return { kind: 'open', symbol: s.symbol, key, price: s.entry, qty, cost: round2(cost), setup };

@@ -3,6 +3,7 @@
 
 import { analyze, signalAt, MIN_CANDLES } from './signals.js';
 import { backtest } from './backtest.js';
+import { feeRate } from './fees.js';
 
 // Method weights are re-learned from the backtest once a day per symbol.
 export const WEIGHTS_MAX_AGE_MS = 24 * 3600_000;
@@ -25,9 +26,10 @@ export const autoTune = settings => settings.tune !== 'manual';
 export const manualRule = settings => ({ buy: settings.buyAt, sell: settings.sellAt, mode: settings.mode === 'dip' ? 'dip' : 'standard' });
 
 // What a saved learning depends on besides the candles: change any of it and the backtest runs again.
-export const learnKey = settings => (autoTune(settings)
+// `fees2`: relearn once the per-broker fees came in.
+export const learnKey = settings => `fees2:${autoTune(settings)
   ? `auto:${settings.stopAtr}:${settings.takeAtr}`
-  : `manual:${settings.buyAt}:${settings.sellAt}:${settings.mode || 'standard'}:${settings.stopAtr}:${settings.takeAtr}`);
+  : `manual:${settings.buyAt}:${settings.sellAt}:${settings.mode || 'standard'}:${settings.stopAtr}:${settings.takeAtr}`}`;
 
 const brief = r => (r ? { ret: Number(r.totalReturn.toFixed(4)), trades: r.trades.length + (r.open ? 1 : 0) } : null);
 
@@ -50,13 +52,13 @@ export function tradeRecordLine(symbol, rec) {
 }
 
 // The backtest options for these settings (`votes` reuses a vote matrix).
-export const backtestOptions = (settings, votes) => ({
-  thresholds: manualRule(settings), stopAtr: settings.stopAtr, takeAtr: settings.takeAtr, tune: autoTune(settings), votes,
+export const backtestOptions = (settings, votes, type = 'stock') => ({
+  thresholds: manualRule(settings), stopAtr: settings.stopAtr, takeAtr: settings.takeAtr, tune: autoTune(settings), votes, fee: feeRate(type),
 });
 
 // Method weights and, when tuning is on, this symbol's rule, from its backtest.
 // result: { weights, rule, test: { tuned, standard }, key } (weights null when the history is too short)
-export const learn = (S, settings) => learnedFrom(backtest(S, backtestOptions(settings)), settings);
+export const learn = (S, settings, type) => learnedFrom(backtest(S, backtestOptions(settings, undefined, type)), settings);
 
 export function learnedFrom(bt, settings) {
   return {

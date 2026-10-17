@@ -122,7 +122,7 @@ the learned models expect.
 
 - **Backtest.** Each chart splits its history: the older 60% measures how often
   each method's clear votes (|vote| ≥ 0.3) matched the move over the next 10
-  candles, after 0.1% fees. A method right 50% of the time keeps weight 1, 60%
+  candles, after fees (0.1% for stocks, 0.4% for crypto). A method right 50% of the time keeps weight 1, 60%
   doubles it, 40% or worse drops it to 0, and methods with few votes stay near 1.
   The newer 40% then trades the weighted score (long only, stop-loss, target or
   Sell score to exit) and is compared with equal weights and buy-and-hold.

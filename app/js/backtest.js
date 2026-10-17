@@ -5,7 +5,7 @@
 
 import { votesAt, scoreVotes, actionFor, contextAt, MIN_CANDLES, DEFAULT_THRESHOLDS } from './signals.js';
 
-export const FEE = 0.001; // 0.1% per side, roughly a cheap broker or exchange
+export const FEE = 0.001; // 0.1% per side; callers pass the broker's rate for the symbol (fees.js)
 const MIN_VOTE = 0.3; // only count votes with a clear opinion
 const SHRINK = 50; // a method needs ~50 opinions before its weight moves far from 1
 
@@ -110,14 +110,14 @@ const tradeCount = r => r.trades.length + (r.open ? 1 : 0);
 
 // The best { buy, sell, mode } between start and end, or null when no pair
 // made at least 3 trades there. `modes` limits which modes are tried.
-export function tuneRule(S, scores, start, end, { stopAtr = 2, takeAtr = 3, modes = ['standard', 'dip'] } = {}) {
+export function tuneRule(S, scores, start, end, { stopAtr = 2, takeAtr = 3, modes = ['standard', 'dip'], fee = FEE } = {}) {
   const ctx = S.candles.map((_, i) => (i >= start && i < end ? contextAt(S, i) : null));
   let best = null;
   for (const mode of modes) {
     for (const buy of TUNE_BUY) {
       for (const sell of TUNE_SELL) {
         const rule = { buy, sell, mode };
-        const r = simulate(S, scores, start, end, { thresholds: rule, stopAtr, takeAtr, ctx });
+        const r = simulate(S, scores, start, end, { thresholds: rule, stopAtr, takeAtr, ctx, fee });
         if (tradeCount(r) < MIN_TUNE_TRADES) continue;
         const m = merit(r);
         if (!best || m > best.merit + 1e-9) best = { rule, merit: m, result: r };
@@ -130,16 +130,16 @@ export function tuneRule(S, scores, start, end, { stopAtr = 2, takeAtr = 3, mode
 // The whole walk-forward run for one symbol and timeframe. With `tune`, the
 // thresholds (and the mode, unless `thresholds.mode` is fixed by `tune ===
 // 'thresholds'`) are picked on the training part and checked on the test part.
-export function backtest(S, { thresholds = DEFAULT_THRESHOLDS, horizon = 10, trainShare = 0.6, stopAtr = 2, takeAtr = 3, votes, tune = false } = {}) {
+export function backtest(S, { thresholds = DEFAULT_THRESHOLDS, horizon = 10, trainShare = 0.6, stopAtr = 2, takeAtr = 3, votes, tune = false, fee = FEE } = {}) {
   const n = S.candles.length;
   const first = MIN_CANDLES - 1;
   if (n - first < 120) return null;
   const split = first + Math.floor((n - first) * trainShare);
   votes ||= voteMatrix(S);
-  const stats = methodStats(S, votes, first, split - horizon, { horizon });
+  const stats = methodStats(S, votes, first, split - horizon, { horizon, fee });
   const weights = weightsFrom(stats);
   const scoresWith = w => votes.map((v, i) => (v.length ? scoreVotes(v, w) : NaN));
-  const opts = { thresholds, stopAtr, takeAtr };
+  const opts = { thresholds, stopAtr, takeAtr, fee };
   const weightedScores = scoresWith(weights);
   const out = {
     candles: n,
@@ -153,7 +153,7 @@ export function backtest(S, { thresholds = DEFAULT_THRESHOLDS, horizon = 10, tra
   };
   if (tune) {
     const modes = tune === 'thresholds' ? [thresholds.mode || 'standard'] : ['standard', 'dip'];
-    const best = tuneRule(S, weightedScores, first, split, { stopAtr, takeAtr, modes });
+    const best = tuneRule(S, weightedScores, first, split, { stopAtr, takeAtr, modes, fee });
     out.rule = best ? best.rule : { ...DEFAULT_THRESHOLDS, mode: modes[0] };
     out.tunedTrain = best ? best.result : null;
     out.tuned = simulate(S, weightedScores, split, n, { ...opts, thresholds: out.rule });

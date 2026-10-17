@@ -4,7 +4,7 @@
 // fires on, so the track record it builds from past candles is honest.
 // Times are in seconds, like the candles. Daily candles only.
 
-import { FEE } from './backtest.js';
+import { feeRate } from './fees.js';
 import { rsi, sma } from './indicators.js';
 import { contextAt } from './signals.js';
 
@@ -237,7 +237,7 @@ export function crowdTriggers(S, symbol, fng, funding) {
 // What a trade entered at candle i's close did: stop and target in ATRs like
 // the paper account, otherwise sold at the close `hold` candles later.
 // null while the trade would still be open.
-export function outcome(S, i, { hold, stopAtr = 2, takeAtr = 3 }) {
+export function outcome(S, i, { hold, stopAtr = 2, takeAtr = 3, fee = feeRate('stock') }) {
   const c = S.candles;
   const entry = S.close[i];
   const atr = S.atr[i];
@@ -246,13 +246,13 @@ export function outcome(S, i, { hold, stopAtr = 2, takeAtr = 3 }) {
   const take = entry + takeAtr * atr;
   for (let j = i + 1; j <= i + hold; j++) {
     if (j >= c.length) return null;
-    if (c[j].low <= stop) return net(entry, Math.min(c[j].open, stop));
-    if (c[j].high >= take) return net(entry, Math.max(c[j].open, take));
+    if (c[j].low <= stop) return net(entry, Math.min(c[j].open, stop), fee);
+    if (c[j].high >= take) return net(entry, Math.max(c[j].open, take), fee);
   }
-  return net(entry, S.close[i + hold]);
+  return net(entry, S.close[i + hold], fee);
 }
 
-const net = (entry, exit) => (exit / entry) * (1 - FEE) * (1 - FEE) - 1;
+const net = (entry, exit, fee) => (exit / entry) * (1 - fee) * (1 - fee) - 1;
 
 export const emptyRecord = () => ({ n: 0, wins: 0, sum: 0 });
 

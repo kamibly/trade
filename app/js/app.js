@@ -543,7 +543,7 @@ function renderAnalysis() {
   if (!state.analysis || state.analysis.id !== id || state.analysis.key !== key) {
     const S = analyze(candles, { models });
     const votes = voteMatrix(S);
-    const bt = backtest(S, backtestOptions(state.settings, votes));
+    const bt = backtest(S, backtestOptions(state.settings, votes, state.chartItem.type));
     const learned = learnedFrom(bt, state.settings);
     if (bt) store.saveWeight(state.chartItem, state.chartTf, learned);
     state.analysis = { id, key, S, votes, bt, learned };
@@ -642,7 +642,7 @@ function backtestCard(bt) {
   const w = bt.weighted;
   return el('div', { class: 'card' },
     el('h3', { text: 'Backtest' }),
-    el('p', { class: 'muted small', text: `Weights learned from ${fmtDate(bt.trainFrom)} to ${fmtDate(bt.testFrom)}, then tested on the ${bt.testCandles} newer candles they never saw. Long only, buying on a new Buy score and selling on the stop-loss, target or a Sell score, with 0.1% fees.` }),
+    el('p', { class: 'muted small', text: `Weights learned from ${fmtDate(bt.trainFrom)} to ${fmtDate(bt.testFrom)}, then tested on the ${bt.testCandles} newer candles they never saw. Long only, buying on a new Buy score and selling on the stop-loss, target or a Sell score, with ${state.chartItem.type === 'crypto' ? 'Kraken\'s 0.4%' : 'IBKR\'s fee (0.1% on a $1,000 order)'} on each buy and sell.` }),
     bt.rule ? line(`Tuned levels (${bt.rule.mode === 'dip' ? 'dip mode' : 'standard'}, ${fmtScore(bt.rule.buy)} / ${fmtScore(bt.rule.sell)})`, bt.tuned) : null,
     bt.rule ? line('Standard levels (+40 / -40)', bt.standard) : line('Weighted methods', w),
     line('All methods equal', bt.equal),
