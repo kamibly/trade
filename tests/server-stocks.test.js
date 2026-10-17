@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stockSources, fromNasdaq, nasdaqPriceOf } from '../server/stocks.mjs';
+import { stockSources, fromNasdaq, nasdaqPriceOf, withToday } from '../server/stocks.mjs';
 
 const yahooChart = closes => ({ chart: { result: [{ timestamp: closes.map((_, i) => 1_700_000_000 + i * 86400), indicators: { quote: [{ open: closes, high: closes, low: closes, close: closes, volume: closes.map(() => 1) }] } }] } });
 const nasdaqRows = n => ({ data: { tradesTable: { rows: Array.from({ length: n }, (_, i) => {
@@ -66,4 +66,17 @@ test('a Yahoo refusal tries the crumb host, then Nasdaq for daily charts and pri
   // Nothing works: both reasons are given.
   f = fakeFetch([['query1', { status: 429 }], ['fc.yahoo.com', { status: 429 }], ['nasdaq', { status: 403 }]]);
   await assert.rejects(stockSources({ fetchFn: f, now }).candles({ symbol: 'AAPL' }, '1D'), /yahoo.com answered 429; Nasdaq: api.nasdaq.com answered 403/);
+});
+
+test("Nasdaq's live quote adds today's candle, which its history table lacks until tomorrow", async () => {
+  const hist = fromNasdaq(nasdaqRows(3)); // Jan 2 to Jan 4, last close 10.02
+  const info = { data: { primaryData: { lastSalePrice: '$10.50', lastTradeTimestamp: 'Jan 5, 2026', volume: '2,000' }, keyStats: { dayrange: { value: '9.90 - 10.60' } } } };
+  const c = withToday(hist, info);
+  assert.equal(c.length, 4);
+  assert.deepEqual(c.at(-1), { time: Date.UTC(2026, 0, 5, 13, 30) / 1000, open: 10.02, high: 10.6, low: 9.9, close: 10.5, volume: 2000 });
+  // Already in the table, or no date: unchanged.
+  assert.equal(withToday(hist, { data: { primaryData: { lastSalePrice: '$10.50', lastTradeTimestamp: 'Jan 4, 2026' } } }).length, 3);
+  assert.equal(withToday(hist, { data: { primaryData: { lastSalePrice: '$10.50' } } }).length, 3);
+  // No day range: the open and close bound it.
+  assert.deepEqual([withToday(hist, { data: { primaryData: { lastSalePrice: '$10.50', lastTradeTimestamp: 'DATA AS OF Jan 5, 2026' } } }).at(-1).low], [10.02]);
 });

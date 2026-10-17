@@ -76,6 +76,26 @@ export function nasdaqPriceOf(json) {
   return price;
 }
 
+// Nasdaq's history table only gets a day's row the next day, so a scan in the
+// evening would score yesterday's chart. Its live quote adds today's candle:
+// the last price, the day's range when given, and an open at the previous close.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export function withToday(candles, info) {
+  const d = info && info.data;
+  const p = d && d.primaryData;
+  const close = p && money(p.lastSalePrice);
+  const m = p && /([A-Z][a-z]{2})\w* (\d{1,2}), (\d{4})/.exec(String(p.lastTradeTimestamp || ''));
+  if (!candles.length || !(close > 0) || !m || !MONTHS.includes(m[1])) return candles;
+  const time = Date.UTC(Number(m[3]), MONTHS.indexOf(m[1]), Number(m[2]), 13, 30) / 1000;
+  const last = candles.at(-1);
+  if (time <= last.time) return candles;
+  const range = String((d.keyStats && d.keyStats.dayrange && d.keyStats.dayrange.value) || '').split('-').map(money);
+  const open = last.close;
+  const [lo, hi] = range.length === 2 && range.every(v => v > 0) ? range : [Math.min(open, close), Math.max(open, close)];
+  const volume = money(p.volume);
+  return [...candles, { time, open, high: Math.max(hi, open, close), low: Math.min(lo, open, close), close, volume: Number.isFinite(volume) ? volume : 0 }];
+}
+
 // Stocks and ETFs (SPY) are separate asset classes on Nasdaq.
 async function nasdaq(fetchFn, symbol, path) {
   const sym = encodeURIComponent(symbol.replace(/-/g, '.'));
@@ -116,7 +136,12 @@ export function stockSources({ fetchFn = fetch, limitYahoo = f => f, limitNasdaq
     const from = new Date(to.getTime() - (tf === '1W' ? 10 * 365 : 2 * 365) * 86400_000);
     const day = d => d.toISOString().slice(0, 10);
     const json = await nasdaq(fetchFn, item.symbol, `historical?fromdate=${day(from)}&todate=${day(to)}&limit=9999`);
-    const daily = fromNasdaq(json);
+    let daily = fromNasdaq(json);
+    try {
+      daily = withToday(daily, await nasdaq(fetchFn, item.symbol, 'info'));
+    } catch {
+      // History alone, a day behind.
+    }
     return tf === '1W' ? toWeekly(daily) : daily;
   });
   const nasdaqPrice = limitNasdaq(async item => nasdaqPriceOf(await nasdaq(fetchFn, item.symbol, 'info')));
