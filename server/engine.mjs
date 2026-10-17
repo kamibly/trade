@@ -111,7 +111,7 @@ async function candlesFor(item, tf, settings, deps) {
 // thresholds and mode) from the backtest once a day, or when the settings or
 // the ML models change. `onS` gets the analyzed chart when the caller needs it.
 async function score(item, tf, settings, weightsCache, deps, models, onS) {
-  const { candles } = await candlesFor(item, tf, settings, deps);
+  const { candles, source } = await candlesFor(item, tf, settings, deps);
   if (candles.length < MIN_CANDLES) throw new Error(`Only ${candles.length} candles, ${MIN_CANDLES} needed`);
   const S = analyze(candles, { models });
   const wKey = `${key(item)}:${tf}`;
@@ -126,7 +126,7 @@ async function score(item, tf, settings, weightsCache, deps, models, onS) {
   });
   if (!sig) throw new Error('Not enough history');
   if (onS) onS(S);
-  return { ...summarize(item, sig, tf, w), at: deps.now() };
+  return { ...summarize(item, sig, tf, w), at: deps.now(), ...(source ? { source } : {}) };
 }
 
 // Runs `fn` over `items` with a few at a time, so big scans finish without hammering a source.
