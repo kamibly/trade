@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.10.0 (paper charts)';
+export const APP_VERSION = '0.10.1 (paper charts)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1415,7 +1415,7 @@ function renderPaper() {
         el('li', { class: 'holding paper-card', onclick: () => { const item = findItem(p.key); if (item) openChart(item, true); } },
           el('div', { class: 'signal-top' },
             el('div', { class: 'sym', text: p.symbol }),
-            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? `${signed(pnl)} (${fmtPct(ret)})` : '–' })),
+            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? fmtPct(ret) : '–' })),
           el('dl', { class: 'money-row' },
             stat('Invested', formatMoney(p.cost)),
             stat('Worth now', Number.isFinite(value) ? formatMoney(value) : '–'),
