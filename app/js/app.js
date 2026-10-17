@@ -19,7 +19,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.9.5 (crypto around the clock)';
+export const APP_VERSION = '0.9.6 (crypto around the clock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -695,9 +695,9 @@ function renderSignals() {
     list.length ? el('ul', { class: 'list' }, ...list.map(signalCard)) : el('p', { class: 'muted small', text: empty }),
   ];
   $('signals-body').replaceChildren(
-    ...section('Buy ideas', buys, 'No symbol is a Buy right now.'),
-    ...section('Sell ideas', sells, 'No symbol is a Sell right now.'),
-    ...section('Watching', holds, 'Nothing else scanned yet.'),
+    ...section(`Your watchlist: Buy on ${TIMEFRAMES[tf].label}`, buys, 'No symbol is a Buy right now.'),
+    ...section(`Your watchlist: Sell on ${TIMEFRAMES[tf].label}`, sells, 'No symbol is a Sell right now.'),
+    ...section('Your watchlist: no signal', holds, 'Nothing else scanned yet.'),
     errors.length ? el('p', { class: 'muted small', text: `Could not score: ${errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ')}` }) : '',
   );
   renderOpportunities();
@@ -867,8 +867,8 @@ function renderMarket() {
   body.replaceChildren(
     el('h2', { class: 'section', text: 'Market scan' }),
     el('p', { class: 'muted small', text: scanLine(m) }),
-    ...list('Buy ideas', m.buys || [], 'No buy ideas in the last scan.'),
-    ...list('Sell ideas', m.sells || [], 'No sell ideas in the last scan.'),
+    ...list('Market buy ideas (1D)', m.buys || [], 'No buy ideas in the last scan.'),
+    ...list('Market sell ideas (1D)', m.sells || [], 'No sell ideas in the last scan.'),
   );
 }
 
