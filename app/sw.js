@@ -2,7 +2,7 @@
 // Price APIs are other sites and pass straight through: a cached copy would
 // hide real errors and show stale prices as if they were live.
 
-const CACHE = 'trade-v27';
+const CACHE = 'trade-v28';
 const ASSETS = [
   './',
   './index.html',
@@ -56,16 +56,20 @@ self.addEventListener('fetch', event => {
   if (request.method !== 'GET' || new URL(request.url).origin !== self.location.origin) return;
 
   // Pages: try the network briefly so updates arrive, else the saved copy.
+  // The saved copy also wins over an error page, so the app keeps working
+  // when the site is down or taken offline (a 404 from GitHub Pages).
   if (request.mode === 'navigate') {
     event.respondWith((async () => {
+      const cache = await caches.open(CACHE);
+      const saved = await cache.match('./index.html');
       try {
-        return await Promise.race([
+        const res = await Promise.race([
           fetch(request),
           new Promise((_, reject) => setTimeout(() => reject(new Error('slow')), 4000)),
         ]);
+        return res.ok || !saved ? res : saved;
       } catch {
-        const cache = await caches.open(CACHE);
-        return (await cache.match('./index.html')) || Response.error();
+        return saved || Response.error();
       }
     })());
     return;
