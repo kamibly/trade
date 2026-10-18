@@ -215,3 +215,30 @@ def test_reset_restarts_the_shadow_and_the_trial():
     assert st["filterTrial"] is None and st["paperBudgets"] is None
     body = TestClient(main.app).get("/paper", headers=KEY).json()
     assert body["shadow"]["cash"] == 5000 and "filterTrial" in body and "budgets" in body
+
+
+def test_you_can_sell_or_move_a_paper_trade(monkeypatch):
+    service.set_profile(PROFILE)
+    pos = {"key": "crypto:SOL", "type": "crypto", "symbol": "SOL", "qty": 2, "entry": 100, "stop": 90, "take": 120, "cost": 200}
+    service.update_state(lambda st: st.update(paper={"start": 5000, "cash": 4800, "createdAt": 1, "positions": [pos], "trades": [], "history": []},
+                                              prices={"lastRunAt": 1, "values": {"crypto:SOL": 110.0}, "errors": {}}))
+    jobs = []
+
+    def engine(job, timeout):
+        jobs.append(job)
+        ok = job["key"] == "crypto:SOL"
+        acc = {**job["paper"], "positions": [] if job["action"] == "sell" and ok else job["paper"]["positions"]}
+        return {"paper": acc, "shadow": job["shadow"], "paperEvents": [{"kind": "close", "text": "Sold SOL"}] if ok and job["action"] == "sell" else [], "ok": ok}
+
+    monkeypatch.setattr(service, "run_engine", engine)
+    monkeypatch.setattr(service.edit_paper, "__defaults__", (None, None, None, engine))
+    c = TestClient(main.app)
+    assert c.post("/paper/levels", json={"key": "crypto:SOL", "stop": 120, "take": 110}, headers=KEY).status_code == 400
+    assert c.post("/paper/levels", json={"key": "crypto:SOL", "stop": 95, "take": 130}, headers=KEY).status_code == 200
+    assert jobs[-1]["mode"] == "paperEdit" and (jobs[-1]["stop"], jobs[-1]["take"]) == (95, 130) and jobs[-1]["shadow"]
+    assert c.post("/paper/sell", json={"key": "crypto:XYZ", "price": 5}, headers=KEY).status_code == 404
+    r = c.post("/paper/sell", json={"key": "crypto:SOL", "price": 999}, headers=KEY)
+    assert r.status_code == 200 and r.json()["paper"]["positions"] == []
+    assert jobs[-1]["price"] == 110.0  # the server's own latest price wins over the app's
+    st = service.load_state()
+    assert st["paperEvents"][0]["text"] == "Sold SOL" and st["paperShadow"] is not None

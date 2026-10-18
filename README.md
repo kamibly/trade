@@ -136,7 +136,9 @@ the learned models expect.
   symbol, and sells on the stop-loss, target or a Sell signal.
   With your server connected it runs there around the clock (signals after
   every candle close, stop-loss and target every minute); otherwise it trades
-  only while the app is open.
+  only while the app is open. Each open paper trade has buttons to move its
+  stop-loss and target or sell it now; the account without the trade filter
+  does the same, and an idea you sold is not bought again.
 
 - **By setup.** The server's paper account also buys the market scan's new buy
   ideas (sold at the stop, the target or when a later scan says Sell). Paper

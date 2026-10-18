@@ -195,6 +195,29 @@ export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), 
   return events;
 }
 
+// You can sell a position yourself, or move its stop-loss and target. Each
+// returns the event, or null with nothing changed when it doesn't apply.
+export function sellNow(acc, key, price, now = Date.now()) {
+  const p = acc.positions.find(x => x.key === key);
+  if (!p || !(price > 0)) return null;
+  const ev = closePosition(acc, p, price, 'sold by you', now);
+  mark(acc, { [key]: price }, now);
+  return ev;
+}
+
+// The stop must be below the target; either may be left as it is (undefined).
+export function setLevels(acc, key, { stop, take } = {}) {
+  const p = acc.positions.find(x => x.key === key);
+  if (!p) return null;
+  const s = stop === undefined ? p.stop : stop;
+  const t = take === undefined ? p.take : take;
+  if (!(s > 0) || !(t > s)) return null;
+  p.stop = s;
+  p.take = t;
+  p.edited = true;
+  return { kind: 'levels', symbol: p.symbol, key, stop: s, take: t };
+}
+
 // Market scan trades are sold when a later scan rates them Sell.
 // sells: [{ key, entry }]
 export function closeOnSells(acc, sells, setup, { now = Date.now() } = {}) {

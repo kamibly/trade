@@ -577,6 +577,26 @@ def follow_results(st: dict, now: Optional[int] = None) -> dict:
     return b
 
 
+def edit_paper(action: str, key: str, price: Optional[float] = None, stop: Optional[float] = None,
+               take: Optional[float] = None, engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """You sell a paper position now ("sell") or move its stop and target ("levels").
+    A sale uses the server's latest price for it, else the one the app showed.
+    Returns the account, or None when there is no such position or the levels don't fit."""
+    with _run_locks["watch"]:  # not while a check is changing the account
+        state = load_state()
+        profile = state.get("profile")
+        if not profile or not state.get("paper"):
+            return None
+        known = ((state.get("prices") or {}).get("values") or {}).get(key)
+        job = {"mode": "paperEdit", "action": action, "key": key,
+               "price": known if known else price, "stop": stop, "take": take, **paper_fields(state, profile)}
+        result = engine(job, 60)
+        if not result.get("ok"):
+            return None
+        update_state(lambda st: save_paper(st, result))
+        return result["paper"]
+
+
 def reset_paper(start: Optional[float] = None) -> dict:
     def apply(st):
         profile = st.get("profile") or {"settings": {}}

@@ -334,3 +334,7 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .pnl-fill.up { left: 50%; background: var(--up); border-radius: 0 6px 6px 0; }
 .pnl-fill.down { right: 50%; background: var(--down); border-radius: 6px 0 0 6px; }
 .pnl-val { font-variant-numeric: tabular-nums; text-align: right; min-width: 112px; }
+
+.paper-actions { margin-top: 8px; }
+.paper-actions .row { gap: 8px; flex-wrap: wrap; }
+.paper-edit { margin-top: 8px; }

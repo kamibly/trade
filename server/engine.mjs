@@ -486,6 +486,20 @@ export async function runPaper(job, deps = defaultDeps) {
   return { paper: job.paper, paperEvents, shadow: job.shadow || null };
 }
 
+// You sell a paper position or move its stop and target; the unfiltered
+// shadow does the same, so the trade filter's comparison stays fair.
+// job: { paper, shadow, action: 'sell' | 'levels', key, price, stop, take }
+// result: { paper, shadow, paperEvents, ok }
+export async function runPaperEdit(job, deps = defaultDeps) {
+  const act = acc => (job.action === 'sell'
+    ? paper.sellNow(acc, job.key, job.price, deps.now())
+    : paper.setLevels(acc, job.key, { stop: job.stop, take: job.take }));
+  if (job.shadow) act(job.shadow);
+  const ev = job.paper ? act(job.paper) : null;
+  const paperEvents = ev && ev.kind === 'close' ? [{ ...ev, at: deps.now(), text: paperLine(ev) }] : [];
+  return { paper: job.paper, shadow: job.shadow || null, paperEvents, ok: !!ev };
+}
+
 // Your symbols plus a spread of S&P 500 stocks and top cryptos, so the models
 // learn from more than a handful of charts. `total` caps the list.
 async function trainingItems(job, deps) {
@@ -588,7 +602,7 @@ async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
-  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper }[job.mode] || runWatch;
+  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper, paperEdit: runPaperEdit }[job.mode] || runWatch;
   const result = await run(job);
   if (job.stream) {
     // Training data is big: a header line, then one row per line, so Python

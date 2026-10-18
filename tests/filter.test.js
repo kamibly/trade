@@ -115,3 +115,26 @@ test('budgets take the server shares and keep their limits', async () => {
   assert.equal(b.stockIdeas.share, BUDGETS.stockIdeas.share);
   assert.equal(b.alerts.max, BUDGETS.alerts.max);
 });
+
+test('you can sell a paper trade or move its levels; the shadow follows and the idea is not bought again', async () => {
+  const paper = await import('../app/js/paper.js');
+  const { runPaperEdit } = await import('../server/engine.mjs');
+  const idea = { id: 'scan:stock:AAA:1', setup: 'scan', key: 'stock:AAA', symbol: 'AAA', type: 'stock', entry: 100, stop: 90, take: 115, ev: 0.5 };
+  const acc = paper.newAccount(10_000, 0);
+  const shadow = paper.newAccount(10_000, 0);
+  for (const a of [acc, shadow]) paper.openSetups(a, [idea], { riskPct: 5, now: 1 });
+  const lv = await runPaperEdit({ paper: acc, shadow, action: 'levels', key: 'stock:AAA', stop: 95, take: 130 }, { now: () => 2 });
+  assert.ok(lv.ok && lv.paperEvents.length === 0);
+  for (const a of [acc, shadow]) assert.deepEqual([a.positions[0].stop, a.positions[0].take, a.positions[0].edited], [95, 130, true]);
+  assert.equal(paper.setLevels(acc, 'stock:AAA', { stop: 140 }), null); // stop above the target
+  assert.equal(acc.positions[0].stop, 95);
+  const sold = await runPaperEdit({ paper: acc, shadow, action: 'sell', key: 'stock:AAA', price: 104 }, { now: () => 3 });
+  assert.ok(sold.ok && sold.paperEvents[0].text.includes('sold by you'));
+  for (const a of [acc, shadow]) assert.equal(a.positions.length, 0);
+  assert.equal(acc.trades[0].reason, 'sold by you');
+  assert.ok(acc.trades[0].pnl > 0);
+  // Still a buy idea on the next scan: not bought back.
+  assert.deepEqual(paper.openSetups(acc, [idea], { riskPct: 5, now: 4 }), []);
+  assert.equal(acc.skips['stock:AAA'], 'already bought once for this signal');
+  assert.equal((await runPaperEdit({ paper: acc, shadow, action: 'sell', key: 'stock:AAA', price: 104 }, { now: () => 5 })).ok, false);
+});
