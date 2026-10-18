@@ -138,3 +138,18 @@ test('you can sell a paper trade or move its levels; the shadow follows and the 
   assert.equal(acc.skips['stock:AAA'], 'already bought once for this signal');
   assert.equal((await runPaperEdit({ paper: acc, shadow, action: 'sell', key: 'stock:AAA', price: 104 }, { now: () => 5 })).ok, false);
 });
+
+test('a target set by dollars kept after fees', async () => {
+  const { priceForGain } = await import('../app/js/paper.js');
+  const { feeOf } = await import('../app/js/fees.js');
+  for (const p of [
+    { type: 'stock', qty: 0.8, entry: 500, cost: 400 + 1 },
+    { type: 'crypto', qty: 100, entry: 4, cost: 400 * 1.004 },
+    { type: 'crypto', qty: 1e6, entry: 0.0004, cost: 400 * 1.004 },
+  ]) {
+    const t = priceForGain(p, 5);
+    const net = price => p.qty * price - feeOf(p.type, p.qty, price) - p.cost;
+    assert.ok(net(t) >= 5 && net(t) < 5.2, `${p.type} ${t} keeps ${net(t)}`);
+  }
+  assert.ok(Number.isNaN(priceForGain({ type: 'stock', qty: 1, entry: 10, cost: 11 }, 0)));
+});

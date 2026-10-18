@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.12.0 (your own paper sells)';
+export const APP_VERSION = '0.12.1 (take profit in dollars)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1411,7 +1411,10 @@ function stepPaper(tf, alerts) {
   }
 }
 
-function renderPaper() {
+function renderPaper({ force = false } = {}) {
+  // Background refreshes wait while you are changing a trade's stop and target.
+  if (!force && state.paperEditing && document.querySelector('.paper-edit:not([hidden])')) return;
+  state.paperEditing = null;
   const acc = paperAccount();
   const onServer = serverPaperOn();
   const serverPrices = (onServer && state.serverPaper.prices) || {};
@@ -1487,17 +1490,37 @@ function paperControls(p, price) {
   const stop = el('input', { type: 'number', inputmode: 'decimal', step: 'any', min: '0', value: String(p.stop) });
   const take = el('input', { type: 'number', inputmode: 'decimal', step: 'any', min: '0', value: String(p.take) });
   const status = el('p', { class: 'small', role: 'status' });
+  // Or a target set by what you want to keep: the price where selling makes
+  // that much after both brokers' fees.
+  const gain = el('input', { type: 'number', inputmode: 'decimal', step: 'any', min: '0', placeholder: 'e.g. 5' });
+  const keep = el('p', { class: 'muted small' });
+  const showKeep = () => {
+    const t = Number(take.value);
+    const s = Number(stop.value);
+    const net = price => p.qty * price - feeOf(p.type, p.qty, price) - p.cost;
+    keep.textContent = t > 0 ? `At the target you keep ${signed(net(t))} after fees${s > 0 ? `; at the stop, ${signed(net(s))}` : ''}.` : '';
+  };
+  gain.addEventListener('input', () => {
+    const t = paper.priceForGain(p, Number(gain.value));
+    if (Number.isFinite(t)) take.value = String(t);
+    showKeep();
+  });
+  take.addEventListener('input', () => { gain.value = ''; showKeep(); });
+  stop.addEventListener('input', showKeep);
+  showKeep();
   const form = el('div', { class: 'paper-edit', hidden: true },
     el('div', { class: 'row two' },
       el('label', { class: 'field' }, el('span', { text: 'Stop-loss, USD' }), stop),
       el('label', { class: 'field' }, el('span', { text: 'Target, USD' }), take)),
+    el('label', { class: 'field' }, el('span', { text: 'Or: sell when I make, after fees, USD' }), gain),
+    keep,
     el('div', { class: 'row' },
       el('button', { type: 'button', class: 'primary', text: 'Save', onclick: () => editPaper(p, { action: 'levels', stop: Number(stop.value), take: Number(take.value) }, status) }),
-      el('button', { type: 'button', class: 'ghost', text: 'Cancel', onclick: () => { form.hidden = true; } })),
+      el('button', { type: 'button', class: 'ghost', text: 'Cancel', onclick: () => { form.hidden = true; state.paperEditing = null; } })),
     status);
   const wrap = el('div', { class: 'paper-actions', onclick: e => e.stopPropagation() },
     el('div', { class: 'row' },
-      el('button', { type: 'button', class: 'ghost', text: 'Change stop and target', onclick: () => { form.hidden = !form.hidden; } }),
+      el('button', { type: 'button', class: 'ghost', text: 'Change stop and target', onclick: () => { form.hidden = !form.hidden; state.paperEditing = form.hidden ? null : p.key; } }),
       el('button', { type: 'button', class: 'ghost', text: 'Sell now', onclick: () => editPaper(p, { action: 'sell', price }, status) })),
     form);
   return wrap;
@@ -1530,7 +1553,7 @@ async function editPaper(p, { action, price, stop, take }, status) {
     store.savePaper(state.paper);
   }
   toast(action === 'sell' ? `Paper trade: sold ${p.symbol}` : `Paper trade: ${p.symbol} now sells at ${formatMoney(stop)} or ${formatMoney(take)}`);
-  renderPaper();
+  renderPaper({ force: true });
 }
 
 const signed = v => `${v >= 0 ? '+' : '−'}${formatMoney(Math.abs(v))}`;

@@ -218,6 +218,27 @@ export function setLevels(acc, key, { stop, take } = {}) {
   return { kind: 'levels', symbol: p.symbol, key, stop: s, take: t };
 }
 
+// The lowest price at which selling the position keeps `gain` dollars after
+// the buy and sell fees, rounded up to a fine enough price step.
+export function priceForGain(p, gain) {
+  if (!(gain > 0) || !(p.qty > 0)) return NaN;
+  const net = price => p.qty * price - feeOf(p.type, p.qty, price) - p.cost;
+  let lo = 0;
+  let hi = p.entry * 2;
+  while (net(hi) < gain) {
+    hi *= 2;
+    if (hi > p.entry * 1e6) return NaN;
+  }
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (net(mid) >= gain) hi = mid;
+    else lo = mid;
+  }
+  // A price step small enough that one step moves the result by a few cents at most.
+  const tick = Math.min(0.01, 10 ** Math.floor(Math.log10(0.05 / p.qty)));
+  return Number((Math.ceil(hi / tick - 1e-9) * tick).toFixed(12));
+}
+
 // Market scan trades are sold when a later scan rates them Sell.
 // sells: [{ key, entry }]
 export function closeOnSells(acc, sells, setup, { now = Date.now() } = {}) {
