@@ -189,6 +189,9 @@ def test_the_shadow_starts_level_and_the_filter_is_judged_after_enough_trades():
     off = {**st["profile"], "settings": {**st["profile"]["settings"], "tradeFilter": False}}
     assert service.paper_fields({**st, "filterTrial": None}, off)["useFilter"] is False
     assert service.clean_profile({"settings": {}})["settings"]["tradeFilter"] is True
+    assert service.clean_profile({"settings": {}})["settings"]["paperExit"] == "target"
+    trail = service.clean_profile({"settings": {"paperExit": "trail"}})
+    assert trail["settings"]["paperExit"] == "trail" and service.paper_fields(st, trail)["trail"] is True
 
 
 def test_budgets_follow_results_a_step_a_week_within_limits():
@@ -231,11 +234,15 @@ def test_you_can_sell_or_move_a_paper_trade(monkeypatch):
         return {"paper": acc, "shadow": job["shadow"], "paperEvents": [{"kind": "close", "text": "Sold SOL"}] if ok and job["action"] == "sell" else [], "ok": ok}
 
     monkeypatch.setattr(service, "run_engine", engine)
-    monkeypatch.setattr(service.edit_paper, "__defaults__", (None, None, None, engine))
+    monkeypatch.setattr(service.edit_paper, "__defaults__", (None, None, None, None, engine))
     c = TestClient(main.app)
     assert c.post("/paper/levels", json={"key": "crypto:SOL", "stop": 120, "take": 110}, headers=KEY).status_code == 400
     assert c.post("/paper/levels", json={"key": "crypto:SOL", "stop": 95, "take": 130}, headers=KEY).status_code == 200
     assert jobs[-1]["mode"] == "paperEdit" and (jobs[-1]["stop"], jobs[-1]["take"]) == (95, 130) and jobs[-1]["shadow"]
+    assert jobs[-1]["trailStop"] is None and jobs[-1]["trail"] is False
+    # A trailing stop may sit above the old target.
+    assert c.post("/paper/levels", json={"key": "crypto:SOL", "stop": 120, "take": 110, "trail": True}, headers=KEY).status_code == 200
+    assert jobs[-1]["trailStop"] is True
     assert c.post("/paper/sell", json={"key": "crypto:XYZ", "price": 5}, headers=KEY).status_code == 404
     r = c.post("/paper/sell", json={"key": "crypto:SOL", "price": 999}, headers=KEY)
     assert r.status_code == 200 and r.json()["paper"]["positions"] == []

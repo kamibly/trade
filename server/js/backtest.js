@@ -4,6 +4,7 @@
 // never saw, then trades the signals so the results are not fitted to the past.
 
 import { votesAt, scoreVotes, actionFor, contextAt, MIN_CANDLES, DEFAULT_THRESHOLDS } from './signals.js';
+import { trailStop } from './paper.js';
 
 export const FEE = 0.001; // 0.1% per side; callers pass the broker's rate for the symbol (fees.js)
 const MIN_VOTE = 0.3; // only count votes with a clear opinion
@@ -48,7 +49,9 @@ export function weightsFrom(stats) {
 // Long-only trading of the score between start and end. Enters at the close of
 // the candle whose score crosses into buy; exits on the stop, the target or a
 // sell score. If one candle touches both stop and target, the stop counts.
-export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLDS, stopAtr = 2, takeAtr = 3, fee = FEE, ctx } = {}) {
+// With `trail`, there is no target: the stop trails (see paper.js trailStop),
+// raised after each candle from its high, so a candle never sells on its own rise.
+export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLDS, stopAtr = 2, takeAtr = 3, fee = FEE, ctx, trail = false } = {}) {
   const c = S.candles;
   const trades = [];
   let equity = 1;
@@ -70,8 +73,12 @@ export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLD
   for (let i = start; i < end; i++) {
     if (pos && i > pos.i) {
       const bar = c[i];
-      if (bar.low <= pos.stop) close(i, Math.min(bar.open, pos.stop), 'stop');
-      else if (bar.high >= pos.take) close(i, Math.max(bar.open, pos.take), 'target');
+      if (bar.low <= pos.stop) close(i, Math.min(bar.open, pos.stop), trail && pos.stop > pos.entry ? 'trailing stop' : 'stop');
+      else if (!trail && bar.high >= pos.take) close(i, Math.max(bar.open, pos.take), 'target');
+      else if (trail) {
+        pos.high = Math.max(pos.high, bar.high);
+        pos.stop = trailStop({ entry: pos.entry, stop: pos.stop, risk: pos.risk, high: pos.high, floor: pos.entry * (1 + fee) / (1 - fee) });
+      }
     }
     const s = scores[i];
     if (!ok(s)) continue;
@@ -79,7 +86,7 @@ export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLD
     if (pos && action === 'sell') close(i, S.close[i], 'sell signal');
     else if (!pos && action === 'buy' && prev !== 'buy' && ok(S.atr[i])) {
       const entry = S.close[i];
-      pos = { i, entry, stop: entry - stopAtr * S.atr[i], take: entry + takeAtr * S.atr[i] };
+      pos = { i, entry, stop: entry - stopAtr * S.atr[i], take: entry + takeAtr * S.atr[i], risk: stopAtr * S.atr[i], high: entry };
     }
     prev = action;
     mark(S.close[i]);
@@ -159,5 +166,7 @@ export function backtest(S, { thresholds = DEFAULT_THRESHOLDS, horizon = 10, tra
     out.tuned = simulate(S, weightedScores, split, n, { ...opts, thresholds: out.rule });
     out.standard = simulate(S, weightedScores, split, n, { ...opts, thresholds: { ...DEFAULT_THRESHOLDS, mode: 'standard' } });
   }
+  // The same trades with a trailing stop in place of the fixed target.
+  out.trailed = simulate(S, weightedScores, split, n, { ...opts, thresholds: out.rule || thresholds, trail: true });
   return out;
 }

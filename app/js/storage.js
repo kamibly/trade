@@ -37,6 +37,7 @@ export const DEFAULT_SETTINGS = {
   tradeFilter: true, // the server's paper account skips and sizes ideas by the trade filter
   stopAtr: 2,
   takeAtr: 3,
+  paperExit: 'target', // 'target': sell paper trades at the target; 'trail': a trailing stop instead
   serverUrl: '',
   serverKey: '',
   serverPush: false,

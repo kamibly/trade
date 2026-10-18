@@ -219,6 +219,7 @@ def clean_profile(raw: dict) -> dict:
             "riskPct": _num(s.get("riskPct"), 1, 0.1, 5),
             "paperStart": round(_num(s.get("paperStart"), 10000, 100, 10_000_000)),
             "tradeFilter": bool(s.get("tradeFilter", True)),
+            "paperExit": "trail" if s.get("paperExit") == "trail" else "target",
             "setups": {k: bool((s.get("setups") or {}).get(k, True)) if isinstance(s.get("setups"), dict) else True for k in SETUP_IDS},
         },
         "updatedAt": int(_num(raw.get("updatedAt"), now_ms(), 0, 1e15)),
@@ -501,6 +502,7 @@ def paper_fields(state: dict, profile: dict) -> dict:
         "shadow": shadow,
         "useFilter": bool(profile["settings"].get("tradeFilter", True)) and trial.get("result") != "behind",
         "budgets": (state.get("paperBudgets") or {}).get("shares"),
+        "trail": profile["settings"].get("paperExit") == "trail",
     }
 
 
@@ -578,8 +580,10 @@ def follow_results(st: dict, now: Optional[int] = None) -> dict:
 
 
 def edit_paper(action: str, key: str, price: Optional[float] = None, stop: Optional[float] = None,
-               take: Optional[float] = None, engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
-    """You sell a paper position now ("sell") or move its stop and target ("levels").
+               take: Optional[float] = None, trail: Optional[bool] = None,
+               engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """You sell a paper position now ("sell") or move its stop and target ("levels"),
+    and turn its trailing stop on or off (`trail`, None leaves it).
     A sale uses the server's latest price for it, else the one the app showed.
     Returns the account, or None when there is no such position or the levels don't fit."""
     with _run_locks["watch"]:  # not while a check is changing the account
@@ -589,7 +593,8 @@ def edit_paper(action: str, key: str, price: Optional[float] = None, stop: Optio
             return None
         known = ((state.get("prices") or {}).get("values") or {}).get(key)
         job = {"mode": "paperEdit", "action": action, "key": key,
-               "price": known if known else price, "stop": stop, "take": take, **paper_fields(state, profile)}
+               "price": known if known else price, "stop": stop, "take": take, "trailStop": trail,
+               **paper_fields(state, profile)}
         result = engine(job, 60)
         if not result.get("ok"):
             return None

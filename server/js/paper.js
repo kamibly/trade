@@ -26,6 +26,19 @@ const DAY_MS = 86400_000;
 const ok = Number.isFinite;
 const round2 = v => Math.round(v * 100) / 100;
 
+// Trailing stop: once the price is up half the trade's risk (1 ATR with a
+// 2 ATR stop), the stop rises to break even after fees (`floor`), then
+// follows the highest price at the trade's risk below it. No fixed target.
+// risk = entry − the first stop. Returns the new stop (never below `stop`).
+export function trailStop({ entry, stop, risk, high, floor }) {
+  if (!(risk > 0) || !(high >= entry + risk / 2)) return stop;
+  return Math.max(stop, floor, high - risk);
+}
+
+// Whether a trade trails: market scan ideas and watchlist Buys can;
+// opportunities keep their own plan.
+const canTrail = x => !x.setup || x.setup === 'signal' || x.setup === 'scan';
+
 export function newAccount(start = DEFAULT_START, now = Date.now()) {
   return { start, cash: start, createdAt: now, positions: [], trades: [], history: [{ t: now, equity: start }] };
 }
@@ -79,28 +92,29 @@ function room(acc, x, budgets) {
 // (switched off, not trained, or an opportunity, which keeps its own gate).
 const filterOf = (o, useFilter) => (useFilter && o.filter && Number.isFinite(o.filter.size) ? o.filter : null);
 
-function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter }) {
+function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter, trail }) {
   const qty = positionSize({ equity: equity(acc, prices), cash: acc.cash, entry: s.entry, stop: s.stop, riskPct, cap, type: s.type });
   const cost = qty * s.entry + feeOf(s.type, qty, s.entry);
   // Under $10 the fees outweigh the trade.
   if (!(qty > 0) || cost < 10 || cost > acc.cash + 0.005) return null;
   acc.cash = round2(acc.cash - cost);
-  acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}), ...(filter ? { filter } : {}) });
+  acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}), ...(filter ? { filter } : {}), ...(trail ? { trail: true, risk: s.entry - s.stop, high: s.entry } : {}) });
   return { kind: 'open', symbol: s.symbol, key, price: s.entry, qty, cost: round2(cost), setup };
 }
 
 // One step after a scan. `signals` maps key → { symbol, type, action, entry, stop, take },
 // `alerts` maps key → 'buy' | 'sell' for actions that just changed this scan.
 // Returns the events (paper buys and sells) and updates `acc` in place.
-export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true }) {
+export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false }) {
   const events = [];
   const prices = Object.fromEntries(Object.entries(signals).map(([k, s]) => [k, s.entry]));
   // Exits first so the freed cash can fund new buys.
   for (const p of [...acc.positions]) {
     const s = signals[p.key];
     if (!s || !ok(s.entry)) continue;
-    if (s.entry <= p.stop) events.push(closePosition(acc, p, s.entry, 'stop', now));
-    else if (s.entry >= p.take) events.push(closePosition(acc, p, s.entry, 'target', now));
+    if (p.trail) follow(p, s.entry);
+    if (s.entry <= p.stop) events.push(closePosition(acc, p, s.entry, p.trail && p.stop > p.entry ? 'trailing stop' : 'stop', now));
+    else if (!p.trail && s.entry >= p.take) events.push(closePosition(acc, p, s.entry, 'target', now));
     // Opportunity trades keep to their own plan: stop, target or time.
     else if (p.until && now >= p.until) events.push(closePosition(acc, p, s.entry, 'time', now));
     else if (s.action === 'sell' && setupOf(p) === 'signal') events.push(closePosition(acc, p, s.entry, 'sell signal', now));
@@ -122,7 +136,7 @@ export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(),
     const start = acc.signalStarts[key];
     const id = `signal:${key}:${start.at}`;
     const idea = { ...sig, id, key, setup: 'signal', ranAway: ok(sig.atr) && sig.entry > start.entry + sig.atr };
-    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets, useFilter });
+    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets, useFilter, trail });
     if (ev) events.push(ev);
   }
   pruneTaken(acc);
@@ -147,7 +161,7 @@ function skip(acc, key, why) {
 }
 
 // Buys one idea if its budget, cash and price allow; records why not otherwise.
-function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true }) {
+function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trail = false }) {
   acc.skips ||= {};
   if (acc.positions.some(p => p.key === o.key)) { delete acc.skips[o.key]; return null; }
   // An idea counts as taken only if it was really traded: older versions
@@ -162,7 +176,7 @@ function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true }) {
   if (!slot) return skip(acc, o.key, 'full'), null;
   // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
   const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
-  const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: slot.cap * (filter ? filter.size : 1), filter });
+  const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: slot.cap * (filter ? filter.size : 1), filter, trail: trail && canTrail(o) });
   // Without the cash to buy it, the idea is tried again next scan.
   if (!ev) return skip(acc, o.key, 'cash'), null;
   delete acc.skips[o.key];
@@ -181,13 +195,13 @@ function pruneTaken(acc) {
 // once; it is sold at its stop, its target or after its holding period
 // (trading days for stocks, calendar days for crypto).
 // opportunities: [{ id, setup, key, symbol, type, entry, stop, take, hold, ev }]
-export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true } = {}) {
+export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false } = {}) {
   const events = [];
   acc.taken ||= [];
   const prices = {};
   const list = [...opportunities].sort((a, b) => (b.ev || 0) - (a.ev || 0));
   for (const o of list) {
-    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter });
+    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter, trail });
     if (ev) events.push(ev);
   }
   pruneTaken(acc);
@@ -206,17 +220,35 @@ export function sellNow(acc, key, price, now = Date.now()) {
 }
 
 // The stop must be below the target; either may be left as it is (undefined).
-export function setLevels(acc, key, { stop, take } = {}) {
+// `trail` turns the trailing stop on or off for this trade (its risk is the
+// distance from the entry to the stop it was bought with).
+export function setLevels(acc, key, { stop, take, trail } = {}) {
   const p = acc.positions.find(x => x.key === key);
   if (!p) return null;
   const s = stop === undefined ? p.stop : stop;
   const t = take === undefined ? p.take : take;
-  if (!(s > 0) || !(t > s)) return null;
+  const trailing = trail === undefined ? !!p.trail : trail;
+  // A trailing stop can rise past the target, which it no longer uses.
+  if (!(s > 0) || (!trailing && !(t > s))) return null;
   p.stop = s;
   p.take = t;
   p.edited = true;
-  return { kind: 'levels', symbol: p.symbol, key, stop: s, take: t };
+  if (trail === true && !p.trail) {
+    const risk = p.risk || (p.entry > s ? p.entry - s : (p.take - p.entry) * (2 / 3));
+    Object.assign(p, { trail: true, risk, high: Math.max(p.high || 0, p.entry) });
+  }
+  else if (trail === false) p.trail = false;
+  return { kind: 'levels', symbol: p.symbol, key, stop: s, take: t, trail: !!p.trail };
 }
+
+// Raises a trailing position's stop as the price climbs.
+function follow(p, price) {
+  p.high = Math.max(p.high || p.entry, price);
+  p.stop = trailStop({ entry: p.entry, stop: p.stop, risk: p.risk || p.entry - p.stop, high: p.high, floor: breakEven(p) });
+}
+
+// The price at which selling gets back what the trade cost, fees included.
+export const breakEven = p => priceForGain(p, 0.01);
 
 // The lowest price at which selling the position keeps `gain` dollars after
 // the buy and sell fees, rounded up to a fine enough price step.

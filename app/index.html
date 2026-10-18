@@ -201,6 +201,14 @@
           <label class="field"><span>Paper account size, USD</span><input id="paper-start" type="number" inputmode="numeric" min="100" max="10000000" step="100"></label>
         </div>
         <p class="muted small">ATR is the average size of one candle's move, so levels adapt to how jumpy each symbol is. A new account size applies when you start the paper account over.</p>
+        <label class="field">
+          <span>Paper trades sell at</span>
+          <select id="paper-exit">
+            <option value="target">The target</option>
+            <option value="trail">A trailing stop (no target)</option>
+          </select>
+        </label>
+        <p class="muted small">With a trailing stop, once a trade is up 1 ATR its stop moves to break even after fees, then follows the highest price at the stop-loss distance below it. Each backtest shows both ways side by side. It applies to new paper trades from scans and watchlist Buys; opportunities keep their own plan.</p>
         <label class="switch">
           <input id="filter-toggle" type="checkbox">
           <span>Trade filter for paper trading</span>

@@ -125,7 +125,8 @@ the learned models expect.
   candles, after fees (0.1% for stocks, 0.4% for crypto). A method right 50% of the time keeps weight 1, 60%
   doubles it, 40% or worse drops it to 0, and methods with few votes stay near 1.
   The newer 40% then trades the weighted score (long only, stop-loss, target or
-  Sell score to exit) and is compared with equal weights and buy-and-hold.
+  Sell score to exit) and is compared with equal weights and buy-and-hold,
+  and with the same trades using a trailing stop instead of the target.
   The scanner re-learns weights once a day per symbol.
 - **My holdings.** What you own, with a stop-loss and target (from the Risk
   settings in ATRs if left empty). Alerts fire once when a stop or target is
@@ -139,6 +140,12 @@ the learned models expect.
   only while the app is open. Each open paper trade has buttons to move its
   stop-loss and target or sell it now; the account without the trade filter
   does the same, and an idea you sold is not bought again.
+  In Settings > Risk, paper trades can sell on a **trailing stop** instead of
+  the target: once a trade is up half its stop-loss distance (1 ATR with a 2
+  ATR stop) the stop moves to break even after fees, then follows the highest
+  price at the stop-loss distance below it. It applies to new Buy signal and
+  market scan trades (opportunities keep their own plan), and each open trade
+  can switch it on or off.
 
 - **By setup.** The server's paper account also buys the market scan's new buy
   ideas (sold at the stop, the target or when a later scan says Sell). Paper
