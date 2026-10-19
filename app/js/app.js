@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.15.5 (latest trades tab)';
+export const APP_VERSION = '0.15.6 (paper tag on opportunities)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -917,7 +917,7 @@ function renderOpportunities() {
     el('p', { class: 'muted small', text: `Ranked by the average result of past cases after fees, from the scan ${timeAgo(m.at)}.` }),
     muted.length ? el('p', { class: 'small', text: `Muted after your ratings: ${muted.map(setupName).join(', ')}. They still show here; turn their alerts back on in Settings.` }) : null,
     warnings.length ? el('ul', { class: 'list' }, ...warnings.map(w => el('li', { class: 'signal' }, el('div', { class: 'sym', text: w.title }), el('div', { class: 'sub', text: w.body })))) : null,
-    ...(opps.length ? shortList(opps, opportunityCard)
+    ...(opps.length ? shortList(opps, o => oppPaperNote(opportunityCard(o), o))
       : [el('p', { class: 'muted small', text: 'No setup fired on the newest candles. The report below shows how each one did in the past.' })]),
     setupReport(m),
   ].filter(Boolean));
@@ -958,6 +958,19 @@ function scanLine(m) {
   const crypto = m.cryptoAt ? `${m.cryptoScanned} coins ${timeAgo(m.cryptoAt)}` : 'crypto not yet';
   const stocks = m.stocksAt ? `${m.stocksScanned} S&P 500 stocks ${timeAgo(m.stocksAt)}` : 'stocks not yet';
   return `Daily chart, scanned by your server: ${crypto} (every 15 minutes, day and night), ${stocks}.`;
+}
+
+// Opportunities the server's paper account bought get a PAPER tag too; the
+// others say why it didn't buy them.
+function oppPaperNote(li, o) {
+  if (!serverPaperOn()) return li;
+  const acc = state.serverPaper.paper;
+  if ((acc.positions || []).some(p => p.id === o.id || (p.key === o.key && p.setup === o.setup))) {
+    li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
+  } else if (acc.skips && acc.skips[o.key]) {
+    (li.querySelector('.details') || li).append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[o.key]}.` }));
+  }
+  return li;
 }
 
 // Buy ideas the server's paper account holds get a PAPER tag; the others say
