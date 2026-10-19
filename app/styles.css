@@ -360,3 +360,7 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .paper-about { margin-top: 16px; }
 .badge.type-stock { color: #64b5f6; border-color: currentColor; }
 .badge.type-crypto { color: #ffb74d; border-color: currentColor; }
+.equity-in { margin-top: 10px; }
+.equity-in p { margin: 4px 0 0; }
+.pnl-row { cursor: pointer; }
+.list li.fold { scroll-margin-top: 64px; }

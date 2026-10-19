@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.15.2 (stock and crypto tags)';
+export const APP_VERSION = '0.15.3 (paper charts up front)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -686,7 +686,7 @@ function backtestCard(bt) {
 // Cards you opened stay open when the list is drawn again.
 function foldCard(cls, id, top, details, openIt) {
   const more = el('div', { class: 'details', hidden: !state.openCards.has(id) }, ...details.filter(Boolean));
-  const li = el('li', { class: `${cls} fold${more.hidden ? '' : ' open'}`, onclick: () => {
+  const li = el('li', { class: `${cls} fold${more.hidden ? '' : ' open'}`, 'data-card': id, onclick: () => {
     more.hidden = !more.hidden;
     li.classList.toggle('open', !more.hidden);
     if (more.hidden) state.openCards.delete(id);
@@ -1508,6 +1508,7 @@ function renderPaper({ force = false } = {}) {
       stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
       stat('Invested now', formatMoney(invested)),
       stat('Cash', formatMoney(acc.cash))),
+    equityChart(acc, sum.equity, onServer ? state.serverPaper.shadow : null, { bare: true }),
     el('details', { class: 'report', open: sumMore, ontoggle: e => { if (e.currentTarget.open) state.openCards.add('paper:more'); else state.openCards.delete('paper:more'); } },
       el('summary', { text: 'More' }),
       el('dl', { class: 'stats' },
@@ -1517,14 +1518,13 @@ function renderPaper({ force = false } = {}) {
 
   // Open, Closed and Results: one at a time, the last one remembered.
   const tab = ['open', 'closed', 'results'].includes(state.settings.paperTab) ? state.settings.paperTab : 'open';
-  const tabs = el('div', { class: 'chips tabs', role: 'tablist' }, ...[['open', `Open (${acc.positions.length})`], ['closed', `Closed (${acc.trades.length})`], ['results', 'Results']]
+  const tabs = el('div', { class: 'chips tabs', role: 'tablist' }, ...[['open', `Open (${acc.positions.length})`], ['closed', `Closed (${acc.trades.length})`], ['results', 'By setup']]
     .map(([id, label]) => el('button', { type: 'button', role: 'tab', class: id === tab ? 'on' : '', 'aria-selected': id === tab ? 'true' : 'false', text: label,
       onclick: () => { state.settings = store.saveSettings({ paperTab: id }); renderPaper({ force: true }); } })));
 
   const body = tab === 'open' ? openTab() : tab === 'closed' ? closedTab() : [
-    equityChart(acc, sum.equity, onServer ? state.serverPaper.shadow : null),
-    onServer ? filterTrialCard(state.serverPaper) : null,
     bySetupTable(acc, onServer ? state.serverPaper.budgets : null),
+    onServer ? filterTrialCard(state.serverPaper) : null,
     events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
     events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 10).map(ev => el('li', { class: 'holding' },
       el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` })))) : null,
@@ -1545,7 +1545,7 @@ function renderPaper({ force = false } = {}) {
       acc.positions.length ? el('div', { class: 'paper-tools' },
         el('div', { class: 'chips' }, ...sources.map(([id, label]) => el('button', { type: 'button', class: id === source ? 'on' : '', text: label, onclick: () => { state.paperSource = id; renderPaper({ force: true }); } }))),
         select) : null,
-      acc.positions.length > 1 ? el('details', { class: 'report' }, el('summary', { text: 'Gain/loss chart' }), pnlBars(priced)) : null,
+      pnlBars(priced),
       rows.length ? el('ul', { class: 'list' }, ...rows.map(openCard))
         : el('p', { class: 'muted small', text: acc.positions.length ? 'No open trades from this source.' : 'No open paper trades. The next new Buy signal opens one.' }),
     ];
@@ -1688,7 +1688,8 @@ function svg(tag, attrs = {}, ...children) {
 
 // The account's value over time against what it started with: green above, red below.
 // A grey line shows the same account without the trade filter, from when it began.
-function equityChart(acc, now, shadow) {
+// `bare`: just the chart and its note, to sit inside another card.
+function equityChart(acc, now, shadow, { bare = false } = {}) {
   const pts = [...acc.history.map(h => ({ t: h.t, v: h.equity })), { t: Date.now(), v: now }]
     .filter(p => Number.isFinite(p.v) && p.t >= acc.createdAt - 60_000);
   if (pts.length < 2) return null;
@@ -1708,8 +1709,8 @@ function equityChart(acc, now, shadow) {
   const id = `eq${Math.random().toString(36).slice(2, 8)}`;
   const day = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
   const change = now - acc.start;
-  return el('div', { class: 'card' },
-    el('div', { class: 'signal-top' },
+  return el('div', { class: bare ? 'equity-in' : 'card' },
+    bare ? null : el('div', { class: 'signal-top' },
       el('h3', { text: 'Account value' }),
       el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
     svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
@@ -1764,11 +1765,22 @@ function pnlBars(rows) {
   const max = Math.max(...sorted.map(r => Math.abs(r.pnl)), 0.01);
   return el('div', { class: 'card pnl-bars' },
     el('h3', { text: 'Gain or loss on each open trade' }),
-    ...sorted.map(r => el('div', { class: 'pnl-row' },
+    el('p', { class: 'muted small', text: 'Tap a bar to open that trade.' }),
+    ...sorted.map(r => el('div', { class: 'pnl-row', role: 'button', tabindex: '0', onclick: () => showPaperTrade(r.p.key) },
       el('span', { class: 'pnl-sym', text: r.p.symbol }),
       el('span', { class: 'pnl-track' },
         el('span', { class: `pnl-fill ${r.pnl >= 0 ? 'up' : 'down'}`, style: `width:${(Math.abs(r.pnl) / max * 50).toFixed(1)}%` })),
       el('span', { class: `pnl-val ${upDown(r.pnl)}`, text: `${signed(r.pnl)} (${fmtPct(r.ret)})` }))));
+}
+
+// Opens one open trade's card and scrolls to it.
+function showPaperTrade(key) {
+  const id = `paper:${key}`;
+  state.openCards.add(id);
+  state.paperSource = 'all';
+  renderPaper({ force: true });
+  const card = [...document.querySelectorAll('#paper-body [data-card]')].find(c => c.dataset.card === id);
+  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // Trades, win rate, return and worst drop for each way the account trades.

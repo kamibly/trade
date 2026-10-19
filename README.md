@@ -140,10 +140,11 @@ the learned models expect.
   only while the app is open. Each open paper trade has buttons to move its
   stop-loss and target or sell it now; the account without the trade filter
   does the same, and an idea you sold is not bought again.
-  The Paper page shows a short summary, then Open, Closed and Results tabs:
-  one-line trades that open on tap (open trades sort by loss, gain or newest
-  and filter by source; closed trades filter by won or lost), and the charts
-  and tables under Results.
+  The Paper page shows a short summary with the account value chart, then
+  Open, Closed and By setup tabs: one-line trades that open on tap (open trades
+  start with a gain/loss bar for each, sort by loss, gain or newest and filter
+  by source; closed trades filter by won or lost), and the setup table, filter
+  test and trades log under By setup.
   In Settings > Risk, paper trades can sell on a **trailing stop** instead of
   the target: once a trade is up half its stop-loss distance (1 ATR with a 2
   ATR stop) the stop moves to break even after fees, then follows the highest
