@@ -8,18 +8,21 @@ export const DEFAULT_START = 10_000;
 // Each source of trades has its own share of the account and its own
 // positions, so none can crowd out the others and the By setup table compares
 // them fairly. Without a server the phone trades only its alerts.
+// Each source spends up to its share of the account. One trade gets at most a
+// fifth of the share (`slots`), and a source holds at most `max` trades, so a
+// share left over by trades the risk limit made smaller still gets used.
 export const BUDGETS = {
-  opportunities: { share: 0.4, max: 5, name: 'Opportunities' },
-  stockIdeas: { share: 0.2, max: 5, name: 'Stock buy ideas' },
-  cryptoIdeas: { share: 0.2, max: 5, name: 'Crypto buy ideas' },
-  alerts: { share: 0.2, max: 5, name: 'Watchlist alerts' },
+  opportunities: { share: 0.4, slots: 5, max: 10, name: 'Opportunities' },
+  stockIdeas: { share: 0.2, slots: 5, max: 10, name: 'Stock buy ideas' },
+  cryptoIdeas: { share: 0.2, slots: 5, max: 10, name: 'Crypto buy ideas' },
+  alerts: { share: 0.2, slots: 5, max: 10, name: 'Watchlist alerts' },
 };
 // The budgets with the server's current shares (they follow each source's results).
 export function budgetsWith(shares) {
   if (!shares) return BUDGETS;
   return Object.fromEntries(Object.entries(BUDGETS).map(([k, b]) => [k, { ...b, share: Number.isFinite(shares[k]) ? shares[k] : b.share }]));
 }
-export const PHONE_BUDGETS = { alerts: { share: 1, max: 10, name: 'Watchlist alerts' } };
+export const PHONE_BUDGETS = { alerts: { share: 1, slots: 10, max: 10, name: 'Watchlist alerts' } };
 export const MAX_POSITIONS = Object.values(BUDGETS).reduce((n, b) => n + b.max, 0);
 const DAY_MS = 86400_000;
 
@@ -80,12 +83,16 @@ export function bucketOf(x) {
   return 'opportunities';
 }
 
-// Room for one more position in this idea's budget: { cap } or null when full.
-function room(acc, x, budgets) {
+// Room for one more position in this idea's budget, as shares of the account:
+// { cap: one trade's slot, left: what the source has not spent }, or null when
+// it holds `max` trades or less than $10 is left. Spent is what its open trades cost.
+function room(acc, x, budgets, eq) {
   const b = budgets[bucketOf(x)];
-  if (!b) return null;
-  const used = acc.positions.filter(p => bucketOf(p) === bucketOf(x)).length;
-  return used < b.max ? { cap: Math.min(0.2, b.share / b.max) } : null;
+  if (!b || !(eq > 0)) return null;
+  const mine = acc.positions.filter(p => bucketOf(p) === bucketOf(x));
+  const left = b.share - mine.reduce((t, p) => t + (p.cost || p.qty * p.entry), 0) / eq;
+  if (mine.length >= b.max || left * eq < 10) return null;
+  return { cap: Math.min(0.2, b.share / (b.slots || b.max)), left };
 }
 
 // The trade filter's say on an idea (see filter.js): null when it has none
@@ -172,11 +179,11 @@ function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trai
   if (!(o.entry > 0) || !(o.stop < o.entry)) return skip(acc, o.key, 'levels'), null;
   const filter = filterOf(o, useFilter);
   if (filter && !(filter.size > 0)) return skip(acc, o.key, 'filter'), null;
-  const slot = room(acc, o, budgets);
+  const slot = room(acc, o, budgets, equity(acc, prices));
   if (!slot) return skip(acc, o.key, 'full'), null;
   // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
   const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
-  const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: slot.cap * (filter ? filter.size : 1), filter, trail: trail && canTrail(o) });
+  const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: Math.min(slot.cap * (filter ? filter.size : 1), slot.left), filter, trail: trail && canTrail(o) });
   // Without the cash to buy it, the idea is tried again next scan.
   if (!ev) return skip(acc, o.key, 'cash'), null;
   delete acc.skips[o.key];

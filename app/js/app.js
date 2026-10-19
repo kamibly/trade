@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.15.6 (paper tag on opportunities)';
+export const APP_VERSION = '0.16.0 (budgets by money)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1814,7 +1814,7 @@ function bySetupTable(acc, budgets) {
         el('td', { class: upDown(r.ret), text: r.trades ? fmtPct(r.ret) : '–' }),
         el('td', { text: r.trades ? fmtPct(-r.maxDrawdown) : '–' })))))),
     el('p', { class: 'muted small', text: 'Return is on the starting amount. Opportunity trades sell at their stop, their target or the end of their holding period.' }),
-    budgets && budgets.shares ? el('p', { class: 'muted small', text: `Share of the account each source can use: ${Object.entries(paper.BUDGETS).map(([k, b]) => `${b.name} ${Math.round((budgets.shares[k] ?? b.share) * 100)}%`).join(', ')}. Once two sources have 50 closed trades, the one with the best average trade takes up to 5 points a week from the worst, within 10% to 50%.` }) : null);
+    budgets && budgets.shares ? el('p', { class: 'muted small', text: `Share of the account each source can use (one trade gets up to a fifth of it, up to 10 trades): ${Object.entries(paper.BUDGETS).map(([k, b]) => `${b.name} ${Math.round((budgets.shares[k] ?? b.share) * 100)}%`).join(', ')}. Once two sources have 50 closed trades, the one with the best average trade takes up to 5 points a week from the worst, within 10% to 50%.` }) : null);
 }
 
 async function resetPaper() {

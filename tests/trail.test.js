@@ -57,3 +57,20 @@ test('you can turn trailing on for a trade, and its stop may then pass the targe
   assert.ok(paper.setLevels(acc, 'crypto:A', { stop: 120, take: 115 }));
   assert.equal(paper.setLevels(acc, 'crypto:A', { stop: 95, take: 115, trail: false }).trail, false);
 });
+
+test('a source keeps buying until its share of the money is used, up to 10 trades', () => {
+  // $1,000 account: a 25% stop limits each opportunity to $40 (a $10 loss), under its $80 slot.
+  const acc = paper.newAccount(1000, 0);
+  const opp = k => ({ id: `insider:crypto:C${k}:1`, setup: 'insider', key: `crypto:C${k}`, symbol: `C${k}`, type: 'crypto', entry: 100, stop: 75, take: 150, hold: 10, ev: 0.1 - k / 1000 });
+  paper.openSetups(acc, Array.from({ length: 12 }, (_, k) => opp(k)), { now: 1 });
+  assert.equal(acc.positions.length, 10, 'stops at 10 trades');
+  assert.ok(acc.positions.every(p => p.cost <= 40.5));
+  // Without the risk limit, the trades fill the 40% share and stop there.
+  const big = paper.newAccount(1000, 0);
+  const wide = k => ({ ...opp(k), stop: 99 });
+  paper.openSetups(big, Array.from({ length: 12 }, (_, k) => wide(k)), { now: 1 });
+  const spent = big.positions.reduce((t, p) => t + p.cost, 0);
+  assert.equal(big.positions.length, 5);
+  assert.ok(spent <= 400.01 && spent > 390, `spent ${spent}`);
+  assert.match(big.skips['crypto:C11'], /full/);
+});

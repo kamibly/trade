@@ -157,8 +157,10 @@ the learned models expect.
   trades are tagged with what opened them (a Buy signal, a market scan idea or
   one of the opportunity setups below), and the Paper tab shows trades, win
   rate, return and worst drop for each. Each source has its own budget: opportunities 40% of the account,
-  stock buy ideas, crypto buy ideas and watchlist alerts 20% each, up to 5
-  positions each in equal slots. Once two sources have 50 closed trades, the
+  stock buy ideas, crypto buy ideas and watchlist alerts 20% each. One trade
+  gets at most a fifth of its source's share (8% or 4%, less when the 1% risk
+  limit makes it smaller), and a source keeps buying until its share is spent
+  or it holds 10 trades. Once two sources have 50 closed trades, the
   one with the best average trade takes up to 5 points a week from the worst,
   within 10% to 50%.
 - **Trade filter.** The weekly training also builds a LightGBM filter from the
