@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.15.4 (filtered gain/loss bars)';
+export const APP_VERSION = '0.15.5 (latest trades tab)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1517,17 +1517,19 @@ function renderPaper({ force = false } = {}) {
         stat('Worst drop', fmtPct(-sum.maxDrawdown)))));
 
   // Open, Closed and Results: one at a time, the last one remembered.
-  const tab = ['open', 'closed', 'results'].includes(state.settings.paperTab) ? state.settings.paperTab : 'open';
-  const tabs = el('div', { class: 'chips tabs', role: 'tablist' }, ...[['open', `Open (${acc.positions.length})`], ['closed', `Closed (${acc.trades.length})`], ['results', 'By setup']]
+  const tab = ['open', 'closed', 'results', 'latest'].includes(state.settings.paperTab) ? state.settings.paperTab : 'open';
+  const tabs = el('div', { class: 'chips tabs', role: 'tablist' }, ...[['open', `Open (${acc.positions.length})`], ['closed', `Closed (${acc.trades.length})`], ['results', 'By setup'], ['latest', 'Latest']]
     .map(([id, label]) => el('button', { type: 'button', role: 'tab', class: id === tab ? 'on' : '', 'aria-selected': id === tab ? 'true' : 'false', text: label,
       onclick: () => { state.settings = store.saveSettings({ paperTab: id }); renderPaper({ force: true }); } })));
 
-  const body = tab === 'open' ? openTab() : tab === 'closed' ? closedTab() : [
+  const body = tab === 'open' ? openTab() : tab === 'closed' ? closedTab() : tab === 'latest' ? [
+    // Every buy and sell, newest first.
+    events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 50).map(ev => el('li', { class: 'holding' },
+      el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` }))))
+      : el('p', { class: 'muted small', text: onServer ? 'No paper buys or sells yet.' : 'The latest buys and sells show here when your server runs the paper account.' }),
+  ] : [
     bySetupTable(acc, onServer ? state.serverPaper.budgets : null),
     onServer ? filterTrialCard(state.serverPaper) : null,
-    events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
-    events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 10).map(ev => el('li', { class: 'holding' },
-      el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` })))) : null,
   ];
   // replaceChildren() writes a null child as the text "null", so drop the empty parts.
   $('paper-body').replaceChildren(...[summary, tabs, ...body].filter(Boolean));
