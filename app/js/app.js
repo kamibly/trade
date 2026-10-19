@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.15.1 (paper prices after hours)';
+export const APP_VERSION = '0.15.2 (stock and crypto tags)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -701,7 +701,7 @@ function foldCard(cls, id, top, details, openIt) {
 function signalCard(sig) {
   const item = findItem(sig.key);
   return foldCard('signal', `sig:${sig.key}`, [
-    el('div', { class: 'sym' }, sig.symbol, el('span', { class: 'badge', text: sig.type === 'stock' ? 'Stock' : 'Crypto' }),
+    el('div', { class: 'sym' }, sig.symbol, typeBadge(sig.type),
       el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
     el('div', { class: `score ${scoreClass(sig.score, sig.rule)}`, text: fmtScore(sig.score) }),
   ], [
@@ -788,6 +788,8 @@ function renderSignals() {
 // ---- Opportunities (from the server's market scan) -------------------------------
 
 const setupName = id => (id === 'signal' ? 'Buy and Sell signals' : id === 'scan' ? 'Market scan ideas' : SETUPS[id] ? SETUPS[id].name : id);
+// Stock or crypto, in its own colour so the two are told apart at a glance.
+const typeBadge = type => el('span', { class: `badge type-${type === 'crypto' ? 'crypto' : 'stock'}`, text: type === 'crypto' ? 'Crypto' : 'Stock' });
 // A short tag for where a paper trade came from.
 const sourceTag = id => (id === 'signal' ? 'Signal' : id === 'scan' ? 'Scan' : SETUPS[id] ? SETUPS[id].name : id);
 const holdText = o => `${o.hold} ${o.type === 'stock' ? 'trading days' : 'days'}`;
@@ -835,7 +837,7 @@ function opportunityCard(o) {
   const symbolRec = o.symbolRecord && o.symbolRecord.n >= 3
     ? `On ${o.symbol}: ${o.symbolRecord.wins} of ${o.symbolRecord.n} past cases made money, average ${fmtPct(o.symbolRecord.avg)}.` : '';
   return foldCard('signal opp', `opp:${o.id}`, [
-    el('div', { class: 'sym' }, o.symbol, el('span', { class: 'badge', text: o.type === 'stock' ? 'Stock' : 'Crypto' }),
+    el('div', { class: 'sym' }, o.symbol, typeBadge(o.type),
       el('span', { class: o.proven ? 'badge proven' : 'badge', text: o.proven ? 'Proven' : 'Not proven' }),
       el('span', { class: 'opp-setup', text: setupName(o.setup) })),
     el('div', { class: `score ${o.ev > 0 ? 'up' : 'down'}`, text: fmtPct(o.ev) }),
@@ -1551,7 +1553,7 @@ function renderPaper({ force = false } = {}) {
 
   function openCard({ p, price, value, pnl, ret }) {
     return foldCard('holding paper-card', `paper:${p.key}`, [
-      el('div', { class: 'sym' }, p.symbol, el('span', { class: 'badge', text: sourceTag(p.setup || 'signal') }),
+      el('div', { class: 'sym' }, p.symbol, typeBadge(p.type), el('span', { class: 'badge', text: sourceTag(p.setup || 'signal') }),
         p.trail ? el('span', { class: 'badge', text: 'Trailing' }) : null),
       el('div', { class: `paper-gain ${upDown(pnl)}`, text: Number.isFinite(pnl) ? `${signed(pnl)} · ${fmtPct(ret)}` : '–' }),
     ], [
@@ -1576,7 +1578,7 @@ function renderPaper({ force = false } = {}) {
     const shown = state.closedShown || 10;
     const why = t => (t.reason === 'time' ? 'holding period over' : t.reason);
     const card = t => foldCard('holding', `closed:${t.key}:${t.closedAt}`, [
-      el('div', { class: 'sym' }, t.symbol, el('span', { class: 'closed-why', text: why(t) })),
+      el('div', { class: 'sym' }, t.symbol, typeBadge(t.type), el('span', { class: 'closed-why', text: why(t) })),
       el('div', { class: `paper-gain ${upDown(t.pnl)}`, text: `${signed(t.pnl)} · ${fmtPct(t.ret)}` }),
     ], [
       el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),

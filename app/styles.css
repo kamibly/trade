@@ -358,3 +358,5 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .paper-gain.bad { color: var(--down); }
 .closed-why { font-size: 12px; color: var(--muted); font-weight: 400; }
 .paper-about { margin-top: 16px; }
+.badge.type-stock { color: #64b5f6; border-color: currentColor; }
+.badge.type-crypto { color: #ffb74d; border-color: currentColor; }
