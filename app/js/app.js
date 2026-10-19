@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.14.0 (tidier signals)';
+export const APP_VERSION = '0.15.0 (tidier paper trading)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -39,6 +39,10 @@ const state = {
   view: 'signals',
   openCards: new Set(), // signal cards opened to show their details
   marketSide: 'buy',
+  paperSort: 'loss',
+  paperSource: 'all',
+  closedFilter: 'all',
+  closedShown: 10,
   filter: 'all',
   editing: false,
   watchlist: store.getWatchlist(),
@@ -784,6 +788,8 @@ function renderSignals() {
 // ---- Opportunities (from the server's market scan) -------------------------------
 
 const setupName = id => (id === 'signal' ? 'Buy and Sell signals' : id === 'scan' ? 'Market scan ideas' : SETUPS[id] ? SETUPS[id].name : id);
+// A short tag for where a paper trade came from.
+const sourceTag = id => (id === 'signal' ? 'Signal' : id === 'scan' ? 'Scan' : SETUPS[id] ? SETUPS[id].name : id);
 const holdText = o => `${o.hold} ${o.type === 'stock' ? 'trading days' : 'days'}`;
 
 async function rateSetup(setups, useful, id) {
@@ -1487,60 +1493,100 @@ function renderPaper({ force = false } = {}) {
   const priced = open.filter(o => Number.isFinite(o.value));
   const openCost = priced.reduce((t, o) => t + o.p.cost, 0);
   const openPnl = priced.length ? priced.reduce((t, o) => t + o.pnl, 0) : NaN;
-  // replaceChildren() writes a null child as the text "null", so drop the empty sections.
-  $('paper-body').replaceChildren(...[
-    el('div', { class: 'card' },
-      el('div', { class: 'muted small', text: `Paper account, started ${fmtTime(acc.createdAt)} with ${formatMoney(acc.start)}` }),
-      el('p', { class: 'muted small', text: onServer
-        ? `Runs on your server around the clock: it checks for new signals right after every candle closes and checks stop-losses and targets every minute (stocks while the US market is open). Updated ${timeAgo(state.serverPaper.fetchedAt)}.`
-        : serverOn() ? 'Connecting to the paper account on your server…' : 'Trades only while the app is open. Connect your server in Settings to trade around the clock.' }),
-      el('div', { class: 'big', text: formatMoney(sum.equity) }),
+  const sumMore = state.openCards.has('paper:more');
+  const summary = el('div', { class: 'card' },
+    el('div', { class: 'muted small', text: `Paper account, started ${fmtTime(acc.createdAt)} with ${formatMoney(acc.start)}${onServer ? ` · on your server, updated ${timeAgo(state.serverPaper.fetchedAt)}` : ''}` }),
+    el('div', { class: 'big', text: formatMoney(sum.equity) }),
+    el('dl', { class: 'stats' },
+      stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
+      stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
+      stat('Invested now', formatMoney(invested)),
+      stat('Cash', formatMoney(acc.cash))),
+    el('details', { class: 'report', open: sumMore, ontoggle: e => { if (e.currentTarget.open) state.openCards.add('paper:more'); else state.openCards.delete('paper:more'); } },
+      el('summary', { text: 'More' }),
       el('dl', { class: 'stats' },
-        stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
-        stat('Invested now', formatMoney(invested)),
-        stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
-        stat('Cash', formatMoney(acc.cash)),
         stat('Closed trades', String(sum.trades)),
         stat('Won', sum.trades ? `${Math.round(sum.winRate * 100)}%` : '–'),
-        stat('Worst drop', fmtPct(-sum.maxDrawdown)))),
+        stat('Worst drop', fmtPct(-sum.maxDrawdown)))));
+
+  // Open, Closed and Results: one at a time, the last one remembered.
+  const tab = ['open', 'closed', 'results'].includes(state.settings.paperTab) ? state.settings.paperTab : 'open';
+  const tabs = el('div', { class: 'chips tabs', role: 'tablist' }, ...[['open', `Open (${acc.positions.length})`], ['closed', `Closed (${acc.trades.length})`], ['results', 'Results']]
+    .map(([id, label]) => el('button', { type: 'button', role: 'tab', class: id === tab ? 'on' : '', 'aria-selected': id === tab ? 'true' : 'false', text: label,
+      onclick: () => { state.settings = store.saveSettings({ paperTab: id }); renderPaper({ force: true }); } })));
+
+  const body = tab === 'open' ? openTab() : tab === 'closed' ? closedTab() : [
     equityChart(acc, sum.equity, onServer ? state.serverPaper.shadow : null),
     onServer ? filterTrialCard(state.serverPaper) : null,
     bySetupTable(acc, onServer ? state.serverPaper.budgets : null),
-    el('h2', { class: 'section', text: `Open (${acc.positions.length})` }),
-    pnlBars(priced),
-    acc.positions.length
-      ? el('ul', { class: 'list' }, ...open.map(({ p, price, value, pnl, ret }) =>
-        el('li', { class: 'holding paper-card', onclick: () => { const item = findItem(p.key); if (item) openChart(item, true); } },
-          el('div', { class: 'signal-top' },
-            el('div', { class: 'sym', text: p.symbol }),
-            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? fmtPct(ret) : '–' })),
-          el('dl', { class: 'money-row' },
-            stat('Invested', formatMoney(p.cost)),
-            stat('Worth now', Number.isFinite(value) ? formatMoney(value) : '–'),
-            stat('Gain/loss', Number.isFinite(pnl) ? signed(pnl) : '–', upDown(pnl))),
-          el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
-          el('div', { class: 'sub', text: p.trail
-            ? `Trailing stop at ${formatMoney(p.stop)}${p.stop > p.entry ? ' (above what it cost)' : ''}, highest ${formatMoney(p.high || p.entry)}; no target`
-            : `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
-          outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
-          p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
-          el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
-          paperControls(p, price))))
-      : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
     events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
     events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 10).map(ev => el('li', { class: 'holding' },
       el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` })))) : null,
-    el('h2', { class: 'section', text: `Closed (${acc.trades.length})` }),
-    acc.trades.length
-      ? el('ul', { class: 'list compact' }, ...acc.trades.slice(-30).reverse().map(t => el('li', { class: 'holding' },
-        el('div', { class: 'signal-top' },
-          el('div', { class: 'sym', text: t.symbol }),
-          el('span', { class: changeClass(t.pnl), text: `${signed(t.pnl)} (${fmtPct(t.ret)})` })),
-        el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
-        el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason === 'time' ? 'holding period over' : t.reason}` }),
-        el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }))))
-      : el('p', { class: 'muted small', text: 'No closed paper trades yet.' }),
-  ].filter(Boolean));
+  ];
+  // replaceChildren() writes a null child as the text "null", so drop the empty parts.
+  $('paper-body').replaceChildren(...[summary, tabs, ...body].filter(Boolean));
+
+  function openTab() {
+    const sources = [['all', 'All'], ['signal', 'Signals'], ['scan', 'Scan'], ['opps', 'Opportunities']];
+    const source = sources.some(([id]) => id === state.paperSource) ? state.paperSource : 'all';
+    const sourceOf = p => { const s = paper.setupOf(p); return s === 'signal' || s === 'scan' ? s : 'opps'; };
+    const sorts = { loss: (a, b) => (a.pnl || 0) - (b.pnl || 0), gain: (a, b) => (b.pnl || 0) - (a.pnl || 0), newest: (a, b) => b.p.openedAt - a.p.openedAt };
+    const sort = sorts[state.paperSort] ? state.paperSort : 'loss';
+    const rows = open.filter(o => source === 'all' || sourceOf(o.p) === source).sort(sorts[sort]);
+    const select = el('select', { 'aria-label': 'Sort', onchange: e => { state.paperSort = e.target.value; renderPaper({ force: true }); } },
+      ...[['loss', 'Biggest loss first'], ['gain', 'Biggest gain first'], ['newest', 'Newest first']].map(([v, t]) => el('option', { value: v, text: t, selected: v === sort })));
+    return [
+      acc.positions.length ? el('div', { class: 'paper-tools' },
+        el('div', { class: 'chips' }, ...sources.map(([id, label]) => el('button', { type: 'button', class: id === source ? 'on' : '', text: label, onclick: () => { state.paperSource = id; renderPaper({ force: true }); } }))),
+        select) : null,
+      acc.positions.length > 1 ? el('details', { class: 'report' }, el('summary', { text: 'Gain/loss chart' }), pnlBars(priced)) : null,
+      rows.length ? el('ul', { class: 'list' }, ...rows.map(openCard))
+        : el('p', { class: 'muted small', text: acc.positions.length ? 'No open trades from this source.' : 'No open paper trades. The next new Buy signal opens one.' }),
+    ];
+  }
+
+  function openCard({ p, price, value, pnl, ret }) {
+    return foldCard('holding paper-card', `paper:${p.key}`, [
+      el('div', { class: 'sym' }, p.symbol, el('span', { class: 'badge', text: sourceTag(p.setup || 'signal') }),
+        p.trail ? el('span', { class: 'badge', text: 'Trailing' }) : null),
+      el('div', { class: `paper-gain ${upDown(pnl)}`, text: Number.isFinite(pnl) ? `${signed(pnl)} · ${fmtPct(ret)}` : '–' }),
+    ], [
+      el('dl', { class: 'money-row' },
+        stat('Invested', formatMoney(p.cost)),
+        stat('Worth now', Number.isFinite(value) ? formatMoney(value) : '–'),
+        stat('Gain/loss', Number.isFinite(pnl) ? signed(pnl) : '–', upDown(pnl))),
+      el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
+      el('div', { class: 'sub', text: p.trail
+        ? `Trailing stop at ${formatMoney(p.stop)}${p.stop > p.entry ? ' (above what it cost)' : ''}, highest ${formatMoney(p.high || p.entry)}; no target`
+        : `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
+      outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
+      p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
+      el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
+      paperControls(p, price),
+    ], () => { const item = findItem(p.key); if (item) openChart(item, true); });
+  }
+
+  function closedTab() {
+    const result = ['all', 'won', 'lost'].includes(state.closedFilter) ? state.closedFilter : 'all';
+    const rows = acc.trades.filter(t => result === 'all' || (result === 'won' ? t.pnl > 0 : t.pnl <= 0)).slice().reverse();
+    const shown = state.closedShown || 10;
+    const why = t => (t.reason === 'time' ? 'holding period over' : t.reason);
+    const card = t => foldCard('holding', `closed:${t.key}:${t.closedAt}`, [
+      el('div', { class: 'sym' }, t.symbol, el('span', { class: 'closed-why', text: why(t) })),
+      el('div', { class: `paper-gain ${upDown(t.pnl)}`, text: `${signed(t.pnl)} · ${fmtPct(t.ret)}` }),
+    ], [
+      el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
+      el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)}` }),
+      el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }),
+    ], () => { const item = findItem(t.key); if (item) openChart(item, true); });
+    return [
+      acc.trades.length ? el('div', { class: 'chips' }, ...[['all', 'All'], ['won', 'Won'], ['lost', 'Lost']].map(([id, label]) =>
+        el('button', { type: 'button', class: id === result ? 'on' : '', text: label, onclick: () => { state.closedFilter = id; state.closedShown = 10; renderPaper({ force: true }); } }))) : null,
+      rows.length ? el('ul', { class: 'list' }, ...rows.slice(0, shown).map(card))
+        : el('p', { class: 'muted small', text: acc.trades.length ? 'No trades here.' : 'No closed paper trades yet.' }),
+      rows.length > shown ? el('button', { type: 'button', class: 'ghost show-all', text: `Show more (${rows.length - shown} left)`, onclick: () => { state.closedShown = shown + 20; renderPaper({ force: true }); } }) : null,
+    ];
+  }
 }
 
 // Your own say on a paper trade: move its stop and target, or sell it now.

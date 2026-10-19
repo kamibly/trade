@@ -99,8 +99,11 @@
       </div>
       <div id="pf-paper" hidden>
         <div id="paper-body"></div>
-        <p class="muted small">The paper account buys with pretend money on every new Buy signal from the scan, risking your set share of the account per trade and putting at most 20% in one symbol. It sells on the stop-loss, the target or a Sell signal. Each buy and sell pays the fees of the brokers picked for real trading: Interactive Brokers for stocks ($0.005 a share, at least $1) and Kraken for crypto (0.4%).</p>
-        <button type="button" id="paper-reset" class="ghost danger">Start the paper account over</button>
+        <details class="report paper-about">
+          <summary>About this account</summary>
+          <p class="muted small">The paper account buys with pretend money on every new Buy signal from the scan, risking your set share of the account per trade and putting at most 20% in one symbol. It sells on the stop-loss, the target or a Sell signal. Each buy and sell pays the fees of the brokers picked for real trading: Interactive Brokers for stocks ($0.005 a share, at least $1) and Kraken for crypto (0.4%).</p>
+          <button type="button" id="paper-reset" class="ghost danger">Start the paper account over</button>
+        </details>
       </div>
     </section>
 
