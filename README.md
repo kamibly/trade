@@ -176,7 +176,11 @@ With your server connected, the watchlist and holdings also sync to it.
 
 ## Opportunities
 
-With your server connected, the top of the Signals tab lists opportunities from
+The Signals tab has three tabs: your Watchlist's signals, Opportunities and the
+Market scan (Buy or Sell ideas). Each card is one line; tap it for the details
+or its chart button for the chart. Lists show their strongest 5 first.
+
+With your server connected, the Opportunities tab lists opportunities from
 four setups that read more than the price chart, ranked by how past cases did:
 
 - **Insider buying (stocks):** 2 or more officers or directors bought shares on

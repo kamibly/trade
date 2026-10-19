@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.13.0 (trailing stop)';
+export const APP_VERSION = '0.14.0 (tidier signals)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -37,6 +37,8 @@ const $ = id => document.getElementById(id);
 
 const state = {
   view: 'signals',
+  openCards: new Set(), // signal cards opened to show their details
+  marketSide: 'buy',
   filter: 'all',
   editing: false,
   watchlist: store.getWatchlist(),
@@ -676,18 +678,65 @@ function backtestCard(bt) {
 
 // ---- Signals tab and scanner -----------------------------------------------
 
+// A one-line card: tap it for the details, or the chart button for the chart.
+// Cards you opened stay open when the list is drawn again.
+function foldCard(cls, id, top, details, openIt) {
+  const more = el('div', { class: 'details', hidden: !state.openCards.has(id) }, ...details.filter(Boolean));
+  const li = el('li', { class: `${cls} fold${more.hidden ? '' : ' open'}`, onclick: () => {
+    more.hidden = !more.hidden;
+    li.classList.toggle('open', !more.hidden);
+    if (more.hidden) state.openCards.delete(id);
+    else state.openCards.add(id);
+  } },
+  el('div', { class: 'signal-top' }, ...top,
+    el('button', { type: 'button', class: 'ghost chart-btn', 'aria-label': 'Open the chart', text: '📈', onclick: e => { e.stopPropagation(); openIt(); } })),
+  more);
+  return li;
+}
+
 function signalCard(sig) {
   const item = findItem(sig.key);
-  return el('li', { class: 'signal', onclick: () => { state.chartTf = sig.tf; openChart(item, true); } },
-    el('div', { class: 'signal-top' },
-      el('div', { class: 'sym' }, sig.symbol, el('span', { class: 'badge', text: sig.type === 'stock' ? 'Stock' : 'Crypto' }),
-        el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
-      el('div', { class: `score ${scoreClass(sig.score, sig.rule)}`, text: fmtScore(sig.score) })),
+  return foldCard('signal', `sig:${sig.key}`, [
+    el('div', { class: 'sym' }, sig.symbol, el('span', { class: 'badge', text: sig.type === 'stock' ? 'Stock' : 'Crypto' }),
+      el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
+    el('div', { class: `score ${scoreClass(sig.score, sig.rule)}`, text: fmtScore(sig.score) }),
+  ], [
     scoreMeter(sig.score),
     el('div', { class: 'sub', text: `${Math.round(sig.confidence * 100)}% agree · ${levelsLine(sig)}` }),
     sig.tuned && sig.rule ? el('div', { class: 'sub', text: tunedLine(sig) }) : null,
     sig.action === 'buy' && sig.record ? el('div', { class: 'sub', text: tradeRecordLine(sig.symbol, sig.record) }) : null,
-    sig.top && sig.top.length ? el('div', { class: 'sub', text: `Led by ${sig.top.join(', ')}` }) : null);
+    sig.top && sig.top.length ? el('div', { class: 'sub', text: `Led by ${sig.top.join(', ')}` }) : null,
+  ], () => { state.chartTf = sig.tf; openChart(item, true); });
+}
+
+// The strongest few, then a button for the rest.
+const FIRST_SHOWN = 5;
+function shortList(rows, card) {
+  const ul = el('ul', { class: 'list' }, ...rows.slice(0, FIRST_SHOWN).map(card));
+  const more = rows.length > FIRST_SHOWN
+    ? el('button', { type: 'button', class: 'ghost show-all', text: `Show all ${rows.length}`, onclick: e => { ul.append(...rows.slice(FIRST_SHOWN).map(card)); e.currentTarget.remove(); } })
+    : null;
+  return [ul, more].filter(Boolean);
+}
+
+// Watchlist, Opportunities and Market: one at a time, the last one remembered.
+const SIGNAL_TABS = [['watchlist', 'Watchlist', 'signals-body'], ['opps', 'Opportunities', 'opps-body'], ['market', 'Market', 'market-body']];
+function renderSignalTabs() {
+  const tabs = serverOn() ? SIGNAL_TABS : SIGNAL_TABS.filter(([id]) => id !== 'opps');
+  const on = tabs.some(([id]) => id === state.settings.signalsTab) ? state.settings.signalsTab : 'watchlist';
+  const m = state.market || {};
+  const tf = state.settings.alertTf;
+  const counts = {
+    watchlist: Object.values(state.signals).filter(s => findItem(s.key) && s.tf === tf && s.action !== 'hold').length,
+    opps: m.at && m.records ? (m.opportunities || []).length : null,
+    market: m.at ? (m.buys || []).length + (m.sells || []).length : null,
+  };
+  $('signal-tabs').replaceChildren(...tabs.map(([id, label]) => el('button', {
+    type: 'button', role: 'tab', class: id === on ? 'on' : '', 'aria-selected': id === on ? 'true' : 'false',
+    text: counts[id] == null ? label : `${label} (${counts[id]})`,
+    onclick: () => { state.settings = store.saveSettings({ signalsTab: id }); renderSignalTabs(); },
+  })));
+  for (const [id, , body] of SIGNAL_TABS) $(body).hidden = id !== on;
 }
 
 // "Tuned: Buy +25, Sell -30, dip mode · test +8% vs +3% standard"
@@ -712,15 +761,21 @@ function renderSignals() {
       : 'Not scanned yet.';
   $('scan-btn').disabled = scan.busy;
   const errors = Object.entries(scan.errors);
+  const card = sig => paperNote(signalCard(sig), sig);
   const section = (title, list, empty) => [
     el('h2', { class: 'section', text: `${title} (${list.length})` }),
-    list.length ? el('ul', { class: 'list' }, ...list.map(sig => paperNote(signalCard(sig), sig))) : el('p', { class: 'muted small', text: empty }),
+    ...(list.length ? shortList(list, card) : [el('p', { class: 'muted small', text: empty })]),
   ];
+  const holdsOpen = state.openCards.has('holds');
   $('signals-body').replaceChildren(
-    ...section(`Your watchlist: Buy on ${TIMEFRAMES[tf].label}`, buys, 'No symbol is a Buy right now.'),
-    ...section(`Your watchlist: Sell on ${TIMEFRAMES[tf].label}`, sells, 'No symbol is a Sell right now.'),
-    ...section('Your watchlist: no signal', holds, 'Nothing else scanned yet.'),
-    errors.length ? el('p', { class: 'muted small', text: `Could not score: ${errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ')}` }) : '',
+    ...section(`Buy on ${TIMEFRAMES[tf].label}`, buys, 'No symbol is a Buy right now.'),
+    ...section(`Sell on ${TIMEFRAMES[tf].label}`, sells, 'No symbol is a Sell right now.'),
+    holds.length ? el('details', { class: 'report', open: holdsOpen, ontoggle: e => { if (e.currentTarget.open) state.openCards.add('holds'); else state.openCards.delete('holds'); } },
+      el('summary', { text: `No signal (${holds.length})` }),
+      el('ul', { class: 'list' }, ...holds.map(card))) : null,
+    errors.length ? el('details', { class: 'report' },
+      el('summary', { text: `Could not score ${errors.length}` }),
+      el('p', { class: 'muted small', text: errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ') })) : '',
   );
   renderOpportunities();
   renderMarket();
@@ -773,17 +828,18 @@ function opportunityCard(o) {
   const item = { type: o.type, symbol: o.symbol, name: o.name };
   const symbolRec = o.symbolRecord && o.symbolRecord.n >= 3
     ? `On ${o.symbol}: ${o.symbolRecord.wins} of ${o.symbolRecord.n} past cases made money, average ${fmtPct(o.symbolRecord.avg)}.` : '';
-  return el('li', { class: 'signal opp', onclick: () => { state.chartTf = '1D'; openChart(item, true); } },
-    el('div', { class: 'signal-top' },
-      el('div', { class: 'sym' }, o.symbol, el('span', { class: 'badge', text: o.type === 'stock' ? 'Stock' : 'Crypto' }),
-        el('span', { class: o.proven ? 'badge proven' : 'badge', text: o.proven ? 'Proven' : 'Watching, not proven' })),
-      el('div', { class: `score ${o.ev > 0 ? 'up' : 'down'}`, text: fmtPct(o.ev) })),
-    el('div', { class: 'sub', text: setupName(o.setup) }),
+  return foldCard('signal opp', `opp:${o.id}`, [
+    el('div', { class: 'sym' }, o.symbol, el('span', { class: 'badge', text: o.type === 'stock' ? 'Stock' : 'Crypto' }),
+      el('span', { class: o.proven ? 'badge proven' : 'badge', text: o.proven ? 'Proven' : 'Not proven' }),
+      el('span', { class: 'opp-setup', text: setupName(o.setup) })),
+    el('div', { class: `score ${o.ev > 0 ? 'up' : 'down'}`, text: fmtPct(o.ev) }),
+  ], [
     el('p', { class: 'why', text: o.why }),
     el('div', { class: 'sub', text: recordLine(o.record, o.hold) }),
     symbolRec ? el('div', { class: 'sub', text: symbolRec }) : null,
     el('div', { class: 'sub', text: `Entry ${formatMoney(o.entry)} · Stop ${formatMoney(o.stop)} · Target ${formatMoney(o.take)} · hold up to ${holdText(o)}` }),
-    feedbackButtons([o.setup], o.id));
+    feedbackButtons([o.setup], o.id),
+  ], () => { state.chartTf = '1D'; openChart(item, true); });
 }
 
 function setupReport(m) {
@@ -807,7 +863,7 @@ function setupReport(m) {
     return el('li', { class: 'sub', text: `${label}: ${st.ok ? `loaded (${st.count})` : 'not loaded'}${st.at ? `, ${timeAgo(st.at)}` : ''}${st.error ? `. ${st.error}` : ''}` });
   });
   return el('details', { class: 'report' },
-    el('summary', { text: 'Setup report' }),
+    el('summary', { text: 'How each setup has done' }),
     el('p', { class: 'muted small', text: 'Every past case of each setup on the scanned symbols\' daily charts: bought at the close, sold at the stop, the target or the end of the holding period, after fees. A setup sends alerts once it is proven: at least 30 cases with a positive average.' }),
     el('div', { class: 'table-wrap' }, el('table', { class: 'setups' },
       el('thead', {}, el('tr', {}, ...['Setup', 'Cases', 'Won', 'Average', 'Status'].map(t => el('th', { text: t })))),
@@ -832,6 +888,7 @@ async function runMarketNow(button) {
 function renderOpportunities() {
   const body = $('opps-body');
   const m = state.market;
+  renderSignalTabs();
   if (!serverOn()) {
     body.replaceChildren();
     return;
@@ -849,12 +906,11 @@ function renderOpportunities() {
   const muted = (m.setupsInfo && m.setupsInfo.muted) || [];
   const warnings = m.warnings || [];
   body.replaceChildren(...[
-    el('h2', { class: 'section', text: `Opportunities (${opps.length})` }),
     el('p', { class: 'muted small', text: `Ranked by the average result of past cases after fees, from the scan ${timeAgo(m.at)}.` }),
     muted.length ? el('p', { class: 'small', text: `Muted after your ratings: ${muted.map(setupName).join(', ')}. They still show here; turn their alerts back on in Settings.` }) : null,
     warnings.length ? el('ul', { class: 'list' }, ...warnings.map(w => el('li', { class: 'signal' }, el('div', { class: 'sym', text: w.title }), el('div', { class: 'sub', text: w.body })))) : null,
-    opps.length ? el('ul', { class: 'list' }, ...opps.slice(0, 15).map(opportunityCard))
-      : el('p', { class: 'muted small', text: 'No setup fired on the newest candles. The report below shows how each one did in the past.' }),
+    ...(opps.length ? shortList(opps, opportunityCard)
+      : [el('p', { class: 'muted small', text: 'No setup fired on the newest candles. The report below shows how each one did in the past.' })]),
     setupReport(m),
   ].filter(Boolean));
 }
@@ -862,6 +918,7 @@ function renderOpportunities() {
 function renderMarket() {
   const m = state.market;
   const body = $('market-body');
+  renderSignalTabs();
   if (!serverOn()) {
     body.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server in Settings to see buy and sell ideas from the whole S&P 500 and every actively traded coin.' }));
     return;
@@ -877,18 +934,14 @@ function renderMarket() {
     if (fresh.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge', text: 'New' }));
     return paperNote(li, sig);
   };
-  // The 10 strongest, then a button for the rest.
-  const list = (title, rows, empty) => {
-    if (!rows.length) return [el('h3', { class: 'market-title', text: `${title} (0)` }), el('p', { class: 'muted small', text: empty })];
-    const ul = el('ul', { class: 'list' }, ...rows.slice(0, 10).map(card));
-    const more = rows.length > 10 ? el('button', { type: 'button', class: 'ghost', text: `Show all ${rows.length}`, onclick: e => { ul.append(...rows.slice(10).map(card)); e.currentTarget.remove(); } }) : null;
-    return [el('h3', { class: 'market-title', text: `${title} (${rows.length})` }), ul, more].filter(Boolean);
-  };
+  // Buy or sell ideas, one list at a time.
+  const side = state.marketSide === 'sell' ? 'sell' : 'buy';
+  const rows = (side === 'buy' ? m.buys : m.sells) || [];
+  const pick = (id, label, n) => el('button', { type: 'button', class: id === side ? 'on' : '', text: `${label} (${n})`, onclick: () => { state.marketSide = id; renderMarket(); } });
   body.replaceChildren(
-    el('h2', { class: 'section', text: 'Market scan' }),
     el('p', { class: 'muted small', text: scanLine(m) }),
-    ...list('Market buy ideas (1D)', m.buys || [], 'No buy ideas in the last scan.'),
-    ...list('Market sell ideas (1D)', m.sells || [], 'No sell ideas in the last scan.'),
+    el('div', { class: 'chips' }, pick('buy', 'Buy ideas', (m.buys || []).length), pick('sell', 'Sell ideas', (m.sells || []).length)),
+    ...(rows.length ? shortList(rows, card) : [el('p', { class: 'muted small', text: `No ${side} ideas in the last scan.` })]),
   );
 }
 
@@ -904,12 +957,13 @@ function scanLine(m) {
 function paperNote(li, sig) {
   if (!serverPaperOn() || sig.action !== 'buy') return li;
   const acc = state.serverPaper.paper;
+  const details = li.querySelector('.details') || li;
   const filter = sig.filter || ((state.serverSignals || {})[sig.key] || {}).filter;
-  if (filter) li.append(el('div', { class: 'sub', text: filterText(filter) }));
+  if (filter) details.append(el('div', { class: 'sub', text: filterText(filter) }));
   if ((acc.positions || []).some(p => p.key === sig.key)) {
     li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
   } else if (acc.skips && acc.skips[sig.key]) {
-    li.append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[sig.key]}.` }));
+    details.append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[sig.key]}.` }));
   } else {
     // The server buys on its own score, which can differ from this phone's.
     const s = (state.serverSignals || {})[sig.key];
@@ -917,7 +971,7 @@ function paperNote(li, sig) {
       : !s ? 'the server has not scored it yet'
         : s.action !== 'buy' ? `the server rates it ${s.action === 'sell' ? 'Sell' : 'Hold'} (${fmtScore(s.score)}${s.tf ? ` on ${s.tf}` : ''}, price ${formatMoney(s.entry)}${s.candleTime ? `, candle of ${new Date(s.candleTime * 1000).toLocaleDateString()}` : ''}${s.source ? ` from ${s.source}` : ''}${s.at ? `, scored ${new Date(s.at).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : ''})`
           : null;
-    if (why) li.append(el('div', { class: 'sub', text: `Not in paper trading: ${why}.` }));
+    if (why) details.append(el('div', { class: 'sub', text: `Not in paper trading: ${why}.` }));
   }
   return li;
 }
@@ -1894,6 +1948,11 @@ function bind() {
     });
   }
   $('scan-btn').addEventListener('click', () => runScan({ force: true }));
+  $('signals-info').addEventListener('click', e => {
+    const notice = $('signals-notice');
+    notice.hidden = !notice.hidden;
+    e.currentTarget.setAttribute('aria-expanded', String(!notice.hidden));
+  });
   for (const b of document.querySelectorAll('#pf-seg button')) b.addEventListener('click', () => { state.pfTab = b.dataset.pf; renderPortfolio(); if (state.pfTab === 'paper') refreshPaper(); });
   $('hold-add').addEventListener('click', openHoldDialog);
   $('hold-edit').addEventListener('click', () => { state.holdEditing = !state.holdEditing; renderHoldings(); });

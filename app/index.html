@@ -23,12 +23,14 @@
     <section id="view-signals" class="view" aria-labelledby="title">
       <div class="toolbar">
         <p id="scan-status" class="muted small" role="status"></p>
+        <button type="button" id="signals-info" class="ghost info-btn" aria-label="About signals" aria-expanded="false">ⓘ</button>
         <button type="button" id="scan-btn" class="ghost">Scan now</button>
       </div>
-      <p class="notice small">Signals combine 30 methods into one score. They support your decisions and are often wrong. Check the chart before acting.</p>
-      <div id="opps-body"></div>
+      <p id="signals-notice" class="notice small" hidden>Signals combine 30 methods into one score. They support your decisions and are often wrong. Check the chart before acting.</p>
+      <div id="signal-tabs" class="chips tabs" role="tablist"></div>
       <div id="signals-body"></div>
-      <div id="market-body"></div>
+      <div id="opps-body" hidden></div>
+      <div id="market-body" hidden></div>
     </section>
 
     <section id="view-watch" class="view" aria-labelledby="title" hidden>
