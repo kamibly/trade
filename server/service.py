@@ -674,8 +674,13 @@ def run_prices(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dic
                         h["alerted"] = result["holdingsAlerted"][h["id"]]
             if st["watch"] is not None and result["alerts"]:
                 st["watch"]["lastAlerts"] = ([{"title": a["title"], "at": now_ms()} for a in result["alerts"]] + st["watch"].get("lastAlerts", []))[:20]
-            st["prices"] = {"lastRunAt": now_ms(), "values": result["prices"], "errors": result["errors"]}
             save_paper(st, result)
+            # Stocks aren't priced while their market is closed: keep their last price
+            # for what is still held, so the app can still show what they are worth.
+            held = {f"{r['type']}:{r['symbol']}" for r in [*(p or {}).get("holdings", []),
+                    *(st.get("paper") or {}).get("positions", []), *(st.get("paperShadow") or {}).get("positions", [])]}
+            old = {k: v for k, v in ((st.get("prices") or {}).get("values") or {}).items() if k in held}
+            st["prices"] = {"lastRunAt": now_ms(), "values": {**old, **result["prices"]}, "errors": result["errors"]}
 
         update_state(apply)
         return result

@@ -95,6 +95,10 @@ def test_minute_check_alerts_and_moves_paper(monkeypatch):
     assert st["paper"]["cash"] == 5100 and st["paperEvents"][0]["text"] == "Sold SOL"
     assert st["prices"]["values"]["stock:NVDA"] == 88.0
     assert not service.prices_due(st, service.now_ms()) and service.prices_due(st, service.now_ms() + 61_000)
+    # After the stock market closes, the held stock keeps its last price.
+    service.run_prices(engine=lambda job, t: {"prices": {"crypto:SOL": 151.0}, "alerts": [], "holdingsAlerted": {}, "paper": job["paper"], "paperEvents": [], "errors": {}})
+    values = service.load_state()["prices"]["values"]
+    assert values == {"stock:NVDA": 88.0, "crypto:SOL": 151.0}
 
 
 def test_paper_reset_and_hourly_scans():
