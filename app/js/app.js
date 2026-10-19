@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.15.3 (paper charts up front)';
+export const APP_VERSION = '0.15.4 (filtered gain/loss bars)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1545,7 +1545,7 @@ function renderPaper({ force = false } = {}) {
       acc.positions.length ? el('div', { class: 'paper-tools' },
         el('div', { class: 'chips' }, ...sources.map(([id, label]) => el('button', { type: 'button', class: id === source ? 'on' : '', text: label, onclick: () => { state.paperSource = id; renderPaper({ force: true }); } }))),
         select) : null,
-      pnlBars(priced),
+      pnlBars(rows.filter(o => Number.isFinite(o.value))),
       rows.length ? el('ul', { class: 'list' }, ...rows.map(openCard))
         : el('p', { class: 'muted small', text: acc.positions.length ? 'No open trades from this source.' : 'No open paper trades. The next new Buy signal opens one.' }),
     ];
@@ -1759,9 +1759,10 @@ function filterTrialCard(sp) {
 }
 
 // Each open trade's gain or loss in dollars, biggest first.
+// In the order given, so the bars match the list under them.
 function pnlBars(rows) {
   if (!rows.length) return null;
-  const sorted = [...rows].sort((a, b) => b.pnl - a.pnl);
+  const sorted = rows;
   const max = Math.max(...sorted.map(r => Math.abs(r.pnl)), 0.01);
   return el('div', { class: 'card pnl-bars' },
     el('h3', { text: 'Gain or loss on each open trade' }),
