@@ -384,3 +384,5 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .sum-setups { display: grid; grid-template-columns: minmax(0, auto) 1fr auto; gap: 4px 8px; align-items: center; font-size: 12px; }
 .sum-setups > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sum-track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+
+.latest-kind { font-size: 12px; font-weight: 700; margin-right: 6px; }

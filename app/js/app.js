@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.16.3 (visual source summary)';
+export const APP_VERSION = '0.16.4 (latest trade details)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1542,8 +1542,7 @@ function renderPaper({ force = false } = {}) {
 
   const body = tab === 'open' ? openTab() : tab === 'closed' ? closedTab() : tab === 'latest' ? [
     // Every buy and sell, newest first.
-    events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 50).map(ev => el('li', { class: 'holding' },
-      el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` }))))
+    events.length ? el('ul', { class: 'list' }, ...events.slice(0, 50).map(latestCard))
       : el('p', { class: 'muted small', text: onServer ? 'No paper buys or sells yet.' : 'The latest buys and sells show here when your server runs the paper account.' }),
   ] : [
     bySetupTable(acc, onServer ? state.serverPaper.budgets : null),
@@ -1551,6 +1550,67 @@ function renderPaper({ force = false } = {}) {
   ];
   // replaceChildren() writes a null child as the text "null", so drop the empty parts.
   $('paper-body').replaceChildren(...[summary, tabs, ...body].filter(Boolean));
+
+  // One buy or sell. The server's line carries the price, quantity and cost;
+  // the matching open or closed trade adds the rest, fees included.
+  function latestCard(ev, i) {
+    const when = new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const near = t => Number.isFinite(t) && Math.abs(t - ev.at) < 10 * 60000;
+    const type = String(ev.key || '').startsWith('crypto:') ? 'crypto' : 'stock';
+    const top = (word, cls, right, rightCls) => [
+      el('div', {},
+        el('div', { class: 'sym' }, el('span', { class: `latest-kind ${cls}`, text: word }), ev.symbol, typeBadge(type)),
+        el('div', { class: 'sub', text: when })),
+      el('div', { class: `paper-gain ${rightCls || ''}`, text: right }),
+    ];
+    const tile = (label, value, cls) => stat(label, value, cls);
+    const cents = v => `$${v.toFixed(2)}`;
+    const chart = () => { const item = findItem(ev.key); if (item) openChart(item, true); };
+    if (ev.kind === 'open') {
+      const pos = acc.positions.find(p => p.key === ev.key && near(p.openedAt)) || acc.trades.find(t => t.key === ev.key && near(t.openedAt));
+      const value = ev.qty * ev.price;
+      return foldCard('holding', `latest:${ev.key}:${ev.at}:${i}`, top('Bought', 'good', formatMoney(ev.cost)), [
+        el('div', { class: 'sub', text: sourceTag(ev.setup || 'signal') }),
+        el('dl', { class: 'money-row' },
+          tile('Quantity', fmtQty({ qty: ev.qty, type })),
+          tile('Buy price', formatMoney(ev.price)),
+          tile('Order value', formatMoney(value))),
+        el('dl', { class: 'money-row' },
+          tile('Fee', cents(Math.max(0, ev.cost - value))),
+          tile('Total paid', formatMoney(ev.cost))),
+        pos && Number.isFinite(pos.stop) ? el('div', { class: 'sub', text: pos.trail
+          ? `Bought with a trailing stop from ${formatMoney(pos.trail && pos.risk ? pos.entry - pos.risk : pos.stop)} and no target`
+          : `Bought with the stop at ${formatMoney(pos.stop)} and the target at ${formatMoney(pos.take)}` }) : null,
+        pos && !acc.positions.includes(pos) ? el('div', { class: 'sub', text: 'Sold since; see the Closed tab.' }) : null,
+      ], chart);
+    }
+    if (ev.kind === 'close') {
+      const t = acc.trades.find(x => x.key === ev.key && near(x.closedAt));
+      const why = ev.reason === 'time' ? 'holding period over' : ev.reason;
+      const pct = t && costOf(t) > 0 ? ` · ${fmtPct(t.pnl / costOf(t))}` : '';
+      const head = top('Sold', 'bad', `${signed(ev.pnl)}${pct}`, upDown(ev.pnl));
+      if (!t) return foldCard('holding', `latest:${ev.key}:${ev.at}:${i}`, head, [el('div', { class: 'sub', text: ev.text || why })], chart);
+      const value = t.qty * t.exit;
+      const back = costOf(t) + t.pnl;
+      const buyFee = Math.max(0, costOf(t) - t.qty * t.entry);
+      const sellFee = Math.max(0, value - back);
+      const days = Math.max(0, Math.round((t.closedAt - t.openedAt) / 86400000));
+      return foldCard('holding', `latest:${ev.key}:${ev.at}:${i}`, head, [
+        el('div', { class: 'sub', text: `${sourceTag(t.setup || 'signal')} · ${why}` }),
+        el('dl', { class: 'money-row' },
+          tile('Quantity', fmtQty(t)),
+          tile('Sell price', formatMoney(t.exit)),
+          tile('Order value', formatMoney(value))),
+        el('dl', { class: 'money-row' },
+          tile('Fee', cents(sellFee)),
+          tile('Got back', formatMoney(back)),
+          tile('It cost', formatMoney(costOf(t)))),
+        el('div', { class: 'sub', text: `Bought at ${formatMoney(t.entry)} on ${fmtTime(t.openedAt)}, held ${days < 1 ? 'under a day' : `${days} day${days === 1 ? '' : 's'}`}` }),
+        el('div', { class: 'sub', text: `Fees on this trade: ${cents(buyFee + sellFee)} (buy ${cents(buyFee)}, sell ${cents(sellFee)})` }),
+      ], chart);
+    }
+    return el('li', { class: 'holding' }, el('div', { class: 'sub', text: `${when} · ${ev.text || ''}` }));
+  }
 
   // Where trades came from, for the filter buttons on Open and Closed.
   function sourceButtons(source, list, gainOf, pick) {
