@@ -23,12 +23,14 @@
     <section id="view-signals" class="view" aria-labelledby="title">
       <div class="toolbar">
         <p id="scan-status" class="muted small" role="status"></p>
+        <button type="button" id="signals-info" class="ghost info-btn" aria-label="About signals" aria-expanded="false">ⓘ</button>
         <button type="button" id="scan-btn" class="ghost">Scan now</button>
       </div>
-      <p class="notice small">Signals combine 30 methods into one score. They support your decisions and are often wrong. Check the chart before acting.</p>
-      <div id="opps-body"></div>
+      <p id="signals-notice" class="notice small" hidden>Signals combine 30 methods into one score. They support your decisions and are often wrong. Check the chart before acting.</p>
+      <div id="signal-tabs" class="chips tabs" role="tablist"></div>
       <div id="signals-body"></div>
-      <div id="market-body"></div>
+      <div id="opps-body" hidden></div>
+      <div id="market-body" hidden></div>
     </section>
 
     <section id="view-watch" class="view" aria-labelledby="title" hidden>
@@ -97,8 +99,11 @@
       </div>
       <div id="pf-paper" hidden>
         <div id="paper-body"></div>
-        <p class="muted small">The paper account buys with pretend money on every new Buy signal from the scan, risking your set share of the account per trade and putting at most 20% in one symbol. It sells on the stop-loss, the target or a Sell signal. Fees of 0.1% per trade are included.</p>
-        <button type="button" id="paper-reset" class="ghost danger">Start the paper account over</button>
+        <details class="report paper-about">
+          <summary>About this account</summary>
+          <p class="muted small">The paper account buys with pretend money on every new Buy signal from the scan, risking your set share of the account per trade and putting at most 20% in one symbol. It sells on the stop-loss, the target or a Sell signal. Each buy and sell pays the fees of the brokers picked for real trading: Interactive Brokers for stocks ($0.005 a share, at least $1) and Kraken for crypto (0.4%).</p>
+          <button type="button" id="paper-reset" class="ghost danger">Start the paper account over</button>
+        </details>
       </div>
     </section>
 
@@ -201,6 +206,19 @@
           <label class="field"><span>Paper account size, USD</span><input id="paper-start" type="number" inputmode="numeric" min="100" max="10000000" step="100"></label>
         </div>
         <p class="muted small">ATR is the average size of one candle's move, so levels adapt to how jumpy each symbol is. A new account size applies when you start the paper account over.</p>
+        <label class="field">
+          <span>Paper trades sell at</span>
+          <select id="paper-exit">
+            <option value="target">The target</option>
+            <option value="trail">A trailing stop (no target)</option>
+          </select>
+        </label>
+        <p class="muted small">With a trailing stop, once a trade is up 1 ATR its stop moves to break even after fees, then follows the highest price at the stop-loss distance below it. Each backtest shows both ways side by side. It applies to new paper trades from scans and watchlist Buys; opportunities keep their own plan.</p>
+        <label class="switch">
+          <input id="filter-toggle" type="checkbox">
+          <span>Trade filter for paper trading</span>
+        </label>
+        <p class="muted small">Your server's machine-learning filter skips buy ideas it expects to lose and puts more into the ones it likes best. It is used only after passing its own test, and an account without it runs alongside to show whether it helps. Opportunities keep their own test.</p>
         <p id="risk-status" class="small" role="status"></p>
       </div>
 

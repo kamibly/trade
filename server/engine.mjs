@@ -11,7 +11,9 @@ import { join } from 'node:path';
 import { fetchCandles, fetchCryptoTop } from './js/data.js';
 import { stockSources } from './stocks.mjs';
 import { proxiedFetch, fallbackFetch } from './proxy.mjs';
-import { analyze, signalAt, baseVotesAt, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
+import { analyze, signalAt, baseVotesAt, scoreVotes, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
+import { filterNames, filterVector, tradeOutcome, marketTrend, trendAt, judge, MIN_SCORE as FILTER_MIN_SCORE } from './js/filter.js';
+import { feeRate } from './js/fees.js';
 import { featureNames, featureVector, sequence, label, turnLabels } from './js/ml.js';
 import { summarize, alertFor, learn, learnKey, ruleOf, tradeRecordLine, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
@@ -110,7 +112,8 @@ async function candlesFor(item, tf, settings, deps) {
 // Scores one symbol, re-learning its method weights (and, with tuning on, its
 // thresholds and mode) from the backtest once a day, or when the settings or
 // the ML models change. `onS` gets the analyzed chart when the caller needs it.
-async function score(item, tf, settings, weightsCache, deps, models, onS) {
+// A Buy also gets the trade filter's view (`mood`: the market trends, daily only).
+async function score(item, tf, settings, weightsCache, deps, models, { onS, mood } = {}) {
   const { candles, source } = await candlesFor(item, tf, settings, deps);
   if (candles.length < MIN_CANDLES) throw new Error(`Only ${candles.length} candles, ${MIN_CANDLES} needed`);
   const S = analyze(candles, { models });
@@ -118,7 +121,7 @@ async function score(item, tf, settings, weightsCache, deps, models, onS) {
   const modelsAt = (models && models.trainedAt) || null;
   let w = weightsCache[wKey];
   if (!w || deps.now() - w.at >= WEIGHTS_MAX_AGE_MS || (w.modelsAt || null) !== modelsAt || w.key !== learnKey(settings)) {
-    w = { at: deps.now(), modelsAt, ...learn(S, settings) };
+    w = { at: deps.now(), modelsAt, ...learn(S, settings, item.type) };
     weightsCache[wKey] = w;
   }
   const sig = signalAt(S, candles.length - 1, {
@@ -126,7 +129,11 @@ async function score(item, tf, settings, weightsCache, deps, models, onS) {
   });
   if (!sig) throw new Error('Not enough history');
   if (onS) onS(S);
-  return { ...summarize(item, sig, tf, w), at: deps.now(), ...(source ? { source } : {}) };
+  const last = candles.length - 1;
+  const filter = sig.action === 'buy' && models && models.filter
+    ? judge(models.filter, S, last, baseVotesAt(S, last), { type: item.type, market: tf === '1D' && mood ? mood[item.type] : NaN }, settings)
+    : null;
+  return { ...summarize(item, sig, tf, w), at: deps.now(), ...(source ? { source } : {}), ...(filter ? { filter } : {}) };
 }
 
 // Runs `fn` over `items` with a few at a time, so big scans finish without hammering a source.
@@ -151,8 +158,9 @@ const paperLine = ev => (ev.kind === 'open'
 
 // Watchlist and holdings on the alert timeframe, plus the paper account.
 // job: { tf, settings, items, holdings, prev: { key: signal }, weights: { "key:tf": {at, weights} },
-//        models, paper: account | null, riskPct }
-// result: { signals, alerts, changes, holdingsAlerted, weights, errors, paper, paperEvents }
+//        models, mood: { stock, crypto } market trends, paper: account | null, riskPct,
+//        shadow: the unfiltered account | null, useFilter, budgets: { source: share }, trail }
+// result: { signals, alerts, changes, holdingsAlerted, weights, errors, paper, paperEvents, shadow }
 export async function runWatch(job, deps = defaultDeps) {
   const { tf, settings } = job;
   const weights = { ...(job.weights || {}) };
@@ -162,7 +170,7 @@ export async function runWatch(job, deps = defaultDeps) {
   const alerts = [];
   await pool(job.items || [], 3, async item => {
     try {
-      signals[key(item)] = await score(item, tf, settings, weights, deps, job.models);
+      signals[key(item)] = await score(item, tf, settings, weights, deps, job.models, { mood: job.mood });
     } catch (e) {
       errors[key(item)] = e.message;
     }
@@ -209,12 +217,17 @@ export async function runWatch(job, deps = defaultDeps) {
   }
   // The paper account trades the same signals: buys a Buy it doesn't hold yet
   // (within 1 ATR of where it began), sells on a Sell, the stop-loss or the target.
-  let paperEvents = [];
-  if (job.paper) {
-    paperEvents = paper.step(job.paper, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now() })
-      .map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
-  }
-  return { signals, alerts, changes, holdingsAlerted, weights, errors, paper: job.paper || null, paperEvents };
+  const paperEvents = bothAccounts(job, (acc, useFilter) => paper.step(acc, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsWith(job.budgets), useFilter, trail: !!job.trail }), deps);
+  return { signals, alerts, changes, holdingsAlerted, weights, errors, paper: job.paper || null, paperEvents, shadow: job.shadow || null };
+}
+
+// Runs a paper step on the account (with the trade filter, unless switched
+// off) and the same step on its unfiltered shadow, which shows whether the
+// filter helps. Returns the account's events.
+function bothAccounts(job, run, deps) {
+  if (job.shadow) run(job.shadow, false);
+  if (!job.paper) return [];
+  return run(job.paper, job.useFilter !== false).map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
 }
 
 // The latest price: Yahoo Finance's live quote for stocks, the newest 15-minute
@@ -234,8 +247,8 @@ async function latestPrice(item, settings, deps) {
 
 // Every-minute check of holdings and paper positions against their stop-loss
 // and target, at the latest price.
-// job: { settings, items, holdings, paper, actions: { key: last signal action } }
-// result: { prices, alerts, holdingsAlerted, paper, paperEvents, errors }
+// job: { settings, items, holdings, paper, shadow, actions: { key: last signal action } }
+// result: { prices, alerts, holdingsAlerted, paper, paperEvents, shadow, errors }
 export async function runPrices(job, deps = defaultDeps) {
   const { settings } = job;
   const prices = {};
@@ -268,13 +281,9 @@ export async function runPrices(job, deps = defaultDeps) {
       });
     }
   }
-  let paperEvents = [];
-  if (job.paper) {
-    const signals = Object.fromEntries(Object.entries(prices).map(([k, p]) => [k, { entry: p }]));
-    paperEvents = paper.step(job.paper, { signals, alerts: {}, now: deps.now() })
-      .map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
-  }
-  return { prices, alerts, holdingsAlerted, paper: job.paper || null, paperEvents, errors };
+  const signals = Object.fromEntries(Object.entries(prices).map(([k, p]) => [k, { entry: p }]));
+  const paperEvents = bothAccounts(job, acc => paper.step(acc, { signals, alerts: {}, now: deps.now() }), deps);
+  return { prices, alerts, holdingsAlerted, paper: job.paper || null, paperEvents, shadow: job.shadow || null, errors };
 }
 
 // One CSV line into its fields (quoted fields may hold commas and "" quotes).
@@ -319,9 +328,10 @@ export function parseSp500(csv) {
 //        held: [key], announced: [id], muted: [setup],
 //        scope: 'stocks' | 'crypto' | 'all', items: crypto to scan (default the top 50),
 //        only: [key] to rescore just these (fast moves; no setups),
-//        buyStarts: { key: { at, entry } } where each current buy idea began }
+//        buyStarts: { key: { at, entry } } where each current buy idea began,
+//        mood: { stock, crypto } the last known market trends }
 // result: { at, scanned, buys, sells, newBuys, newSells, actions, weights, errors, alert,
-//           opportunities, records, counts, warnings, digest }
+//           opportunities, records, counts, warnings, digest, mood }
 export async function runMarket(job, deps = defaultDeps) {
   const tf = '1D';
   const { settings } = job;
@@ -354,11 +364,18 @@ export async function runMarket(job, deps = defaultDeps) {
     const only = new Set(job.only);
     items = items.filter(i => only.has(key(i)));
   }
+  // The market's trend today, for the trade filter (the last known one if it can't be loaded).
+  const mood = { ...(job.mood || {}) };
+  if (job.models && job.models.filter) {
+    const kinds = scope === 'all' ? ['stock', 'crypto'] : [scope === 'crypto' ? 'crypto' : 'stock'];
+    const trends = await marketTrends(settings, deps, errors, kinds);
+    for (const k of kinds) if (trends[k].length) mood[k] = trends[k].at(-1)[1];
+  }
   const results = [];
   const rows = [];
   await pool(items, 4, async item => {
     try {
-      results.push(await score(item, tf, settings, weights, deps, job.models, S => rows.push({ item, S: lite(S), sector: item.sector || null })));
+      results.push(await score(item, tf, settings, weights, deps, job.models, { mood, onS: S => rows.push({ item, S: lite(S), sector: item.sector || null }) }));
     } catch (e) {
       errors[key(item)] = e.message;
     }
@@ -408,13 +425,14 @@ export async function runMarket(job, deps = defaultDeps) {
     // began, strongest first (each bought once per idea), and every Sell.
     scanBuys: buys.map(r => ({
       id: `scan:${r.key}:${buyStarts[r.key].at}`, setup: 'scan', key: r.key, symbol: r.symbol, type: r.type, entry: r.entry, stop: r.stop, take: r.take, ev: r.score / 100,
-      ranAway: r.entry > buyStarts[r.key].entry + (r.atr || 0),
+      ranAway: r.entry > buyStarts[r.key].entry + (r.atr || 0), ...(r.filter ? { filter: r.filter } : {}),
     })),
     buyStarts,
     scanSells: sells.map(r => ({ key: r.key, entry: r.entry })),
     // Where each symbol stood, for the every-minute fast-move watch.
     levels: Object.fromEntries(results.filter(r => r.type === 'crypto').map(r => [r.key, { entry: r.entry, atr: r.atr }])),
     scope,
+    mood,
     ...setups,
   };
 }
@@ -451,17 +469,35 @@ async function opportunitiesFor(job, rows, deps, errors) {
   };
 }
 
-// The paper account takes the market scan's opportunities.
-// job: { paper, opportunities, riskPct }  result: { paper, paperEvents }
-// job: { paper, opportunities, scanBuys, scanSells, riskPct }
+// The paper account (and its unfiltered shadow) takes the market scan's
+// opportunities and buy ideas, and sells scan trades that turned Sell.
+// job: { paper, shadow, opportunities, scanBuys, scanSells, riskPct, useFilter, budgets, trail }
+// result: { paper, paperEvents, shadow }
 export async function runPaper(job, deps = defaultDeps) {
-  const opts = { riskPct: job.riskPct || 1, now: deps.now() };
-  const paperEvents = [
-    ...paper.closeOnSells(job.paper, job.scanSells || [], 'scan', opts),
-    ...paper.openSetups(job.paper, job.opportunities || [], opts),
-    ...paper.openSetups(job.paper, job.scanBuys || [], opts),
-  ].map(ev => ({ ...ev, at: deps.now(), text: paperLine(ev) }));
-  return { paper: job.paper, paperEvents };
+  const paperEvents = bothAccounts(job, (acc, useFilter) => {
+    const opts = { riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsWith(job.budgets), useFilter, trail: !!job.trail };
+    const held = new Set(acc.positions.filter(p => p.setup === 'scan').map(p => p.key));
+    return [
+      ...paper.closeOnSells(acc, (job.scanSells || []).filter(s => held.has(s.key)), 'scan', opts),
+      ...paper.openSetups(acc, job.opportunities || [], opts),
+      ...paper.openSetups(acc, job.scanBuys || [], opts),
+    ];
+  }, deps);
+  return { paper: job.paper, paperEvents, shadow: job.shadow || null };
+}
+
+// You sell a paper position or move its stop and target; the unfiltered
+// shadow does the same, so the trade filter's comparison stays fair.
+// job: { paper, shadow, action: 'sell' | 'levels', key, price, stop, take, trailStop: true | false | undefined }
+// result: { paper, shadow, paperEvents, ok }
+export async function runPaperEdit(job, deps = defaultDeps) {
+  const act = acc => (job.action === 'sell'
+    ? paper.sellNow(acc, job.key, job.price, deps.now())
+    : paper.setLevels(acc, job.key, { stop: job.stop, take: job.take, trail: typeof job.trailStop === 'boolean' ? job.trailStop : undefined }));
+  if (job.shadow) act(job.shadow);
+  const ev = job.paper ? act(job.paper) : null;
+  const paperEvents = ev && ev.kind === 'close' ? [{ ...ev, at: deps.now(), text: paperLine(ev) }] : [];
+  return { paper: job.paper, shadow: job.shadow || null, paperEvents, ok: !!ev };
 }
 
 // Your symbols plus a spread of S&P 500 stocks and top cryptos, so the models
@@ -497,9 +533,13 @@ async function trainingItems(job, deps) {
 export async function runDataset(job, deps = defaultDeps) {
   const { tf, settings } = job;
   const names = featureNames(METHOD_IDS);
+  const fnames = filterNames(METHOD_IDS);
   const rows = [];
   const errors = {};
   const items = job.total ? await trainingItems(job, deps) : job.items || [];
+  // The trade filter is daily: it needs the market's trend on each day.
+  const markets = tf === '1D' ? await marketTrends(settings, deps, errors) : null;
+  const round = v => (Number.isFinite(v) ? Number(v.toFixed(5)) : null);
   await pool(items, 4, async item => {
     try {
       const { candles } = await candlesFor(item, tf, settings, deps);
@@ -510,25 +550,59 @@ export async function runDataset(job, deps = defaultDeps) {
         if (y === null) break;
         const seq = sequence(S, i);
         if (!seq) continue;
-        const x = featureVector(S, i, baseVotesAt(S, i), names).map(v => (Number.isFinite(v) ? Number(v.toFixed(5)) : null));
+        const base = baseVotesAt(S, i);
+        const x = featureVector(S, i, base, names).map(round);
         const turn = turnLabels(S, i, settings);
-        rows.push({
+        const row = {
           key: key(item), t: candles[i].time, x, seq: seq.map(r => r.map(v => Number(v.toFixed(4)))), y, ret: S.close[i + 10] / S.close[i] - 1,
           yb: turn ? turn.bottom : null, yt: turn ? turn.top : null,
-        });
+        };
+        // A candle that looks like a Buy: a trade filter row, with how the trade ended.
+        if (markets && scoreVotes(base, {}) >= FILTER_MIN_SCORE) {
+          const out = tradeOutcome(S, i, { ...settings, type: item.type });
+          if (out) {
+            const atrShare = S.atr[i] / S.close[i];
+            const market = trendAt(item.type === 'crypto' ? markets.crypto : markets.stock, candles[i].time);
+            row.f = {
+              x: filterVector(S, i, base, fnames, { type: item.type, market }).map(round),
+              win: out.win, ret: Number(out.ret.toFixed(5)),
+              tp: Number(((settings.takeAtr || 3) * atrShare).toFixed(5)), sp: Number(((settings.stopAtr || 2) * atrShare).toFixed(5)),
+              fee: feeRate(item.type),
+            };
+          }
+        }
+        rows.push(row);
       }
     } catch (e) {
       errors[key(item)] = e.message;
     }
   });
-  return { tf, features: names, symbols: items.length, rows, errors };
+  return { tf, features: names, filterFeatures: markets ? fnames : null, symbols: items.length, rows, errors };
+}
+
+// [time, trend] lists for SPY (stocks) and Bitcoin (crypto), for the trade filter.
+const MARKETS = { stock: { type: 'stock', symbol: 'SPY', name: 'S&P 500' }, crypto: { type: 'crypto', symbol: 'BTC', name: 'Bitcoin', geckoId: 'bitcoin' } };
+async function marketTrends(settings, deps, errors, kinds = ['stock', 'crypto']) {
+  const out = {};
+  for (const kind of kinds) {
+    const item = MARKETS[kind];
+    try {
+      const { candles } = await candlesFor(item, '1D', settings, deps);
+      const S = analyze(candles);
+      out[kind] = candles.map((c, i) => [c.time, marketTrend(S, i)]).filter(([, v]) => Number.isFinite(v));
+    } catch (e) {
+      errors[`market:${kind}`] = `${item.name}: ${e.message}`;
+      out[kind] = [];
+    }
+  }
+  return out;
 }
 
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
-  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper }[job.mode] || runWatch;
+  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper, paperEdit: runPaperEdit }[job.mode] || runWatch;
   const result = await run(job);
   if (job.stream) {
     // Training data is big: a header line, then one row per line, so Python

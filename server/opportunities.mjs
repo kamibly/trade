@@ -3,6 +3,7 @@
 // the ones that fire on the newest candles.
 
 import * as Z from './js/setups.js';
+import { feeRate } from './js/fees.js';
 
 const DAY = 86400;
 
@@ -75,7 +76,7 @@ export function findOpportunities({ rows, spy, btc, events = {}, settings, enabl
     const mine = {};
     for (const t of triggers) {
       const hold = Z.SETUPS[t.setup].hold;
-      const ret = Z.outcome(S, t.i, { hold, ...levels });
+      const ret = Z.outcome(S, t.i, { hold, ...levels, fee: feeRate(item.type) });
       Z.addOutcome(records[t.setup], ret);
       Z.addOutcome((mine[t.setup] ||= Z.emptyRecord()), ret);
       counts[t.setup] += 1;

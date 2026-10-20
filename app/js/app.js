@@ -14,12 +14,13 @@ import { SETUPS, recordLine, proven as setupProven, MIN_PROVEN } from './setups.
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
 import { voteMatrix, backtest } from './backtest.js';
 import * as paper from './paper.js';
+import { feeOf } from './fees.js';
 import * as pf from './portfolio.js';
 import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.10.2 (paper charts)';
+export const APP_VERSION = '0.16.0 (budgets by money)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -36,6 +37,12 @@ const $ = id => document.getElementById(id);
 
 const state = {
   view: 'signals',
+  openCards: new Set(), // signal cards opened to show their details
+  marketSide: 'buy',
+  paperSort: 'loss',
+  paperSource: 'all',
+  closedFilter: 'all',
+  closedShown: 10,
   filter: 'all',
   editing: false,
   watchlist: store.getWatchlist(),
@@ -120,7 +127,11 @@ function findItem(key) {
   if (own) return own;
   // Symbols from the server's market scan open as charts too.
   const m = state.market && [...(state.market.buys || []), ...(state.market.sells || []), ...(state.market.opportunities || [])].find(x => x.key === key);
-  return m ? { type: m.type, symbol: m.symbol, name: m.name } : undefined;
+  if (m) return { type: m.type, symbol: m.symbol, name: m.name };
+  // So do paper trades of ideas that have since left the scan's lists.
+  const acc = state.serverPaper && state.serverPaper.paper ? state.serverPaper.paper : state.paper;
+  const p = acc && [...(acc.positions || []), ...(acc.trades || [])].find(x => x.key === key);
+  return p ? { type: p.type, symbol: p.symbol, name: p.symbol } : undefined;
 }
 const serverOn = () => !!(state.settings.serverUrl && state.settings.serverKey);
 // With server alerts on, the server notifies; the open app only shows a toast.
@@ -543,7 +554,7 @@ function renderAnalysis() {
   if (!state.analysis || state.analysis.id !== id || state.analysis.key !== key) {
     const S = analyze(candles, { models });
     const votes = voteMatrix(S);
-    const bt = backtest(S, backtestOptions(state.settings, votes));
+    const bt = backtest(S, backtestOptions(state.settings, votes, state.chartItem.type));
     const learned = learnedFrom(bt, state.settings);
     if (bt) store.saveWeight(state.chartItem, state.chartTf, learned);
     state.analysis = { id, key, S, votes, bt, learned };
@@ -615,8 +626,23 @@ function modelsCard(models, bt) {
     row('LSTM', models.lstm, 'lstm'),
     row('Bottom finder', models.bottom, 'bottom'),
     row('Top finder', models.top, 'top'),
+    filterRow(models.filter),
     el('p', { class: 'muted small', text: `The bottom finder learns whether a buy here reached its target before its stop; the top finder, whether the price fell to a target before rising to a stop. They only push the score their way. LightGBM and the LSTM vote only if right more than half the time on at least 200 clear test calls; the finders, only if right ${Math.round(TURN_EDGE * 100)} points more often than the outcome happens anyway. Like every method, the backtest then weights them by how often they were right.` }));
 }
+
+// The trade filter's test on the newest year of Buy-looking candles it never trained on.
+function filterRow(m) {
+  const t = m && m.test;
+  if (!t) return el('div', { class: 'bt-row' }, el('span', { text: 'Trade filter' }), el('span', { class: 'muted', text: 'not trained' }));
+  return el('div', {},
+    el('div', { class: 'bt-row' },
+      el('span', { text: 'Trade filter' }),
+      el('span', { class: t.passed ? 'good' : 'muted', text: `${t.passed ? 'passed' : 'not used'} · kept ${t.kept} of ${t.n} test trades` })),
+    el('p', { class: 'muted small', text: `In its test year, the trades it kept made ${fmtPct(t.keptAvg)} each on average after fees (won ${Math.round(t.keptWin * 100)}%), against ${fmtPct(t.allAvg)} for all of them (won ${Math.round(t.allWin * 100)}%) and ${fmtPct(t.skippedAvg)} for the ones it skipped.${t.passed ? ' The paper account uses it.' : ` Not used: ${t.why}.`}` }));
+}
+
+// The trade filter's view of a buy idea, for its card.
+const filterText = f => `Trade filter: ${Math.round(f.p * 100)}% chance of the target before the stop, ${f.size > 0 ? `expects ${fmtPct(f.ev)} after fees${f.size !== 1 ? `, sized ×${f.size.toFixed(1)}` : ''}` : `expects a loss (${fmtPct(f.ev)})`}`;
 
 function methodNote(v, bt) {
   const s = bt && bt.stats[v.id];
@@ -642,10 +668,12 @@ function backtestCard(bt) {
   const w = bt.weighted;
   return el('div', { class: 'card' },
     el('h3', { text: 'Backtest' }),
-    el('p', { class: 'muted small', text: `Weights learned from ${fmtDate(bt.trainFrom)} to ${fmtDate(bt.testFrom)}, then tested on the ${bt.testCandles} newer candles they never saw. Long only, buying on a new Buy score and selling on the stop-loss, target or a Sell score, with 0.1% fees.` }),
+    el('p', { class: 'muted small', text: `Weights learned from ${fmtDate(bt.trainFrom)} to ${fmtDate(bt.testFrom)}, then tested on the ${bt.testCandles} newer candles they never saw. Long only, buying on a new Buy score and selling on the stop-loss, target or a Sell score, with ${state.chartItem.type === 'crypto' ? 'Kraken\'s 0.4%' : 'IBKR\'s fee (0.1% on a $1,000 order)'} on each buy and sell.` }),
     bt.rule ? line(`Tuned levels (${bt.rule.mode === 'dip' ? 'dip mode' : 'standard'}, ${fmtScore(bt.rule.buy)} / ${fmtScore(bt.rule.sell)})`, bt.tuned) : null,
     bt.rule ? line('Standard levels (+40 / -40)', bt.standard) : line('Weighted methods', w),
     line('All methods equal', bt.equal),
+    bt.trailed ? line('Same trades, trailing stop instead of the target', bt.trailed) : null,
+    bt.trailed ? el('p', { class: 'muted small', text: `The trailing stop moves to break even after fees once a trade is up ${state.settings.stopAtr / 2} ATR, then follows the highest price ${state.settings.stopAtr} ATR below it (your stop-loss distance). Compare it with the ${bt.rule ? 'tuned' : 'weighted'} line above, which uses the target, to see which exit did better here.` }) : null,
     bt.rule ? el('p', { class: 'muted small', text: `The tuned levels were picked on the older candles only (where they made ${fmtPct(bt.tunedTrain ? bt.tunedTrain.totalReturn : NaN)}), so the test above shows whether they hold up on candles they never saw.` }) : null,
     el('div', { class: 'bt-row' }, el('span', { text: 'Buy and hold' }), el('span', { class: w.buyHold > 0 ? 'good' : 'bad', text: fmtPct(w.buyHold) })),
     w.open ? el('p', { class: 'small', text: `A test trade is still open from ${formatMoney(w.open.entry)}, counted at today's price.` }) : null,
@@ -654,18 +682,65 @@ function backtestCard(bt) {
 
 // ---- Signals tab and scanner -----------------------------------------------
 
+// A one-line card: tap it for the details, or the chart button for the chart.
+// Cards you opened stay open when the list is drawn again.
+function foldCard(cls, id, top, details, openIt) {
+  const more = el('div', { class: 'details', hidden: !state.openCards.has(id) }, ...details.filter(Boolean));
+  const li = el('li', { class: `${cls} fold${more.hidden ? '' : ' open'}`, 'data-card': id, onclick: () => {
+    more.hidden = !more.hidden;
+    li.classList.toggle('open', !more.hidden);
+    if (more.hidden) state.openCards.delete(id);
+    else state.openCards.add(id);
+  } },
+  el('div', { class: 'signal-top' }, ...top,
+    el('button', { type: 'button', class: 'ghost chart-btn', 'aria-label': 'Open the chart', text: '📈', onclick: e => { e.stopPropagation(); openIt(); } })),
+  more);
+  return li;
+}
+
 function signalCard(sig) {
   const item = findItem(sig.key);
-  return el('li', { class: 'signal', onclick: () => { state.chartTf = sig.tf; openChart(item, true); } },
-    el('div', { class: 'signal-top' },
-      el('div', { class: 'sym' }, sig.symbol, el('span', { class: 'badge', text: sig.type === 'stock' ? 'Stock' : 'Crypto' }),
-        el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
-      el('div', { class: `score ${scoreClass(sig.score, sig.rule)}`, text: fmtScore(sig.score) })),
+  return foldCard('signal', `sig:${sig.key}`, [
+    el('div', { class: 'sym' }, sig.symbol, typeBadge(sig.type),
+      el('span', { class: `action ${sig.action}`, text: ACTION_WORDS[sig.action] })),
+    el('div', { class: `score ${scoreClass(sig.score, sig.rule)}`, text: fmtScore(sig.score) }),
+  ], [
     scoreMeter(sig.score),
     el('div', { class: 'sub', text: `${Math.round(sig.confidence * 100)}% agree · ${levelsLine(sig)}` }),
     sig.tuned && sig.rule ? el('div', { class: 'sub', text: tunedLine(sig) }) : null,
     sig.action === 'buy' && sig.record ? el('div', { class: 'sub', text: tradeRecordLine(sig.symbol, sig.record) }) : null,
-    sig.top && sig.top.length ? el('div', { class: 'sub', text: `Led by ${sig.top.join(', ')}` }) : null);
+    sig.top && sig.top.length ? el('div', { class: 'sub', text: `Led by ${sig.top.join(', ')}` }) : null,
+  ], () => { state.chartTf = sig.tf; openChart(item, true); });
+}
+
+// The strongest few, then a button for the rest.
+const FIRST_SHOWN = 5;
+function shortList(rows, card) {
+  const ul = el('ul', { class: 'list' }, ...rows.slice(0, FIRST_SHOWN).map(card));
+  const more = rows.length > FIRST_SHOWN
+    ? el('button', { type: 'button', class: 'ghost show-all', text: `Show all ${rows.length}`, onclick: e => { ul.append(...rows.slice(FIRST_SHOWN).map(card)); e.currentTarget.remove(); } })
+    : null;
+  return [ul, more].filter(Boolean);
+}
+
+// Watchlist, Opportunities and Market: one at a time, the last one remembered.
+const SIGNAL_TABS = [['watchlist', 'Watchlist', 'signals-body'], ['opps', 'Opportunities', 'opps-body'], ['market', 'Market', 'market-body']];
+function renderSignalTabs() {
+  const tabs = serverOn() ? SIGNAL_TABS : SIGNAL_TABS.filter(([id]) => id !== 'opps');
+  const on = tabs.some(([id]) => id === state.settings.signalsTab) ? state.settings.signalsTab : 'watchlist';
+  const m = state.market || {};
+  const tf = state.settings.alertTf;
+  const counts = {
+    watchlist: Object.values(state.signals).filter(s => findItem(s.key) && s.tf === tf && s.action !== 'hold').length,
+    opps: m.at && m.records ? (m.opportunities || []).length : null,
+    market: m.at ? (m.buys || []).length + (m.sells || []).length : null,
+  };
+  $('signal-tabs').replaceChildren(...tabs.map(([id, label]) => el('button', {
+    type: 'button', role: 'tab', class: id === on ? 'on' : '', 'aria-selected': id === on ? 'true' : 'false',
+    text: counts[id] == null ? label : `${label} (${counts[id]})`,
+    onclick: () => { state.settings = store.saveSettings({ signalsTab: id }); renderSignalTabs(); },
+  })));
+  for (const [id, , body] of SIGNAL_TABS) $(body).hidden = id !== on;
 }
 
 // "Tuned: Buy +25, Sell -30, dip mode · test +8% vs +3% standard"
@@ -690,15 +765,21 @@ function renderSignals() {
       : 'Not scanned yet.';
   $('scan-btn').disabled = scan.busy;
   const errors = Object.entries(scan.errors);
+  const card = sig => paperNote(signalCard(sig), sig);
   const section = (title, list, empty) => [
     el('h2', { class: 'section', text: `${title} (${list.length})` }),
-    list.length ? el('ul', { class: 'list' }, ...list.map(sig => paperNote(signalCard(sig), sig))) : el('p', { class: 'muted small', text: empty }),
+    ...(list.length ? shortList(list, card) : [el('p', { class: 'muted small', text: empty })]),
   ];
+  const holdsOpen = state.openCards.has('holds');
   $('signals-body').replaceChildren(
-    ...section(`Your watchlist: Buy on ${TIMEFRAMES[tf].label}`, buys, 'No symbol is a Buy right now.'),
-    ...section(`Your watchlist: Sell on ${TIMEFRAMES[tf].label}`, sells, 'No symbol is a Sell right now.'),
-    ...section('Your watchlist: no signal', holds, 'Nothing else scanned yet.'),
-    errors.length ? el('p', { class: 'muted small', text: `Could not score: ${errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ')}` }) : '',
+    ...section(`Buy on ${TIMEFRAMES[tf].label}`, buys, 'No symbol is a Buy right now.'),
+    ...section(`Sell on ${TIMEFRAMES[tf].label}`, sells, 'No symbol is a Sell right now.'),
+    holds.length ? el('details', { class: 'report', open: holdsOpen, ontoggle: e => { if (e.currentTarget.open) state.openCards.add('holds'); else state.openCards.delete('holds'); } },
+      el('summary', { text: `No signal (${holds.length})` }),
+      el('ul', { class: 'list' }, ...holds.map(card))) : null,
+    errors.length ? el('details', { class: 'report' },
+      el('summary', { text: `Could not score ${errors.length}` }),
+      el('p', { class: 'muted small', text: errors.map(([k, e]) => `${k.split(':')[1]} (${e})`).join('; ') })) : '',
   );
   renderOpportunities();
   renderMarket();
@@ -707,6 +788,10 @@ function renderSignals() {
 // ---- Opportunities (from the server's market scan) -------------------------------
 
 const setupName = id => (id === 'signal' ? 'Buy and Sell signals' : id === 'scan' ? 'Market scan ideas' : SETUPS[id] ? SETUPS[id].name : id);
+// Stock or crypto, in its own colour so the two are told apart at a glance.
+const typeBadge = type => el('span', { class: `badge type-${type === 'crypto' ? 'crypto' : 'stock'}`, text: type === 'crypto' ? 'Crypto' : 'Stock' });
+// A short tag for where a paper trade came from.
+const sourceTag = id => (id === 'signal' ? 'Signal' : id === 'scan' ? 'Scan' : SETUPS[id] ? SETUPS[id].name : id);
 const holdText = o => `${o.hold} ${o.type === 'stock' ? 'trading days' : 'days'}`;
 
 async function rateSetup(setups, useful, id) {
@@ -751,17 +836,18 @@ function opportunityCard(o) {
   const item = { type: o.type, symbol: o.symbol, name: o.name };
   const symbolRec = o.symbolRecord && o.symbolRecord.n >= 3
     ? `On ${o.symbol}: ${o.symbolRecord.wins} of ${o.symbolRecord.n} past cases made money, average ${fmtPct(o.symbolRecord.avg)}.` : '';
-  return el('li', { class: 'signal opp', onclick: () => { state.chartTf = '1D'; openChart(item, true); } },
-    el('div', { class: 'signal-top' },
-      el('div', { class: 'sym' }, o.symbol, el('span', { class: 'badge', text: o.type === 'stock' ? 'Stock' : 'Crypto' }),
-        el('span', { class: o.proven ? 'badge proven' : 'badge', text: o.proven ? 'Proven' : 'Watching, not proven' })),
-      el('div', { class: `score ${o.ev > 0 ? 'up' : 'down'}`, text: fmtPct(o.ev) })),
-    el('div', { class: 'sub', text: setupName(o.setup) }),
+  return foldCard('signal opp', `opp:${o.id}`, [
+    el('div', { class: 'sym' }, o.symbol, typeBadge(o.type),
+      el('span', { class: o.proven ? 'badge proven' : 'badge', text: o.proven ? 'Proven' : 'Not proven' }),
+      el('span', { class: 'opp-setup', text: setupName(o.setup) })),
+    el('div', { class: `score ${o.ev > 0 ? 'up' : 'down'}`, text: fmtPct(o.ev) }),
+  ], [
     el('p', { class: 'why', text: o.why }),
     el('div', { class: 'sub', text: recordLine(o.record, o.hold) }),
     symbolRec ? el('div', { class: 'sub', text: symbolRec }) : null,
     el('div', { class: 'sub', text: `Entry ${formatMoney(o.entry)} · Stop ${formatMoney(o.stop)} · Target ${formatMoney(o.take)} · hold up to ${holdText(o)}` }),
-    feedbackButtons([o.setup], o.id));
+    feedbackButtons([o.setup], o.id),
+  ], () => { state.chartTf = '1D'; openChart(item, true); });
 }
 
 function setupReport(m) {
@@ -785,7 +871,7 @@ function setupReport(m) {
     return el('li', { class: 'sub', text: `${label}: ${st.ok ? `loaded (${st.count})` : 'not loaded'}${st.at ? `, ${timeAgo(st.at)}` : ''}${st.error ? `. ${st.error}` : ''}` });
   });
   return el('details', { class: 'report' },
-    el('summary', { text: 'Setup report' }),
+    el('summary', { text: 'How each setup has done' }),
     el('p', { class: 'muted small', text: 'Every past case of each setup on the scanned symbols\' daily charts: bought at the close, sold at the stop, the target or the end of the holding period, after fees. A setup sends alerts once it is proven: at least 30 cases with a positive average.' }),
     el('div', { class: 'table-wrap' }, el('table', { class: 'setups' },
       el('thead', {}, el('tr', {}, ...['Setup', 'Cases', 'Won', 'Average', 'Status'].map(t => el('th', { text: t })))),
@@ -810,6 +896,7 @@ async function runMarketNow(button) {
 function renderOpportunities() {
   const body = $('opps-body');
   const m = state.market;
+  renderSignalTabs();
   if (!serverOn()) {
     body.replaceChildren();
     return;
@@ -827,12 +914,11 @@ function renderOpportunities() {
   const muted = (m.setupsInfo && m.setupsInfo.muted) || [];
   const warnings = m.warnings || [];
   body.replaceChildren(...[
-    el('h2', { class: 'section', text: `Opportunities (${opps.length})` }),
     el('p', { class: 'muted small', text: `Ranked by the average result of past cases after fees, from the scan ${timeAgo(m.at)}.` }),
     muted.length ? el('p', { class: 'small', text: `Muted after your ratings: ${muted.map(setupName).join(', ')}. They still show here; turn their alerts back on in Settings.` }) : null,
     warnings.length ? el('ul', { class: 'list' }, ...warnings.map(w => el('li', { class: 'signal' }, el('div', { class: 'sym', text: w.title }), el('div', { class: 'sub', text: w.body })))) : null,
-    opps.length ? el('ul', { class: 'list' }, ...opps.slice(0, 15).map(opportunityCard))
-      : el('p', { class: 'muted small', text: 'No setup fired on the newest candles. The report below shows how each one did in the past.' }),
+    ...(opps.length ? shortList(opps, o => oppPaperNote(opportunityCard(o), o))
+      : [el('p', { class: 'muted small', text: 'No setup fired on the newest candles. The report below shows how each one did in the past.' })]),
     setupReport(m),
   ].filter(Boolean));
 }
@@ -840,6 +926,7 @@ function renderOpportunities() {
 function renderMarket() {
   const m = state.market;
   const body = $('market-body');
+  renderSignalTabs();
   if (!serverOn()) {
     body.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server in Settings to see buy and sell ideas from the whole S&P 500 and every actively traded coin.' }));
     return;
@@ -855,18 +942,14 @@ function renderMarket() {
     if (fresh.has(sig.key)) li.querySelector('.sym').append(el('span', { class: 'badge', text: 'New' }));
     return paperNote(li, sig);
   };
-  // The 10 strongest, then a button for the rest.
-  const list = (title, rows, empty) => {
-    if (!rows.length) return [el('h3', { class: 'market-title', text: `${title} (0)` }), el('p', { class: 'muted small', text: empty })];
-    const ul = el('ul', { class: 'list' }, ...rows.slice(0, 10).map(card));
-    const more = rows.length > 10 ? el('button', { type: 'button', class: 'ghost', text: `Show all ${rows.length}`, onclick: e => { ul.append(...rows.slice(10).map(card)); e.currentTarget.remove(); } }) : null;
-    return [el('h3', { class: 'market-title', text: `${title} (${rows.length})` }), ul, more].filter(Boolean);
-  };
+  // Buy or sell ideas, one list at a time.
+  const side = state.marketSide === 'sell' ? 'sell' : 'buy';
+  const rows = (side === 'buy' ? m.buys : m.sells) || [];
+  const pick = (id, label, n) => el('button', { type: 'button', class: id === side ? 'on' : '', text: `${label} (${n})`, onclick: () => { state.marketSide = id; renderMarket(); } });
   body.replaceChildren(
-    el('h2', { class: 'section', text: 'Market scan' }),
     el('p', { class: 'muted small', text: scanLine(m) }),
-    ...list('Market buy ideas (1D)', m.buys || [], 'No buy ideas in the last scan.'),
-    ...list('Market sell ideas (1D)', m.sells || [], 'No sell ideas in the last scan.'),
+    el('div', { class: 'chips' }, pick('buy', 'Buy ideas', (m.buys || []).length), pick('sell', 'Sell ideas', (m.sells || []).length)),
+    ...(rows.length ? shortList(rows, card) : [el('p', { class: 'muted small', text: `No ${side} ideas in the last scan.` })]),
   );
 }
 
@@ -877,15 +960,31 @@ function scanLine(m) {
   return `Daily chart, scanned by your server: ${crypto} (every 15 minutes, day and night), ${stocks}.`;
 }
 
+// Opportunities the server's paper account bought get a PAPER tag too; the
+// others say why it didn't buy them.
+function oppPaperNote(li, o) {
+  if (!serverPaperOn()) return li;
+  const acc = state.serverPaper.paper;
+  if ((acc.positions || []).some(p => p.id === o.id || (p.key === o.key && p.setup === o.setup))) {
+    li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
+  } else if (acc.skips && acc.skips[o.key]) {
+    (li.querySelector('.details') || li).append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[o.key]}.` }));
+  }
+  return li;
+}
+
 // Buy ideas the server's paper account holds get a PAPER tag; the others say
 // why it didn't buy them.
 function paperNote(li, sig) {
   if (!serverPaperOn() || sig.action !== 'buy') return li;
   const acc = state.serverPaper.paper;
+  const details = li.querySelector('.details') || li;
+  const filter = sig.filter || ((state.serverSignals || {})[sig.key] || {}).filter;
+  if (filter) details.append(el('div', { class: 'sub', text: filterText(filter) }));
   if ((acc.positions || []).some(p => p.key === sig.key)) {
     li.querySelector('.sym').append(el('span', { class: 'badge proven', text: 'Paper' }));
   } else if (acc.skips && acc.skips[sig.key]) {
-    li.append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[sig.key]}.` }));
+    details.append(el('div', { class: 'sub', text: `Not in paper trading: ${acc.skips[sig.key]}.` }));
   } else {
     // The server buys on its own score, which can differ from this phone's.
     const s = (state.serverSignals || {})[sig.key];
@@ -893,7 +992,7 @@ function paperNote(li, sig) {
       : !s ? 'the server has not scored it yet'
         : s.action !== 'buy' ? `the server rates it ${s.action === 'sell' ? 'Sell' : 'Hold'} (${fmtScore(s.score)}${s.tf ? ` on ${s.tf}` : ''}, price ${formatMoney(s.entry)}${s.candleTime ? `, candle of ${new Date(s.candleTime * 1000).toLocaleDateString()}` : ''}${s.source ? ` from ${s.source}` : ''}${s.at ? `, scored ${new Date(s.at).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : ''})`
           : null;
-    if (why) li.append(el('div', { class: 'sub', text: `Not in paper trading: ${why}.` }));
+    if (why) details.append(el('div', { class: 'sub', text: `Not in paper trading: ${why}.` }));
   }
   return li;
 }
@@ -1259,11 +1358,27 @@ function renderHoldings() {
             el('div', { class: 'price', text: formatMoney(v.value) }),
             el('span', { class: changeClass(v.pct), text: fmtPct(v.pct) }))),
       el('div', { class: 'sub', text: `${h.qty} at ${formatMoney(h.buyPrice)} · now ${formatMoney(price)} · ${v.pnl >= 0 ? '+' : ''}${formatMoney(v.pnl)}` }),
+      outcomeLine(h.qty, h.qty * h.buyPrice, h.stop, h.take),
       el('div', { class: 'sub' },
         `Stop ${h.stop != null ? formatMoney(h.stop) : 'not set'} · Target ${h.take != null ? formatMoney(h.take) : 'not set'} `,
         lvl === 'stop' ? el('span', { class: 'level stop', text: 'Stop hit' }) : lvl === 'target' ? el('span', { class: 'level target', text: 'Target reached' }) : null));
   }));
   if (!state.holdings.length) list.append(el('p', { class: 'muted center', text: 'Add what you own to get stop-loss, target and sell alerts.' }));
+}
+
+// What the position is worth if it sells at its stop and at its target,
+// against what was invested (less the broker's fee when `type` is given).
+function outcomeLine(qty, invested, stop, take, type) {
+  const at = price => qty * price - (type ? feeOf(type, qty, price) : 0);
+  const part = (name, price) => {
+    if (price == null || !Number.isFinite(price)) return null;
+    const v = at(price);
+    return el('span', {}, `${name}: ${formatMoney(v)} `, el('span', { class: upDown(v - invested), text: `(${signed(v - invested)})` }));
+  };
+  const s = part('At the stop', stop);
+  const t = part('At the target', take);
+  if (!s && !t) return null;
+  return el('div', { class: 'sub' }, ...[s, s && t ? ' · ' : null, t].filter(Boolean));
 }
 
 function removeHolding(h) {
@@ -1364,7 +1479,7 @@ function paperAccount() {
 function stepPaper(tf, alerts) {
   if (serverOn()) return; // the server trades the paper account
   const signals = Object.fromEntries(Object.entries(state.signals).filter(([, s]) => s.tf === tf));
-  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct, budgets: paper.PHONE_BUDGETS });
+  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct, budgets: paper.PHONE_BUDGETS, trail: state.settings.paperExit === 'trail' });
   store.savePaper(state.paper);
   for (const ev of events) {
     toast(ev.kind === 'open'
@@ -1373,11 +1488,18 @@ function stepPaper(tf, alerts) {
   }
 }
 
-function renderPaper() {
+function renderPaper({ force = false } = {}) {
+  // Background refreshes wait while you are changing a trade's stop and target.
+  if (!force && state.paperEditing && document.querySelector('.paper-edit:not([hidden])')) return;
+  state.paperEditing = null;
   const acc = paperAccount();
   const onServer = serverPaperOn();
   const serverPrices = (onServer && state.serverPaper.prices) || {};
-  const prices = Object.fromEntries(acc.positions.map(p => [p.key, Number.isFinite(priceOf(p.key)) ? priceOf(p.key) : serverPrices[p.key]]));
+  // Your watchlist's quote, else the server's latest price, else the last scan's close.
+  const m = state.market || {};
+  const scanned = Object.fromEntries([...(m.buys || []), ...(m.sells || [])].map(s => [s.key, s.entry]));
+  const lastPrice = key => [priceOf(key), serverPrices[key], ((state.serverSignals || {})[key] || {}).entry, scanned[key]].find(Number.isFinite);
+  const prices = Object.fromEntries(acc.positions.map(p => [p.key, lastPrice(p.key)]));
   const sum = paper.summary(acc, prices);
   const events = onServer ? state.serverPaper.events || [] : [];
   const fmtTime = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
@@ -1390,54 +1512,180 @@ function renderPaper() {
   const priced = open.filter(o => Number.isFinite(o.value));
   const openCost = priced.reduce((t, o) => t + o.p.cost, 0);
   const openPnl = priced.length ? priced.reduce((t, o) => t + o.pnl, 0) : NaN;
-  // replaceChildren() writes a null child as the text "null", so drop the empty sections.
-  $('paper-body').replaceChildren(...[
-    el('div', { class: 'card' },
-      el('div', { class: 'muted small', text: `Paper account, started ${fmtTime(acc.createdAt)} with ${formatMoney(acc.start)}` }),
-      el('p', { class: 'muted small', text: onServer
-        ? `Runs on your server around the clock: it checks for new signals right after every candle closes and checks stop-losses and targets every minute (stocks while the US market is open). Updated ${timeAgo(state.serverPaper.fetchedAt)}.`
-        : serverOn() ? 'Connecting to the paper account on your server…' : 'Trades only while the app is open. Connect your server in Settings to trade around the clock.' }),
-      el('div', { class: 'big', text: formatMoney(sum.equity) }),
+  const sumMore = state.openCards.has('paper:more');
+  const summary = el('div', { class: 'card' },
+    el('div', { class: 'muted small', text: `Paper account, started ${fmtTime(acc.createdAt)} with ${formatMoney(acc.start)}${onServer ? ` · on your server, updated ${timeAgo(state.serverPaper.fetchedAt)}` : ''}` }),
+    el('div', { class: 'big', text: formatMoney(sum.equity) }),
+    el('dl', { class: 'stats' },
+      stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
+      stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
+      stat('Invested now', formatMoney(invested)),
+      stat('Cash', formatMoney(acc.cash))),
+    equityChart(acc, sum.equity, onServer ? state.serverPaper.shadow : null, { bare: true }),
+    el('details', { class: 'report', open: sumMore, ontoggle: e => { if (e.currentTarget.open) state.openCards.add('paper:more'); else state.openCards.delete('paper:more'); } },
+      el('summary', { text: 'More' }),
       el('dl', { class: 'stats' },
-        stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
-        stat('Invested now', formatMoney(invested)),
-        stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
-        stat('Cash', formatMoney(acc.cash)),
         stat('Closed trades', String(sum.trades)),
         stat('Won', sum.trades ? `${Math.round(sum.winRate * 100)}%` : '–'),
-        stat('Worst drop', fmtPct(-sum.maxDrawdown)))),
-    equityChart(acc, sum.equity),
-    bySetupTable(acc),
-    el('h2', { class: 'section', text: `Open (${acc.positions.length})` }),
-    pnlBars(priced),
-    acc.positions.length
-      ? el('ul', { class: 'list' }, ...open.map(({ p, price, value, pnl, ret }) =>
-        el('li', { class: 'holding paper-card', onclick: () => { const item = findItem(p.key); if (item) openChart(item, true); } },
-          el('div', { class: 'signal-top' },
-            el('div', { class: 'sym', text: p.symbol }),
-            el('span', { class: changeClass(pnl), text: Number.isFinite(pnl) ? fmtPct(ret) : '–' })),
-          el('dl', { class: 'money-row' },
-            stat('Invested', formatMoney(p.cost)),
-            stat('Worth now', Number.isFinite(value) ? formatMoney(value) : '–'),
-            stat('Gain/loss', Number.isFinite(pnl) ? signed(pnl) : '–', upDown(pnl))),
-          el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
-          el('div', { class: 'sub', text: `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
-          el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}` }))))
-      : el('p', { class: 'muted small', text: 'No open paper trades. The next new Buy signal opens one.' }),
-    events.length ? el('h2', { class: 'section', text: 'Latest paper trades' }) : null,
-    events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 10).map(ev => el('li', { class: 'holding' },
-      el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` })))) : null,
-    el('h2', { class: 'section', text: `Closed (${acc.trades.length})` }),
-    acc.trades.length
-      ? el('ul', { class: 'list compact' }, ...acc.trades.slice(-30).reverse().map(t => el('li', { class: 'holding' },
-        el('div', { class: 'signal-top' },
-          el('div', { class: 'sym', text: t.symbol }),
-          el('span', { class: changeClass(t.pnl), text: `${signed(t.pnl)} (${fmtPct(t.ret)})` })),
-        el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
-        el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)} · ${t.reason === 'time' ? 'holding period over' : t.reason}` }),
-        el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }))))
-      : el('p', { class: 'muted small', text: 'No closed paper trades yet.' }),
-  ].filter(Boolean));
+        stat('Worst drop', fmtPct(-sum.maxDrawdown)))));
+
+  // Open, Closed and Results: one at a time, the last one remembered.
+  const tab = ['open', 'closed', 'results', 'latest'].includes(state.settings.paperTab) ? state.settings.paperTab : 'open';
+  const tabs = el('div', { class: 'chips tabs', role: 'tablist' }, ...[['open', `Open (${acc.positions.length})`], ['closed', `Closed (${acc.trades.length})`], ['results', 'By setup'], ['latest', 'Latest']]
+    .map(([id, label]) => el('button', { type: 'button', role: 'tab', class: id === tab ? 'on' : '', 'aria-selected': id === tab ? 'true' : 'false', text: label,
+      onclick: () => { state.settings = store.saveSettings({ paperTab: id }); renderPaper({ force: true }); } })));
+
+  const body = tab === 'open' ? openTab() : tab === 'closed' ? closedTab() : tab === 'latest' ? [
+    // Every buy and sell, newest first.
+    events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 50).map(ev => el('li', { class: 'holding' },
+      el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` }))))
+      : el('p', { class: 'muted small', text: onServer ? 'No paper buys or sells yet.' : 'The latest buys and sells show here when your server runs the paper account.' }),
+  ] : [
+    bySetupTable(acc, onServer ? state.serverPaper.budgets : null),
+    onServer ? filterTrialCard(state.serverPaper) : null,
+  ];
+  // replaceChildren() writes a null child as the text "null", so drop the empty parts.
+  $('paper-body').replaceChildren(...[summary, tabs, ...body].filter(Boolean));
+
+  function openTab() {
+    const sources = [['all', 'All'], ['signal', 'Signals'], ['scan', 'Scan'], ['opps', 'Opportunities']];
+    const source = sources.some(([id]) => id === state.paperSource) ? state.paperSource : 'all';
+    const sourceOf = p => { const s = paper.setupOf(p); return s === 'signal' || s === 'scan' ? s : 'opps'; };
+    const sorts = { loss: (a, b) => (a.pnl || 0) - (b.pnl || 0), gain: (a, b) => (b.pnl || 0) - (a.pnl || 0), newest: (a, b) => b.p.openedAt - a.p.openedAt };
+    const sort = sorts[state.paperSort] ? state.paperSort : 'loss';
+    const rows = open.filter(o => source === 'all' || sourceOf(o.p) === source).sort(sorts[sort]);
+    const select = el('select', { 'aria-label': 'Sort', onchange: e => { state.paperSort = e.target.value; renderPaper({ force: true }); } },
+      ...[['loss', 'Biggest loss first'], ['gain', 'Biggest gain first'], ['newest', 'Newest first']].map(([v, t]) => el('option', { value: v, text: t, selected: v === sort })));
+    return [
+      acc.positions.length ? el('div', { class: 'paper-tools' },
+        el('div', { class: 'chips' }, ...sources.map(([id, label]) => el('button', { type: 'button', class: id === source ? 'on' : '', text: label, onclick: () => { state.paperSource = id; renderPaper({ force: true }); } }))),
+        select) : null,
+      pnlBars(rows.filter(o => Number.isFinite(o.value))),
+      rows.length ? el('ul', { class: 'list' }, ...rows.map(openCard))
+        : el('p', { class: 'muted small', text: acc.positions.length ? 'No open trades from this source.' : 'No open paper trades. The next new Buy signal opens one.' }),
+    ];
+  }
+
+  function openCard({ p, price, value, pnl, ret }) {
+    return foldCard('holding paper-card', `paper:${p.key}`, [
+      el('div', { class: 'sym' }, p.symbol, typeBadge(p.type), el('span', { class: 'badge', text: sourceTag(p.setup || 'signal') }),
+        p.trail ? el('span', { class: 'badge', text: 'Trailing' }) : null),
+      el('div', { class: `paper-gain ${upDown(pnl)}`, text: Number.isFinite(pnl) ? `${signed(pnl)} · ${fmtPct(ret)}` : '–' }),
+    ], [
+      el('dl', { class: 'money-row' },
+        stat('Invested', formatMoney(p.cost)),
+        stat('Worth now', Number.isFinite(value) ? formatMoney(value) : '–'),
+        stat('Gain/loss', Number.isFinite(pnl) ? signed(pnl) : '–', upDown(pnl))),
+      el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
+      el('div', { class: 'sub', text: p.trail
+        ? `Trailing stop at ${formatMoney(p.stop)}${p.stop > p.entry ? ' (above what it cost)' : ''}, highest ${formatMoney(p.high || p.entry)}; no target`
+        : `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
+      outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
+      p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
+      el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
+      paperControls(p, price),
+    ], () => { const item = findItem(p.key); if (item) openChart(item, true); });
+  }
+
+  function closedTab() {
+    const result = ['all', 'won', 'lost'].includes(state.closedFilter) ? state.closedFilter : 'all';
+    const rows = acc.trades.filter(t => result === 'all' || (result === 'won' ? t.pnl > 0 : t.pnl <= 0)).slice().reverse();
+    const shown = state.closedShown || 10;
+    const why = t => (t.reason === 'time' ? 'holding period over' : t.reason);
+    const card = t => foldCard('holding', `closed:${t.key}:${t.closedAt}`, [
+      el('div', { class: 'sym' }, t.symbol, typeBadge(t.type), el('span', { class: 'closed-why', text: why(t) })),
+      el('div', { class: `paper-gain ${upDown(t.pnl)}`, text: `${signed(t.pnl)} · ${fmtPct(t.ret)}` }),
+    ], [
+      el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
+      el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)}` }),
+      el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }),
+    ], () => { const item = findItem(t.key); if (item) openChart(item, true); });
+    return [
+      acc.trades.length ? el('div', { class: 'chips' }, ...[['all', 'All'], ['won', 'Won'], ['lost', 'Lost']].map(([id, label]) =>
+        el('button', { type: 'button', class: id === result ? 'on' : '', text: label, onclick: () => { state.closedFilter = id; state.closedShown = 10; renderPaper({ force: true }); } }))) : null,
+      rows.length ? el('ul', { class: 'list' }, ...rows.slice(0, shown).map(card))
+        : el('p', { class: 'muted small', text: acc.trades.length ? 'No trades here.' : 'No closed paper trades yet.' }),
+      rows.length > shown ? el('button', { type: 'button', class: 'ghost show-all', text: `Show more (${rows.length - shown} left)`, onclick: () => { state.closedShown = shown + 20; renderPaper({ force: true }); } }) : null,
+    ];
+  }
+}
+
+// Your own say on a paper trade: move its stop and target, or sell it now.
+function paperControls(p, price) {
+  const stop = el('input', { type: 'number', inputmode: 'decimal', step: 'any', min: '0', value: String(p.stop) });
+  const take = el('input', { type: 'number', inputmode: 'decimal', step: 'any', min: '0', value: String(p.take) });
+  const status = el('p', { class: 'small', role: 'status' });
+  // Or a target set by what you want to keep: the price where selling makes
+  // that much after both brokers' fees.
+  const gain = el('input', { type: 'number', inputmode: 'decimal', step: 'any', min: '0', placeholder: 'e.g. 5' });
+  const trail = el('input', { type: 'checkbox' });
+  trail.checked = !!p.trail;
+  const keep = el('p', { class: 'muted small' });
+  const showKeep = () => {
+    const t = Number(take.value);
+    const s = Number(stop.value);
+    const net = price => p.qty * price - feeOf(p.type, p.qty, price) - p.cost;
+    take.disabled = gain.disabled = trail.checked;
+    keep.textContent = trail.checked
+      ? `No target: the stop moves to break even once the price is up ${formatMoney(p.risk ? p.risk / 2 : (p.entry - s) / 2)}, then follows the highest price.${s > 0 ? ` At the stop now you keep ${signed(net(s))}.` : ''}`
+      : t > 0 ? `At the target you keep ${signed(net(t))} after fees${s > 0 ? `; at the stop, ${signed(net(s))}` : ''}.` : '';
+  };
+  trail.addEventListener('change', showKeep);
+  gain.addEventListener('input', () => {
+    const t = paper.priceForGain(p, Number(gain.value));
+    if (Number.isFinite(t)) take.value = String(t);
+    showKeep();
+  });
+  take.addEventListener('input', () => { gain.value = ''; showKeep(); });
+  stop.addEventListener('input', showKeep);
+  showKeep();
+  const form = el('div', { class: 'paper-edit', hidden: true },
+    el('div', { class: 'row two' },
+      el('label', { class: 'field' }, el('span', { text: 'Stop-loss, USD' }), stop),
+      el('label', { class: 'field' }, el('span', { text: 'Target, USD' }), take)),
+    el('label', { class: 'field' }, el('span', { text: 'Or: sell when I make, after fees, USD' }), gain),
+    el('label', { class: 'switch' }, trail, el('span', { text: 'Trail the stop instead of a target' })),
+    keep,
+    el('div', { class: 'row' },
+      el('button', { type: 'button', class: 'primary', text: 'Save', onclick: () => editPaper(p, { action: 'levels', stop: Number(stop.value), take: Number(take.value), trail: trail.checked }, status) }),
+      el('button', { type: 'button', class: 'ghost', text: 'Cancel', onclick: () => { form.hidden = true; state.paperEditing = null; } })),
+    status);
+  const wrap = el('div', { class: 'paper-actions', onclick: e => e.stopPropagation() },
+    el('div', { class: 'row' },
+      el('button', { type: 'button', class: 'ghost', text: 'Change stop and target', onclick: () => { form.hidden = !form.hidden; state.paperEditing = form.hidden ? null : p.key; } }),
+      el('button', { type: 'button', class: 'ghost', text: 'Sell now', onclick: () => editPaper(p, { action: 'sell', price }, status) })),
+    form);
+  return wrap;
+}
+
+async function editPaper(p, { action, price, stop, take, trail }, status) {
+  if (action === 'levels' && !(stop > 0 && (trail || take > stop))) {
+    status.textContent = 'The stop must be above zero and below the target.';
+    return;
+  }
+  if (action === 'sell') {
+    if (!(price > 0)) { status.textContent = 'No price for it yet; try again in a minute.'; return; }
+    if (!confirm(`Sell ${fmtQty(p)} of ${p.symbol} now at about ${formatMoney(price)}?`)) return;
+  }
+  if (serverPaperOn()) {
+    try {
+      const path = action === 'sell' ? '/paper/sell' : '/paper/levels';
+      const body = action === 'sell' ? { key: p.key, price } : { key: p.key, stop, take, trail: !!trail };
+      const { paper: acc } = await srv.serverFetch(state.settings, path, { method: 'POST', body });
+      state.serverPaper = { ...state.serverPaper, paper: acc, fetchedAt: Date.now() };
+      store.saveServerPaper(state.serverPaper);
+      refreshPaper();
+    } catch (e) {
+      status.textContent = `Your server said no: ${e.message}`;
+      return;
+    }
+  } else {
+    const ok = action === 'sell' ? paper.sellNow(paperAccount(), p.key, price) : paper.setLevels(paperAccount(), p.key, { stop, take, trail: !!trail });
+    if (!ok) { status.textContent = 'That did not apply.'; return; }
+    store.savePaper(state.paper);
+  }
+  toast(action === 'sell' ? `Paper trade: sold ${p.symbol}` : trail ? `Paper trade: ${p.symbol} now trails its stop from ${formatMoney(stop)}` : `Paper trade: ${p.symbol} now sells at ${formatMoney(stop)} or ${formatMoney(take)}`);
+  renderPaper({ force: true });
 }
 
 const signed = v => `${v >= 0 ? '+' : '−'}${formatMoney(Math.abs(v))}`;
@@ -1454,26 +1702,30 @@ function svg(tag, attrs = {}, ...children) {
 }
 
 // The account's value over time against what it started with: green above, red below.
-function equityChart(acc, now) {
+// A grey line shows the same account without the trade filter, from when it began.
+// `bare`: just the chart and its note, to sit inside another card.
+function equityChart(acc, now, shadow, { bare = false } = {}) {
   const pts = [...acc.history.map(h => ({ t: h.t, v: h.equity })), { t: Date.now(), v: now }]
     .filter(p => Number.isFinite(p.v) && p.t >= acc.createdAt - 60_000);
   if (pts.length < 2) return null;
+  const spts = shadow ? shadow.history.map(h => ({ t: h.t, v: h.equity })).filter(p => Number.isFinite(p.v) && p.t >= pts[0].t) : [];
   const W = 600, H = 170, padL = 4, padR = 4, padT = 10, padB = 22;
   const t0 = pts[0].t, t1 = pts.at(-1).t;
-  const vs = [...pts.map(p => p.v), acc.start];
+  const vs = [...pts.map(p => p.v), ...spts.map(p => p.v), acc.start];
   let lo = Math.min(...vs), hi = Math.max(...vs);
   const pad = Math.max((hi - lo) * 0.1, acc.start * 0.002);
   lo -= pad; hi += pad;
   const x = t => padL + (t1 > t0 ? (t - t0) / (t1 - t0) : 1) * (W - padL - padR);
   const y = v => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
-  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const path = list => list.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const line = path(pts);
   const base = y(acc.start);
   const area = `${line}L${x(t1).toFixed(1)},${base.toFixed(1)}L${x(t0).toFixed(1)},${base.toFixed(1)}Z`;
   const id = `eq${Math.random().toString(36).slice(2, 8)}`;
   const day = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
   const change = now - acc.start;
-  return el('div', { class: 'card' },
-    el('div', { class: 'signal-top' },
+  return el('div', { class: bare ? 'equity-in' : 'card' },
+    bare ? null : el('div', { class: 'signal-top' },
       el('h3', { text: 'Account value' }),
       el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
     svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
@@ -1485,27 +1737,70 @@ function equityChart(acc, now) {
       svg('line', { x1: padL, x2: W - padR, y1: base, y2: base, stroke: 'var(--muted)', 'stroke-dasharray': '4 4', 'stroke-width': 1 }),
       svg('path', { d: line, fill: 'none', stroke: 'var(--up)', 'stroke-width': 2, 'clip-path': `url(#${id}a)` }),
       svg('path', { d: line, fill: 'none', stroke: 'var(--down)', 'stroke-width': 2, 'clip-path': `url(#${id}b)` }),
+      spts.length > 1 ? svg('path', { d: path(spts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.5, 'stroke-dasharray': '6 3' }) : null,
       svg('text', { x: padL, y: H - 6, fill: 'var(--muted)', 'font-size': 20 }, day(t0)),
       svg('text', { x: W - padR, y: H - 6, fill: 'var(--muted)', 'font-size': 20, 'text-anchor': 'end' }, 'now')),
-    el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.` }));
+    el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.${spts.length > 1 ? ' Grey line: the same account without the trade filter.' : ''}` }));
+}
+
+// The filtered account against the same account without the filter, on the
+// trades both opened since the comparison began.
+function filterTrialCard(sp) {
+  const t = sp.filterTrial;
+  if (!t || !sp.shadow) return null;
+  const since = new Date(t.since).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const prices = sp.prices || {};
+  const status = t.result === 'ahead'
+    ? 'The filter has proved itself: ready to let it choose stops and targets.'
+    : t.result === 'behind'
+      ? 'The filter did worse than trading without it, so it is switched off. Starting the paper account over gives it a new trial.'
+      : t.judged
+        ? `Testing: ${t.judged} of the ${t.need} closed trades it needs before it is judged.`
+        : 'Waiting for its first trades. It has a say only once it has passed its own test on your server.';
+  const line = (name, trades, pnl, acc) => el('tr', {},
+    el('td', { text: name }),
+    el('td', { text: String(trades) }),
+    el('td', { class: upDown(pnl), text: signed(pnl) }),
+    el('td', { text: formatMoney(paper.equity(acc, prices)) }));
+  return el('div', { class: 'card' },
+    el('h3', { text: 'Trade filter' }),
+    el('p', { class: t.result === 'ahead' ? 'small good' : 'small', text: status }),
+    el('div', { class: 'table-wrap' }, el('table', { class: 'setups' },
+      el('thead', {}, el('tr', {}, ...['Account', 'Closed trades', `Gain/loss since ${since}`, 'Value now'].map(h => el('th', { text: h })))),
+      el('tbody', {},
+        line('With the filter', t.trades, t.pnl, sp.paper),
+        line('Without it', t.shadowTrades, t.shadowPnl, sp.shadow)))),
+    el('p', { class: 'muted small', text: `Both accounts take the same ideas; the one without the filter buys every one, the same size as before. After ${t.need} closed trades the filter had a say on, it stays on only if it is ahead.` }));
 }
 
 // Each open trade's gain or loss in dollars, biggest first.
+// In the order given, so the bars match the list under them.
 function pnlBars(rows) {
   if (!rows.length) return null;
-  const sorted = [...rows].sort((a, b) => b.pnl - a.pnl);
+  const sorted = rows;
   const max = Math.max(...sorted.map(r => Math.abs(r.pnl)), 0.01);
   return el('div', { class: 'card pnl-bars' },
     el('h3', { text: 'Gain or loss on each open trade' }),
-    ...sorted.map(r => el('div', { class: 'pnl-row' },
+    el('p', { class: 'muted small', text: 'Tap a bar to open that trade.' }),
+    ...sorted.map(r => el('div', { class: 'pnl-row', role: 'button', tabindex: '0', onclick: () => showPaperTrade(r.p.key) },
       el('span', { class: 'pnl-sym', text: r.p.symbol }),
       el('span', { class: 'pnl-track' },
         el('span', { class: `pnl-fill ${r.pnl >= 0 ? 'up' : 'down'}`, style: `width:${(Math.abs(r.pnl) / max * 50).toFixed(1)}%` })),
       el('span', { class: `pnl-val ${upDown(r.pnl)}`, text: `${signed(r.pnl)} (${fmtPct(r.ret)})` }))));
 }
 
+// Opens one open trade's card and scrolls to it.
+function showPaperTrade(key) {
+  const id = `paper:${key}`;
+  state.openCards.add(id);
+  state.paperSource = 'all';
+  renderPaper({ force: true });
+  const card = [...document.querySelectorAll('#paper-body [data-card]')].find(c => c.dataset.card === id);
+  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 // Trades, win rate, return and worst drop for each way the account trades.
-function bySetupTable(acc) {
+function bySetupTable(acc, budgets) {
   const rows = paper.bySetup(acc);
   if (!rows.length || (rows.length === 1 && rows[0].setup === 'signal')) return null;
   return el('div', { class: 'card' },
@@ -1518,7 +1813,8 @@ function bySetupTable(acc) {
         el('td', { text: r.trades ? `${Math.round(r.winRate * 100)}%` : '–' }),
         el('td', { class: upDown(r.ret), text: r.trades ? fmtPct(r.ret) : '–' }),
         el('td', { text: r.trades ? fmtPct(-r.maxDrawdown) : '–' })))))),
-    el('p', { class: 'muted small', text: 'Return is on the starting amount. Opportunity trades sell at their stop, their target or the end of their holding period.' }));
+    el('p', { class: 'muted small', text: 'Return is on the starting amount. Opportunity trades sell at their stop, their target or the end of their holding period.' }),
+    budgets && budgets.shares ? el('p', { class: 'muted small', text: `Share of the account each source can use (one trade gets up to a fifth of it, up to 10 trades): ${Object.entries(paper.BUDGETS).map(([k, b]) => `${b.name} ${Math.round((budgets.shares[k] ?? b.share) * 100)}%`).join(', ')}. Once two sources have 50 closed trades, the one with the best average trade takes up to 5 points a week from the worst, within 10% to 50%.` }) : null);
 }
 
 async function resetPaper() {
@@ -1563,6 +1859,8 @@ function renderSettings() {
   $('take-atr').value = state.settings.takeAtr;
   $('risk-pct').value = state.settings.riskPct;
   $('paper-start').value = state.settings.paperStart;
+  $('filter-toggle').checked = state.settings.tradeFilter !== false;
+  $('paper-exit').value = state.settings.paperExit === 'trail' ? 'trail' : 'target';
   $('server-url').value = state.settings.serverUrl;
   $('server-key').value = state.settings.serverKey;
   renderNotifyStatus();
@@ -1730,6 +2028,11 @@ function bind() {
     });
   }
   $('scan-btn').addEventListener('click', () => runScan({ force: true }));
+  $('signals-info').addEventListener('click', e => {
+    const notice = $('signals-notice');
+    notice.hidden = !notice.hidden;
+    e.currentTarget.setAttribute('aria-expanded', String(!notice.hidden));
+  });
   for (const b of document.querySelectorAll('#pf-seg button')) b.addEventListener('click', () => { state.pfTab = b.dataset.pf; renderPortfolio(); if (state.pfTab === 'paper') refreshPaper(); });
   $('hold-add').addEventListener('click', openHoldDialog);
   $('hold-edit').addEventListener('click', () => { state.holdEditing = !state.holdEditing; renderHoldings(); });
@@ -1750,6 +2053,16 @@ function bind() {
   $('sell-at').addEventListener('change', saveThresholds);
   $('notify-btn').addEventListener('click', toggleNotifications);
   $('quiet-toggle').addEventListener('change', e => { state.settings = store.saveSettings({ quietHours: e.target.checked }); markChanged(); });
+  $('filter-toggle').addEventListener('change', e => {
+    state.settings = store.saveSettings({ tradeFilter: e.target.checked });
+    markChanged();
+    $('risk-status').textContent = 'Saved. The paper account uses it from the next check.';
+  });
+  $('paper-exit').addEventListener('change', e => {
+    state.settings = store.saveSettings({ paperExit: e.target.value === 'trail' ? 'trail' : 'target' });
+    markChanged();
+    $('risk-status').textContent = 'Saved. New paper trades use it; open ones keep theirs (change them on the Paper tab).';
+  });
   $('server-save').addEventListener('click', saveServer);
   $('server-push').addEventListener('click', toggleServerPush);
   $('server-test').addEventListener('click', testServerPush);

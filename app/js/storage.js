@@ -34,8 +34,12 @@ export const DEFAULT_SETTINGS = {
   quietHours: true,
   riskPct: 1,
   paperStart: 10000,
+  tradeFilter: true, // the server's paper account skips and sizes ideas by the trade filter
   stopAtr: 2,
   takeAtr: 3,
+  signalsTab: 'watchlist', // the Signals page's tab: watchlist, opps or market
+  paperTab: 'open', // the Paper page's tab: open, closed or results
+  paperExit: 'target', // 'target': sell paper trades at the target; 'trail': a trailing stop instead
   serverUrl: '',
   serverKey: '',
   serverPush: false,

@@ -146,10 +146,12 @@ test('paper: opportunities are tagged, kept to their budget, and sold when their
   const acc = paper.newAccount(100_000, 0);
   const opps = Array.from({ length: 12 }, (_, k) => ({ id: `ranking:stock:S${k}:1`, setup: k % 2 ? 'ranking' : 'insider', key: `stock:S${k}`, symbol: `S${k}`, type: 'stock', entry: 100, stop: 80, take: 130, hold: 10, ev: k / 100 }));
   const events = paper.openSetups(acc, opps, { riskPct: 1, now: 0 });
-  assert.equal(events.length, paper.BUDGETS.opportunities.max);
-  assert.equal(acc.positions.length, 5);
-  // Equal slots: 40% of the account over 5 positions.
-  assert.ok(acc.positions.every(p => p.qty * p.entry <= 8000 + 1)); // at most 40% over 5 positions
+  // The 1% risk limit makes each trade $5,000 (a $20 stop on $100), under its
+  // $8,000 slot, so 8 trades fit in the 40% share.
+  assert.equal(events.length, 8);
+  assert.equal(acc.positions.length, 8);
+  assert.ok(acc.positions.every(p => p.qty * p.entry <= 8000 + 1));
+  assert.ok(acc.positions.reduce((t, p) => t + p.cost, 0) <= 40_000 + 1);
   // Best expected result first: S11 and S10 got in, S0 and S1 didn't.
   assert.ok(acc.positions.some(p => p.key === 'stock:S11') && !acc.positions.some(p => p.key === 'stock:S0'));
   assert.equal(acc.positions.find(p => p.key === 'stock:S11').setup, 'ranking');
@@ -162,11 +164,11 @@ test('paper: opportunities are tagged, kept to their budget, and sold when their
   const signals = Object.fromEntries(acc.positions.map(p => [p.key, { entry: 101, action: 'sell' }]));
   assert.equal(paper.step(acc, { signals, now: 86400_000 }).length, 0);
   const out = paper.step(acc, { signals, now: 15 * 86400_000 });
-  assert.equal(out.length, 5);
+  assert.equal(out.length, 8);
   assert.ok(out.every(e => e.reason === 'time'));
   const table = paper.bySetup(acc);
   assert.deepEqual(table.map(r => r.setup).sort(), ['insider', 'ranking']);
-  assert.deepEqual(table.map(r => r.trades).sort(), [2, 3]);
+  assert.deepEqual(table.map(r => r.trades).sort(), [4, 4]);
   assert.ok(table.every(r => r.winRate === 1 && r.ret > 0));
 });
 

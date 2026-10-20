@@ -40,7 +40,7 @@ for await (const c of process.stdin) s += c;
 const { models, rows } = JSON.parse(s);
 process.stdout.write(JSON.stringify(rows.map(r => [
   lgbmProbability(models.lgbm, r.x.map(v => (v === null ? NaN : v))),
-  lstmProbability(models.lstm, r.seq),
+  models.lstm ? lstmProbability(models.lstm, r.seq) : null,
 ])));
 """ % ("file://" + os.path.join(os.path.dirname(HERE), "js", "ml.js"))
     out = subprocess.run(["node", "--input-type=module", "-e", script], input=json.dumps({"models": models, "rows": rows}), capture_output=True, text=True, check=True)
@@ -202,3 +202,56 @@ def test_models_reach_the_engine_and_the_app(monkeypatch):
     assert status["models"]["1D"]["lgbm"]["hit"] == 0.6 and "trees" not in status["models"]["1D"]
     assert "nextAt" in status["training"]
     assert c.get("/models").status_code == 401
+
+
+def fake_filter(n, seed=1, years=3):
+    """Trade filter rows where feature 0 tells winners from losers (with noise)."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    t = np.sort(rng.integers(0, years * 365, n)) * 86400
+    x = rng.normal(size=(n, 3))
+    win = (x[:, 0] + rng.normal(scale=0.7, size=n) > 0.4).astype(np.float32)
+    tp, sp, fee = np.full(n, 0.06), np.full(n, 0.04), np.full(n, 0.001)
+    ret = np.where(win == 1, tp, -sp) - 2 * fee
+    return ml.FilterData(np.array(["k"] * n, dtype=object), t, x, win, ret, tp, sp, fee)
+
+
+def test_filter_test_passes_only_with_enough_trades_and_a_real_edge():
+    import numpy as np
+    f = fake_filter(1000)
+    perfect = f.win * 0.98 + 0.01
+    out = ml.filter_test(perfect, f)
+    assert out["passed"] and out["kept"] == int(f.win.sum()) and out["keptWin"] == 1.0
+    assert out["keptAvg"] > out["allAvg"] > out["skippedAvg"] and out["medianEv"] > 0
+    blind = np.full(len(f), 0.45)  # keeps everything: no edge over all trades
+    out = ml.filter_test(blind, f)
+    assert not out["passed"] and out["kept"] == len(f) and out["why"]
+    assert ml.filter_test(perfect[:200], f.take(np.arange(200)))["why"] == "too few test trades"
+    assert ml.filter_test(np.zeros(len(f)), f)["why"] == "it kept too few trades"
+
+
+def test_filter_trains_before_the_test_year_and_js_agrees():
+    import numpy as np
+    f = fake_filter(6000)
+    model = ml.train_filter(f, ["a", "b", "c"])
+    assert model and model["features"] == ["a", "b", "c"] and model["trees"]
+    assert model["cutoff"] == int(f.t.max()) - ml.FILTER_TEST_DAYS * 86400
+    test = f.take(np.flatnonzero(f.t > model["cutoff"]))
+    assert model["testRows"] == len(test)
+    assert model["trainRows"] == int((f.t <= model["cutoff"] - ml.FILTER_GAP_DAYS * 86400).sum())
+    assert model["test"]["passed"], model["test"]
+    # The phone and the server run the exported trees; their test must come out the same.
+    rows = [{"x": [float(v) for v in r], "seq": [[0]]} for r in test.x]
+    js = [p for p, _ in js_probs({"lgbm": model, "lstm": None}, rows)]
+    assert ml.filter_test(js, test) == model["test"]
+    assert ml.train_filter(fake_filter(500), ["a", "b", "c"]) is None
+    assert ml.summary({"filter": model})["filter"] == model["test"]
+
+
+def test_dataset_carries_trade_filter_rows(dataset):
+    data = ml.to_data(dataset["rows"])
+    assert dataset["filterFeatures"][-4:] == ["baseScore", "agree", "market", "crypto"]
+    assert len(data.filt) > 0 and data.filt.x.shape[1] == len(dataset["filterFeatures"])
+    assert set(data.filt.win.tolist()) <= {0.0, 1.0} and (data.filt.fee == 0.001).all()
+    base = dataset["filterFeatures"].index("baseScore")
+    assert (data.filt.x[:, base] >= 15).all()

@@ -107,6 +107,10 @@ def _empty_state() -> dict:
         "lastTrainSlot": None,
         "paper": None,            # the paper-trading account (runs here, shown in the app)
         "paperEvents": [],        # its latest buys and sells
+        "paperShadow": None,      # the same account without the trade filter, to judge the filter
+        "filterTrial": None,      # how the filtered account does against the shadow
+        "paperBudgets": None,     # each source's share of the account, following its results
+        "marketMood": {},         # SPY's and Bitcoin's trend at the last scans, for the trade filter
         "prices": {"lastRunAt": None, "values": {}, "errors": {}},
         "watchSoonAt": None,      # a check asked for after a settings or watchlist change
         "events": {"lastRunAt": None},  # last refresh of the setups' outside data
@@ -214,6 +218,8 @@ def clean_profile(raw: dict) -> dict:
             "quietHours": bool(s.get("quietHours", True)),
             "riskPct": _num(s.get("riskPct"), 1, 0.1, 5),
             "paperStart": round(_num(s.get("paperStart"), 10000, 100, 10_000_000)),
+            "tradeFilter": bool(s.get("tradeFilter", True)),
+            "paperExit": "trail" if s.get("paperExit") == "trail" else "target",
             "setups": {k: bool((s.get("setups") or {}).get(k, True)) if isinstance(s.get("setups"), dict) else True for k in SETUP_IDS},
         },
         "updatedAt": int(_num(raw.get("updatedAt"), now_ms(), 0, 1e15)),
@@ -439,8 +445,9 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
             "prev": state["signals"],
             "weights": {k: v for k, v in state["weights"].items() if k in keys},
             "models": load_models(tf),
-            "paper": state.get("paper") or new_paper(profile),
+            "mood": state.get("marketMood") or {},
             "riskPct": profile["settings"].get("riskPct", 1),
+            **paper_fields(state, profile),
         }
         try:
             result = engine(job, 600)
@@ -484,11 +491,115 @@ def new_paper(profile: dict) -> dict:
     return {"start": start, "cash": start, "createdAt": now, "positions": [], "trades": [], "history": [{"t": now, "equity": start}]}
 
 
+def paper_fields(state: dict, profile: dict) -> dict:
+    """The paper account, its unfiltered shadow and how to trade them, for an engine job.
+    A missing shadow starts as a copy of the account, so the two start level."""
+    acc = state.get("paper") or new_paper(profile)
+    shadow = state.get("paperShadow") or {**json.loads(json.dumps(acc)), "createdAt": now_ms()}
+    trial = state.get("filterTrial") or {}
+    return {
+        "paper": acc,
+        "shadow": shadow,
+        "useFilter": bool(profile["settings"].get("tradeFilter", True)) and trial.get("result") != "behind",
+        "budgets": (state.get("paperBudgets") or {}).get("shares"),
+        "trail": profile["settings"].get("paperExit") == "trail",
+    }
+
+
 def save_paper(st: dict, result: dict) -> None:
     if result.get("paper") is not None:
         st["paper"] = result["paper"]
+    if result.get("shadow") is not None:
+        st["paperShadow"] = result["shadow"]
     if result.get("paperEvents"):
         st["paperEvents"] = (list(reversed(result["paperEvents"])) + st.get("paperEvents", []))[:50]
+    st["filterTrial"] = filter_trial(st)
+    st["paperBudgets"] = follow_results(st)
+
+
+FILTER_TRIAL_TRADES = 100  # closed trades before the filter is judged against the shadow
+
+
+def filter_trial(st: dict, now: Optional[int] = None) -> Optional[dict]:
+    """The filtered account against the unfiltered shadow, on the trades both
+    opened since the shadow began. After FILTER_TRIAL_TRADES closed trades the
+    filter had a say on, it has proved itself (ahead) or is switched off (behind)."""
+    acc, shadow = st.get("paper"), st.get("paperShadow")
+    if not acc or not shadow:
+        return None
+    since = shadow.get("createdAt") or 0
+    mine = [t for t in acc.get("trades", []) if (t.get("openedAt") or 0) >= since]
+    theirs = [t for t in shadow.get("trades", []) if (t.get("openedAt") or 0) >= since]
+    judged = sum(1 for t in mine if t.get("filter"))
+    out = {"since": since, "trades": len(mine), "judged": judged, "shadowTrades": len(theirs), "need": FILTER_TRIAL_TRADES,
+           "pnl": round(sum(t["pnl"] for t in mine), 2), "shadowPnl": round(sum(t["pnl"] for t in theirs), 2),
+           "result": "testing"}
+    prev = st.get("filterTrial") or {}
+    if prev.get("result") in ("ahead", "behind") and prev.get("since") == since:
+        out["result"], out["decidedAt"] = prev["result"], prev.get("decidedAt")
+    elif judged >= FILTER_TRIAL_TRADES:
+        out["result"], out["decidedAt"] = ("ahead" if out["pnl"] > out["shadowPnl"] else "behind"), now or now_ms()
+    return out
+
+
+# Each source's share of the paper account (app/js/paper.js BUDGETS). Once two
+# sources have BUDGET_MIN_TRADES closed trades, once a week the one with the
+# best average trade takes up to BUDGET_STEP from the worst, within the limits.
+BUDGET_SHARES = {"opportunities": 0.4, "stockIdeas": 0.2, "cryptoIdeas": 0.2, "alerts": 0.2}
+BUDGET_MIN_TRADES, BUDGET_STEP, BUDGET_MIN, BUDGET_MAX = 50, 0.05, 0.1, 0.5
+WEEK_MS = 7 * 86400_000
+
+
+def bucket_of(t: dict) -> str:
+    setup = t.get("setup") or "signal"
+    if setup == "signal":
+        return "alerts"
+    if setup == "scan":
+        return "cryptoIdeas" if t.get("type") == "crypto" else "stockIdeas"
+    return "opportunities"
+
+
+def follow_results(st: dict, now: Optional[int] = None) -> dict:
+    now = now or now_ms()
+    b = st.get("paperBudgets") or {"shares": dict(BUDGET_SHARES), "at": now, "moves": []}
+    if now - b["at"] < WEEK_MS:
+        return b
+    b = {**b, "shares": dict(b["shares"]), "at": now}
+    stats = {}
+    for t in (st.get("paper") or {}).get("trades", []):
+        stats.setdefault(bucket_of(t), []).append(t.get("ret") or 0)
+    avg = {k: sum(v) / len(v) for k, v in stats.items() if len(v) >= BUDGET_MIN_TRADES and k in b["shares"]}
+    if len(avg) >= 2:
+        best, worst = max(avg, key=avg.get), min(avg, key=avg.get)
+        move = round(min(BUDGET_STEP, b["shares"][worst] - BUDGET_MIN, BUDGET_MAX - b["shares"][best]), 4)
+        if avg[best] > avg[worst] and move > 0:
+            b["shares"][best] = round(b["shares"][best] + move, 4)
+            b["shares"][worst] = round(b["shares"][worst] - move, 4)
+            b["moves"] = ([{"at": now, "from": worst, "to": best, "share": move}] + b.get("moves", []))[:20]
+    return b
+
+
+def edit_paper(action: str, key: str, price: Optional[float] = None, stop: Optional[float] = None,
+               take: Optional[float] = None, trail: Optional[bool] = None,
+               engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """You sell a paper position now ("sell") or move its stop and target ("levels"),
+    and turn its trailing stop on or off (`trail`, None leaves it).
+    A sale uses the server's latest price for it, else the one the app showed.
+    Returns the account, or None when there is no such position or the levels don't fit."""
+    with _run_locks["watch"]:  # not while a check is changing the account
+        state = load_state()
+        profile = state.get("profile")
+        if not profile or not state.get("paper"):
+            return None
+        known = ((state.get("prices") or {}).get("values") or {}).get(key)
+        job = {"mode": "paperEdit", "action": action, "key": key,
+               "price": known if known else price, "stop": stop, "take": take, "trailStop": trail,
+               **paper_fields(state, profile)}
+        result = engine(job, 60)
+        if not result.get("ok"):
+            return None
+        update_state(lambda st: save_paper(st, result))
+        return result["paper"]
 
 
 def reset_paper(start: Optional[float] = None) -> dict:
@@ -496,6 +607,8 @@ def reset_paper(start: Optional[float] = None) -> dict:
         profile = st.get("profile") or {"settings": {}}
         acc = new_paper({"settings": {**profile.get("settings", {}), **({"paperStart": start} if start else {})}})
         st["paper"], st["paperEvents"] = acc, []
+        st["paperShadow"] = json.loads(json.dumps(acc))
+        st["filterTrial"], st["paperBudgets"] = None, None
 
     with _run_locks["watch"]:  # not while a check is changing the account
         acc = update_state(apply)["paper"]
@@ -513,7 +626,8 @@ def price_items(state: dict, now: Optional[datetime] = None) -> List[dict]:
     """Holdings with a stop or target, and paper positions. Stocks only while their market is open."""
     profile = state.get("profile") or {}
     items, seen = [], set()
-    rows = [h for h in profile.get("holdings", []) if h.get("stop") or h.get("take")] + list((state.get("paper") or {}).get("positions", []))
+    rows = [h for h in profile.get("holdings", []) if h.get("stop") or h.get("take")] + list((state.get("paper") or {}).get("positions", [])) \
+        + list((state.get("paperShadow") or {}).get("positions", []))
     stocks_open = us_market_open(now)
     for r in rows:
         k = f"{r['type']}:{r['symbol']}"
@@ -541,6 +655,7 @@ def run_prices(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dic
             "items": items,
             "holdings": profile["holdings"],
             "paper": state.get("paper"),
+            "shadow": state.get("paperShadow"),
         }
         try:
             result = engine(job, 120)
@@ -559,8 +674,13 @@ def run_prices(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dic
                         h["alerted"] = result["holdingsAlerted"][h["id"]]
             if st["watch"] is not None and result["alerts"]:
                 st["watch"]["lastAlerts"] = ([{"title": a["title"], "at": now_ms()} for a in result["alerts"]] + st["watch"].get("lastAlerts", []))[:20]
-            st["prices"] = {"lastRunAt": now_ms(), "values": result["prices"], "errors": result["errors"]}
             save_paper(st, result)
+            # Stocks aren't priced while their market is closed: keep their last price
+            # for what is still held, so the app can still show what they are worth.
+            held = {f"{r['type']}:{r['symbol']}" for r in [*(p or {}).get("holdings", []),
+                    *(st.get("paper") or {}).get("positions", []), *(st.get("paperShadow") or {}).get("positions", [])]}
+            old = {k: v for k, v in ((st.get("prices") or {}).get("values") or {}).items() if k in held}
+            st["prices"] = {"lastRunAt": now_ms(), "values": {**old, **result["prices"]}, "errors": result["errors"]}
 
         update_state(apply)
         return result
@@ -599,6 +719,7 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
             "announced": state.get("announced", []),
             "muted": sorted(muted),
             "buyStarts": _scope_part(state.get("buyStarts"), scope),
+            "mood": state.get("marketMood") or {},
         }
         if scope == "crypto":
             job["items"] = crypto_items(state)
@@ -626,6 +747,7 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
             actions, weights = result.pop("actions", {}), result.pop("weights", {})
             levels = result.pop("levels", {})
             starts = result.pop("buyStarts", {})
+            st["marketMood"] = {**(st.get("marketMood") or {}), **result.pop("mood", {})}
             # Each scan replaces only its own symbols' saved actions and weights.
             other = "crypto" if scope == "stocks" else "stocks"
             if only:
@@ -846,12 +968,13 @@ def paper_opportunities(opportunities: List[dict], engine: Callable[[dict, int],
         profile = state.get("profile")
         if not profile:
             return None
-        acc = state.get("paper") or new_paper(profile)
-        held = {p["key"] for p in acc.get("positions", []) if p.get("setup") == "scan"}
+        fields = paper_fields(state, profile)
+        held = {p["key"] for a in (fields["paper"], fields["shadow"]) for p in a.get("positions", []) if p.get("setup") == "scan"}
         sells = [s for s in scan_sells if s["key"] in held]
         if not opportunities and not scan_buys and not sells:
             return None
-        job = {"mode": "paper", "paper": acc, "opportunities": opportunities, "scanBuys": scan_buys, "scanSells": sells, "riskPct": profile["settings"].get("riskPct", 1)}
+        job = {"mode": "paper", "opportunities": opportunities, "scanBuys": scan_buys, "scanSells": sells,
+               "riskPct": profile["settings"].get("riskPct", 1), **fields}
         try:
             result = engine(job, 120)
         except Exception:

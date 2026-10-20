@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.7.4"
+VERSION = "1.11.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -110,7 +110,9 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
     """The paper-trading account the server runs, with its latest trades."""
     check_api_key(x_api_key)
     state = service.load_state()
-    return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {})}
+    return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {}),
+            "shadow": state.get("paperShadow"), "filterTrial": state.get("filterTrial"), "budgets": state.get("paperBudgets"),
+            "skips": (state.get("paper") or {}).get("skips", {})}
 
 
 @app.post("/paper/reset")
@@ -123,6 +125,39 @@ def post_paper_reset(x_api_key: Optional[str] = Header(default=None), payload: d
     if start is not None and not 100 <= start <= 10_000_000:
         raise HTTPException(status_code=400, detail="Starting amount must be between $100 and $10,000,000")
     return {"ok": True, "paper": service.reset_paper(start)}
+
+
+@app.post("/paper/sell")
+def post_paper_sell(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(default={})):
+    """Sells one paper position now: {"key": "stock:AAPL", "price": shown price}."""
+    check_api_key(x_api_key)
+    acc = service.edit_paper("sell", str(payload.get("key") or ""), price=_positive(payload.get("price")))
+    if acc is None:
+        raise HTTPException(status_code=404, detail="No such paper position, or no price for it")
+    return {"ok": True, "paper": acc}
+
+
+@app.post("/paper/levels")
+def post_paper_levels(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(default={})):
+    """Moves one paper position's stop-loss and target, and turns its trailing stop
+    on or off: {"key", "stop", "take", "trail"?}. A trailing stop may be above the target."""
+    check_api_key(x_api_key)
+    stop, take = _positive(payload.get("stop")), _positive(payload.get("take"))
+    trail = payload.get("trail") if isinstance(payload.get("trail"), bool) else None
+    if stop is None or take is None or (take <= stop and trail is not True):
+        raise HTTPException(status_code=400, detail="The stop must be above zero and below the target")
+    acc = service.edit_paper("levels", str(payload.get("key") or ""), stop=stop, take=take, trail=trail)
+    if acc is None:
+        raise HTTPException(status_code=404, detail="No such paper position")
+    return {"ok": True, "paper": acc}
+
+
+def _positive(v) -> Optional[float]:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x > 0 and x < 1e12 else None
 
 
 @app.get("/models")
