@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.16.0 (budgets by money)';
+export const APP_VERSION = '0.16.1 (prices for after-hours buys)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1495,9 +1495,10 @@ function renderPaper({ force = false } = {}) {
   const acc = paperAccount();
   const onServer = serverPaperOn();
   const serverPrices = (onServer && state.serverPaper.prices) || {};
-  // Your watchlist's quote, else the server's latest price, else the last scan's close.
+  // Your watchlist's quote, else the server's latest price, else the last scan's close
+  // (its buy and sell ideas and its opportunities).
   const m = state.market || {};
-  const scanned = Object.fromEntries([...(m.buys || []), ...(m.sells || [])].map(s => [s.key, s.entry]));
+  const scanned = Object.fromEntries([...(m.opportunities || []), ...(m.buys || []), ...(m.sells || [])].map(s => [s.key, s.entry]));
   const lastPrice = key => [priceOf(key), serverPrices[key], ((state.serverSignals || {})[key] || {}).entry, scanned[key]].find(Number.isFinite);
   const prices = Object.fromEntries(acc.positions.map(p => [p.key, lastPrice(p.key)]));
   const sum = paper.summary(acc, prices);
