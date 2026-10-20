@@ -364,3 +364,9 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .equity-in p { margin: 4px 0 0; }
 .pnl-row { cursor: pointer; }
 .list li.fold { scroll-margin-top: 64px; }
+.chip-gain { font-weight: 600; font-variant-numeric: tabular-nums; }
+.chip-gain.good { color: var(--up); }
+.chip-gain.bad { color: var(--down); }
+.source-sum { padding: 10px 12px; margin: 6px 0; }
+.source-sum .small { font-weight: 600; }
+.source-sum .sub { font-size: 12px; color: var(--muted); }
