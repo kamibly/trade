@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.16.2 (gain and loss by source)';
+export const APP_VERSION = '0.16.3 (visual source summary)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1563,21 +1563,38 @@ function renderPaper({ force = false } = {}) {
     }));
   }
 
-  // "Scan: 6 open · invested $198 · worth $210 · +$12 (+6.1%)", and for
-  // opportunities the gain or loss of each setup.
-  function sourceSummary(source, lines) {
+  // A picture of one source: three tiles, a bar of trades that went up
+  // against down (or won against lost), and for opportunities a gain bar
+  // for each setup.
+  function sourceSummary(source, { tiles, split, setups }) {
     const name = (SOURCES.find(([id]) => id === source) || SOURCES[0])[1];
+    const [good, bad, goodLabel, badLabel] = split;
+    const n = good + bad;
+    const most = Math.max(1, ...(setups || []).map(x => Math.abs(x.gain)));
     return el('div', { class: 'card source-sum' },
-      el('div', { class: 'small', text: `${name}: ${lines[0]}` }),
-      ...lines.slice(1).map(t => el('div', { class: 'sub', text: t })));
+      el('div', { class: 'sum-title', text: name }),
+      el('div', { class: 'sum-tiles' }, ...tiles.map(([label, value, cls, note]) => el('div', { class: 'sum-tile' },
+        el('span', { class: 'sum-label', text: label }),
+        el('strong', { class: cls || '', text: value }),
+        note ? el('span', { class: `sum-note ${cls || ''}`, text: note }) : null))),
+      n ? el('div', { class: 'sum-split-label', text: `${good} ${goodLabel}, ${bad} ${badLabel}` }) : null,
+      n ? el('div', { class: 'sum-split' },
+        good ? el('span', { class: 'good', style: `width:${(good / n) * 100}%` }) : null,
+        bad ? el('span', { class: 'bad', style: `width:${(bad / n) * 100}%` }) : null) : null,
+      setups && setups.length ? el('div', { class: 'sum-split-label', text: 'Gain by setup' }) : null,
+      setups && setups.length ? el('div', { class: 'sum-setups' }, ...setups.flatMap(x => [
+        el('span', { text: `${x.name} (${x.count})` }),
+        el('div', { class: 'sum-track' }, el('span', { class: upDown(x.gain), style: `width:${Math.max(3, (Math.abs(x.gain) / most) * 100)}%` })),
+        el('span', { class: upDown(x.gain), text: signed(x.gain) }),
+      ])) : null);
   }
-  function bySetupLines(list, gainOf) {
+  function bySetup(list, gainOf) {
     const groups = {};
     for (const x of list) (groups[x.setup || 'signal'] ||= []).push(x);
-    return Object.entries(groups).map(([id, xs]) => {
-      const g = xs.reduce((t, x) => t + (Number.isFinite(gainOf(x)) ? gainOf(x) : 0), 0);
-      return `${setupName(id)}: ${xs.length} · ${signed(g)}`;
-    });
+    return Object.entries(groups).map(([id, xs]) => ({
+      name: setupName(id), count: xs.length,
+      gain: xs.reduce((t, x) => t + (Number.isFinite(gainOf(x)) ? gainOf(x) : 0), 0),
+    })).sort((a, b) => b.gain - a.gain);
   }
 
   function openTab() {
@@ -1588,10 +1605,16 @@ function renderPaper({ force = false } = {}) {
     const pricedRows = rows.filter(o => Number.isFinite(o.value));
     const cost = pricedRows.reduce((t, o) => t + o.p.cost, 0);
     const worth = pricedRows.reduce((t, o) => t + o.value, 0);
-    const summary = rows.length ? sourceSummary(source, [
-      `${rows.length} open · invested ${formatMoney(rows.reduce((t, o) => t + o.p.cost, 0))} · worth ${pricedRows.length ? formatMoney(worth + rows.filter(o => !Number.isFinite(o.value)).reduce((t, o) => t + o.p.cost, 0)) : '–'} · ${pricedRows.length ? `${signed(worth - cost)} (${fmtPct((worth - cost) / cost)})` : '–'}`,
-      ...(source === 'opps' ? bySetupLines(rows.map(o => ({ setup: o.p.setup, pnl: o.pnl })), x => x.pnl) : []),
-    ]) : null;
+    const unpriced = rows.filter(o => !Number.isFinite(o.value)).reduce((t, o) => t + o.p.cost, 0);
+    const summary = rows.length ? sourceSummary(source, {
+      tiles: [
+        ['Invested', formatMoney(rows.reduce((t, o) => t + o.p.cost, 0)), '', `${rows.length} open`],
+        ['Worth now', pricedRows.length ? formatMoney(worth + unpriced) : '–'],
+        ['Gain', pricedRows.length ? signed(worth - cost) : '–', upDown(worth - cost), pricedRows.length ? fmtPct((worth - cost) / cost) : ''],
+      ],
+      split: [pricedRows.filter(o => o.pnl > 0).length, pricedRows.filter(o => o.pnl <= 0).length, 'up', 'down'],
+      setups: source === 'opps' ? bySetup(rows.map(o => ({ setup: o.p.setup, pnl: o.pnl })), x => x.pnl) : null,
+    }) : null;
     const select = el('select', { 'aria-label': 'Sort', onchange: e => { state.paperSort = e.target.value; renderPaper({ force: true }); } },
       ...[['loss', 'Biggest loss first'], ['gain', 'Biggest gain first'], ['newest', 'Newest first']].map(([v, t]) => el('option', { value: v, text: t, selected: v === sort })));
     return [
@@ -1634,10 +1657,15 @@ function renderPaper({ force = false } = {}) {
     const won = fromSource.filter(t => t.pnl > 0).length;
     const total = fromSource.reduce((t, x) => t + x.pnl, 0);
     const invested = fromSource.reduce((t, x) => t + costOf(x), 0);
-    const summary = fromSource.length ? sourceSummary(source, [
-      `${fromSource.length} closed · ${won} won (${Math.round((won / fromSource.length) * 100)}%) · ${signed(total)}${invested > 0 ? ` (${fmtPct(total / invested)} on what was invested)` : ''}`,
-      ...(source === 'opps' ? bySetupLines(fromSource, x => x.pnl) : []),
-    ]) : null;
+    const summary = fromSource.length ? sourceSummary(source, {
+      tiles: [
+        ['Trades', String(fromSource.length), '', 'closed'],
+        ['Won', `${Math.round((won / fromSource.length) * 100)}%`, '', `${won} of ${fromSource.length}`],
+        ['Gain', signed(total), upDown(total), invested > 0 ? fmtPct(total / invested) : ''],
+      ],
+      split: [won, fromSource.length - won, 'won', 'lost'],
+      setups: source === 'opps' ? bySetup(fromSource, x => x.pnl) : null,
+    }) : null;
     const shown = state.closedShown || 10;
     const why = t => (t.reason === 'time' ? 'holding period over' : t.reason);
     const card = t => foldCard('holding', `closed:${t.key}:${t.closedAt}`, [
