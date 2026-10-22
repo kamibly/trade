@@ -35,7 +35,7 @@ test('trade outcome: stop or target first, after fees, and sold at the horizon o
   const up = flat.map((c, i) => (i === 15 ? { ...c, high: 104 } : c));
   const w = tradeOutcome({ ...S, candles: up }, 10, { type: 'crypto' });
   assert.equal(w.win, 1);
-  assert.ok(Math.abs(w.ret - (1.03 * 0.996 * 0.996 - 1)) < 1e-12);
+  assert.ok(Math.abs(w.ret - (1.03 * 0.998 * 0.998 - 1)) < 1e-12);
   const down = flat.map((c, i) => (i === 12 ? { ...c, open: 97, low: 96 } : c));
   const l = tradeOutcome({ ...S, candles: down }, 10);
   assert.equal(l.win, 0);

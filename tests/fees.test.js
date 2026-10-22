@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { feeOf, feeRate } from '../app/js/fees.js';
 import * as paper from '../app/js/paper.js';
 
-test('IBKR stock fees: $0.005 a share, at least $1, at most 1% of the order; Kraken crypto 0.4%', () => {
+test('IBKR stock fees: $0.005 a share, at least $1, at most 1% of the order; NDAX crypto 0.2%', () => {
   assert.equal(feeOf('stock', 10, 100), 1); // $1,000 order: the $1 minimum
   assert.equal(feeOf('stock', 1000, 1), 5); // 1,000 shares: $5
   assert.equal(feeOf('stock', 0.1, 5), 0.005); // a $0.50 order: 1% cap
-  assert.ok(Math.abs(feeOf('crypto', 2, 100) - 0.8) < 1e-9);
-  assert.equal(feeRate('crypto'), 0.004);
+  assert.ok(Math.abs(feeOf('crypto', 2, 100) - 0.4) < 1e-9);
+  assert.equal(feeRate('crypto'), 0.002);
   assert.equal(feeRate('stock'), 0.001);
 });
 

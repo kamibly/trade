@@ -74,3 +74,15 @@ test('a source keeps buying until its share of the money is used, up to 10 trade
   assert.ok(spent <= 400.01 && spent > 390, `spent ${spent}`);
   assert.match(big.skips['crypto:C11'], /full/);
 });
+
+test('crypto paper buys only coins the exchange sells, when its list is known', () => {
+  const acc = paper.newAccount(1000, 0);
+  const sig = (symbol, type = 'crypto') => ({ symbol, type, action: 'buy', entry: 100, stop: 90, take: 130, atr: 5 });
+  const signals = { 'crypto:AAA': sig('AAA'), 'crypto:ZZZ': sig('ZZZ'), 'stock:SSS': sig('SSS', 'stock') };
+  paper.step(acc, { signals, now: 1, budgets: paper.PHONE_BUDGETS, tradable: ['AAA'] });
+  assert.deepEqual(acc.positions.map(p => p.symbol).sort(), ['AAA', 'SSS']);
+  assert.equal(acc.skips['crypto:ZZZ'], 'NDAX does not sell this coin');
+  const any = paper.newAccount(1000, 0);
+  paper.step(any, { signals, now: 1, budgets: paper.PHONE_BUDGETS, tradable: null });
+  assert.equal(any.positions.length, 3);
+});

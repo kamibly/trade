@@ -53,7 +53,7 @@ export function positionSize({ equity, cash, entry, stop, riskPct = 1, cap = 0.2
   if (!(entry > 0) || !(perUnit > 0) || !(cash > 0)) return 0;
   const byRisk = (equity * riskPct) / 100 / perUnit;
   const byCap = (equity * cap) / entry;
-  // All the cash less the buy's fee (a stock's $1 minimum, or crypto's 0.4%).
+  // All the cash less the buy's fee (a stock's $1 minimum, or crypto's 0.2%).
   const all = cash / entry;
   const byCash = (cash - feeOf(type, all, entry)) / entry;
   return Math.max(0, Math.min(byRisk, byCap, byCash));
@@ -112,7 +112,8 @@ function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter
 // One step after a scan. `signals` maps key → { symbol, type, action, entry, stop, take },
 // `alerts` maps key → 'buy' | 'sell' for actions that just changed this scan.
 // Returns the events (paper buys and sells) and updates `acc` in place.
-export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false }) {
+// `tradable`: the coins the crypto exchange sells (NDAX), or null for any coin.
+export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, tradable = null }) {
   const events = [];
   const prices = Object.fromEntries(Object.entries(signals).map(([k, s]) => [k, s.entry]));
   // Exits first so the freed cash can fund new buys.
@@ -143,7 +144,7 @@ export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(),
     const start = acc.signalStarts[key];
     const id = `signal:${key}:${start.at}`;
     const idea = { ...sig, id, key, setup: 'signal', ranAway: ok(sig.atr) && sig.entry > start.entry + sig.atr };
-    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets, useFilter, trail });
+    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets, useFilter, trail, tradable });
     if (ev) events.push(ev);
   }
   pruneTaken(acc);
@@ -160,6 +161,7 @@ const SKIPS = {
   ranAway: 'the price moved more than 1 ATR since the idea began',
   levels: 'no valid stop below the price',
   filter: 'the trade filter expects a loss',
+  venue: 'NDAX does not sell this coin',
 };
 
 function skip(acc, key, why) {
@@ -168,7 +170,7 @@ function skip(acc, key, why) {
 }
 
 // Buys one idea if its budget, cash and price allow; records why not otherwise.
-function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trail = false }) {
+function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trail = false, tradable = null }) {
   acc.skips ||= {};
   if (acc.positions.some(p => p.key === o.key)) { delete acc.skips[o.key]; return null; }
   // An idea counts as taken only if it was really traded: older versions
@@ -176,6 +178,7 @@ function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trai
   const traded = acc.positions.some(p => p.key === o.key) || acc.trades.some(t => t.key === o.key);
   if (acc.taken.includes(o.id) && traded) return skip(acc, o.key, 'done'), null;
   if (o.ranAway) return skip(acc, o.key, 'ranAway'), null;
+  if (o.type === 'crypto' && Array.isArray(tradable) && tradable.length && !tradable.includes(o.symbol)) return skip(acc, o.key, 'venue'), null;
   if (!(o.entry > 0) || !(o.stop < o.entry)) return skip(acc, o.key, 'levels'), null;
   const filter = filterOf(o, useFilter);
   if (filter && !(filter.size > 0)) return skip(acc, o.key, 'filter'), null;
@@ -202,13 +205,13 @@ function pruneTaken(acc) {
 // once; it is sold at its stop, its target or after its holding period
 // (trading days for stocks, calendar days for crypto).
 // opportunities: [{ id, setup, key, symbol, type, entry, stop, take, hold, ev }]
-export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false } = {}) {
+export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, tradable = null } = {}) {
   const events = [];
   acc.taken ||= [];
   const prices = {};
   const list = [...opportunities].sort((a, b) => (b.ev || 0) - (a.ev || 0));
   for (const o of list) {
-    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter, trail });
+    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter, trail, tradable });
     if (ev) events.push(ev);
   }
   pruneTaken(acc);

@@ -101,7 +101,7 @@
         <div id="paper-body"></div>
         <details class="report paper-about">
           <summary>About this account</summary>
-          <p class="muted small">The paper account buys with pretend money on every new Buy signal from the scan, risking your set share of the account per trade and putting at most 20% in one symbol. It sells on the stop-loss, the target or a Sell signal. Each buy and sell pays the fees of the brokers picked for real trading: Interactive Brokers for stocks ($0.005 a share, at least $1) and Kraken for crypto (0.4%).</p>
+          <p class="muted small">The paper account buys with pretend money on every new Buy signal from the scan, risking your set share of the account per trade and putting at most 20% in one symbol. It sells on the stop-loss, the target or a Sell signal. Each buy and sell pays the fees of the brokers picked for real trading: Interactive Brokers for stocks ($0.005 a share, at least $1) and NDAX for crypto (0.2%). Crypto paper trades buy only coins NDAX sells.</p>
           <button type="button" id="paper-reset" class="ghost danger">Start the paper account over</button>
         </details>
       </div>
@@ -220,6 +220,27 @@
         </label>
         <p class="muted small">Your server's machine-learning filter skips buy ideas it expects to lose and puts more into the ones it likes best. It is used only after passing its own test, and an account without it runs alongside to show whether it helps. Opportunities keep their own test.</p>
         <p id="risk-status" class="small" role="status"></p>
+      </div>
+
+      <div class="card">
+        <h2>Real trading on NDAX</h2>
+        <p class="muted small">Your server copies the paper account's crypto buys and sells to NDAX in Canadian dollars. A dry run shows the exact orders it would place, at NDAX's prices, without sending them. Live sends them.</p>
+        <label class="field">
+          <span>Real crypto orders</span>
+          <select id="ndax-mode">
+            <option value="off">Off</option>
+            <option value="dry">Dry run (nothing is sent)</option>
+            <option value="live">Live (real money)</option>
+          </select>
+        </label>
+        <div class="row two">
+          <label class="field"><span>Budget, CAD</span><input id="ndax-budget" type="number" inputmode="decimal" min="0" step="10"></label>
+          <label class="field"><span>Most per trade, CAD</span><input id="ndax-max" type="number" inputmode="decimal" min="0" step="5"></label>
+        </div>
+        <label class="field"><span>Daily loss limit, CAD (no new buys for the rest of the day once reached)</span><input id="ndax-loss" type="number" inputmode="decimal" min="0" step="5"></label>
+        <button id="ndax-save" type="button" class="ghost">Save limits</button>
+        <p id="ndax-status" class="small" role="status"></p>
+        <div id="ndax-body"></div>
       </div>
 
       <div class="card">

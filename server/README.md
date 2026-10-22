@@ -165,6 +165,7 @@ With server alerts on, the app stops showing its own system notifications
 | `TRAIN_AT` | When the models retrain each week (day and local time) | `Sun 03:00` |
 | `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
 | `SEC_CONTACT` | Your email, which the SEC asks every program to send with its requests. Insider buying and earnings dates load only once it is set; it is sent only to the SEC | none |
+| `NDAX_API_KEY`, `NDAX_API_SECRET`, `NDAX_USER_ID` | Real crypto orders on NDAX that follow the paper account's crypto trades. Create the key in NDAX under Settings, API Key, with trading permission only and no withdrawals; the user ID is under Personal User Info. Orders go out only in the app's Live mode | none |
 
 The opportunity setups' outside data refreshes every hour (Fear & Greed,
 Kraken funding, new SEC Form 4 filings) and once a day (each company's earnings
@@ -229,3 +230,23 @@ All except `/health` need the `X-API-Key` header.
 - The models are only as good as their last test. Markets change, and a model
   that tested well can still be wrong for weeks.
 - If the VM is down, no alerts arrive while the app is closed.
+
+## Real crypto trading on NDAX
+
+With the three `NDAX_*` variables set, the app's Settings shows your NDAX cash
+and a **Real trading on NDAX** choice: Off, Dry run or Live.
+
+- Every crypto buy and sell of the paper account is copied to NDAX in Canadian
+  dollars. A buy gets the paper trade's share of the paper account, applied to
+  your real budget, and never more than the per-trade limit, what is left of
+  the budget or your CAD cash. Orders under $10 CAD, or under NDAX's own
+  minimum, are skipped.
+- The paper account's stop, target and trailing stop decide when to sell; the
+  real coins are then sold at market.
+- **Dry run** records the exact orders it would place, at NDAX's live prices,
+  without sending them. **Live** sends them. Once today's live losses reach the
+  daily limit, no new buys go out until tomorrow; sales still do.
+- Turning it Off stops new buys; coins really bought are still sold when the
+  paper account sells them.
+- NDAX's list of coins (those sold for CAD) loads once a day without the key;
+  crypto paper trades buy only those coins.

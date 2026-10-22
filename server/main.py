@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.11.1"
+VERSION = "1.12.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -113,6 +113,14 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
     return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {}),
             "shadow": state.get("paperShadow"), "filterTrial": state.get("filterTrial"), "budgets": state.get("paperBudgets"),
             "skips": (state.get("paper") or {}).get("skips", {})}
+
+
+@app.get("/ndax")
+def get_ndax(x_api_key: Optional[str] = Header(default=None)):
+    """Real crypto trading on NDAX: whether the key is set, your CAD cash, what
+    is really held and the latest orders (dry run or live)."""
+    check_api_key(x_api_key)
+    return service.ndax.summary(service.load_state(), service.update_state)
 
 
 @app.post("/paper/reset")
