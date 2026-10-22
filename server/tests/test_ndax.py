@@ -159,3 +159,19 @@ def test_the_app_reads_the_ndax_summary(monkeypatch):
     setup_state("dry")
     r = TestClient(main.app).get("/ndax", headers={"X-API-Key": "secret"}).json()
     assert r["configured"] is False and r["mode"] == "dry" and r["orders"] == []
+
+
+def test_the_trading_account_is_found_from_the_user_id_without_a_login(monkeypatch):
+    import ccxt
+    seen = []
+
+    def fake_fetch(self, url, method="GET", headers=None, body=None):
+        seen.append(url)
+        return [449] if "GetUserAccounts" in url else []
+    monkeypatch.setattr(ccxt.ndax, "fetch", fake_fetch)
+    monkeypatch.setattr(ndax, "_account_id", "")
+    ex = ndax.exchange(True)
+    ex.fetch_balance()  # ccxt's own account lookup would ask for the login email
+    assert ex.options["accountId"] == 449
+    assert any("GetUserAccounts" in u and "UserId=1" in u for u in seen)
+    assert any("GetAccountPositions" in u and "AccountId=449" in u for u in seen)

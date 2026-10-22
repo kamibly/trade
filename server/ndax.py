@@ -10,6 +10,7 @@ account: when it sells, the real coins are sold at market.
 Environment variables (from NDAX: Settings, API Key; the user ID is under
 Personal User Info). Give the key trading permission only, never withdrawals.
     NDAX_API_KEY, NDAX_API_SECRET, NDAX_USER_ID
+    NDAX_ACCOUNT_ID (optional: your trading account's number, found from the user ID otherwise)
 
 Saved state, under state["ndax"]:
     coins      - coins NDAX sells for CAD, refreshed daily (public, no key needed)
@@ -30,6 +31,8 @@ logger = logging.getLogger("trade-service")
 API_KEY = os.environ.get("NDAX_API_KEY", "")
 API_SECRET = os.environ.get("NDAX_API_SECRET", "")
 USER_ID = os.environ.get("NDAX_USER_ID", "")
+ACCOUNT_ID = os.environ.get("NDAX_ACCOUNT_ID", "")  # optional; looked up from the user ID otherwise
+_account_id = ""
 QUOTE = "CAD"
 MIN_ORDER_CAD = 10        # smaller orders are skipped; NDAX's own minimums are checked too
 COINS_EVERY_MS = 24 * 3600_000
@@ -50,7 +53,24 @@ def exchange(private: bool = True):
     import ccxt
     ex = ccxt.ndax({"apiKey": API_KEY, "secret": API_SECRET, "uid": USER_ID, "enableRateLimit": True} if private else {"enableRateLimit": True})
     ex.requiredCredentials = {**ex.requiredCredentials, "login": False, "password": False}
+    if private:
+        # ccxt looks the trading account up with your login email; NDAX also
+        # finds it from the user ID, so the email is not needed.
+        global _account_id
+        if not _account_id:
+            _account_id = ACCOUNT_ID or account_of(ex)
+        ex.accounts = [{"id": str(_account_id), "type": None, "currency": None, "info": _account_id}]
+        ex.accountsById = {str(_account_id): ex.accounts[0]}
+        ex.options["accountId"] = int(_account_id)
     return ex
+
+
+def account_of(ex) -> str:
+    """Your NDAX trading account's ID, from your user ID."""
+    ids = ex.privateGetGetUserAccounts({"omsId": ex.safe_integer(ex.options, "omsId", 1), "UserId": USER_ID})
+    if not ids:
+        raise RuntimeError("NDAX found no trading account for this user ID")
+    return str(ids[0])
 
 
 def settings_of(profile: Optional[dict]) -> dict:
