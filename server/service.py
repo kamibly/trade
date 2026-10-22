@@ -222,7 +222,7 @@ def clean_profile(raw: dict) -> dict:
             "riskPct": _num(s.get("riskPct"), 1, 0.1, 5),
             "paperStart": round(_num(s.get("paperStart"), 10000, 100, 10_000_000)),
             "tradeFilter": bool(s.get("tradeFilter", True)),
-            "paperExit": "trail" if s.get("paperExit") == "trail" else "target",
+            "paperExit": s.get("paperExit") if s.get("paperExit") in ("trail", "lock") else "target",
             "ndaxMode": s.get("ndaxMode") if s.get("ndaxMode") in ndax.MODES else "off",
             "ndaxBudget": round(_num(s.get("ndaxBudget"), 100, 0, 1_000_000), 2),
             "ndaxMaxTrade": round(_num(s.get("ndaxMaxTrade"), 25, 0, 1_000_000), 2),
@@ -510,6 +510,7 @@ def paper_fields(state: dict, profile: dict) -> dict:
         "useFilter": bool(profile["settings"].get("tradeFilter", True)) and trial.get("result") != "behind",
         "budgets": (state.get("paperBudgets") or {}).get("shares"),
         "trail": profile["settings"].get("paperExit") == "trail",
+        "lock": profile["settings"].get("paperExit") == "lock",
         "tradable": ndax.tradable(state),
     }
 

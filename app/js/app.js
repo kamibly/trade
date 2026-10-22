@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.17.0 (NDAX real trading)';
+export const APP_VERSION = '0.18.0 (profit lock)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -675,7 +675,8 @@ function backtestCard(bt) {
     bt.rule ? line('Standard levels (+40 / -40)', bt.standard) : line('Weighted methods', w),
     line('All methods equal', bt.equal),
     bt.trailed ? line('Same trades, trailing stop instead of the target', bt.trailed) : null,
-    bt.trailed ? el('p', { class: 'muted small', text: `The trailing stop moves to break even after fees once a trade is up ${state.settings.stopAtr / 2} ATR, then follows the highest price ${state.settings.stopAtr} ATR below it (your stop-loss distance). Compare it with the ${bt.rule ? 'tuned' : 'weighted'} line above, which uses the target, to see which exit did better here.` }) : null,
+    bt.locked ? line('Same trades, target with a profit lock', bt.locked) : null,
+    bt.trailed ? el('p', { class: 'muted small', text: `The trailing stop moves to break even after fees once a trade is up ${state.settings.stopAtr / 2} ATR, then follows the highest price ${state.settings.stopAtr} ATR below it (your stop-loss distance). Compare it with the ${bt.rule ? 'tuned' : 'weighted'} line above, which uses the target, to see which exit did better here. The profit lock keeps the target, and once a trade is up ${state.settings.stopAtr} ATR its stop keeps half of the best gain, rising to three quarters near the target.` }) : null,
     bt.rule ? el('p', { class: 'muted small', text: `The tuned levels were picked on the older candles only (where they made ${fmtPct(bt.tunedTrain ? bt.tunedTrain.totalReturn : NaN)}), so the test above shows whether they hold up on candles they never saw.` }) : null,
     el('div', { class: 'bt-row' }, el('span', { text: 'Buy and hold' }), el('span', { class: w.buyHold > 0 ? 'good' : 'bad', text: fmtPct(w.buyHold) })),
     w.open ? el('p', { class: 'small', text: `A test trade is still open from ${formatMoney(w.open.entry)}, counted at today's price.` }) : null,
@@ -1484,7 +1485,7 @@ function paperAccount() {
 function stepPaper(tf, alerts) {
   if (serverOn()) return; // the server trades the paper account
   const signals = Object.fromEntries(Object.entries(state.signals).filter(([, s]) => s.tf === tf));
-  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct, budgets: paper.PHONE_BUDGETS, trail: state.settings.paperExit === 'trail' });
+  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct, budgets: paper.PHONE_BUDGETS, trail: state.settings.paperExit === 'trail', lock: state.settings.paperExit === 'lock' });
   store.savePaper(state.paper);
   for (const ev of events) {
     toast(ev.kind === 'open'
@@ -1692,7 +1693,7 @@ function renderPaper({ force = false } = {}) {
   function openCard({ p, price, value, pnl, ret }) {
     return foldCard('holding paper-card', `paper:${p.key}`, [
       el('div', { class: 'sym' }, p.symbol, typeBadge(p.type), el('span', { class: 'badge', text: sourceTag(p.setup || 'signal') }),
-        p.trail ? el('span', { class: 'badge', text: 'Trailing' }) : null),
+        p.trail ? el('span', { class: 'badge', text: 'Trailing' }) : p.lock ? el('span', { class: 'badge', text: 'Profit lock' }) : null),
       el('div', { class: `paper-gain ${upDown(pnl)}`, text: Number.isFinite(pnl) ? `${signed(pnl)} · ${fmtPct(ret)}` : '–' }),
     ], [
       el('dl', { class: 'money-row' },
@@ -1702,7 +1703,7 @@ function renderPaper({ force = false } = {}) {
       el('div', { class: 'sub', text: `${fmtQty(p)} bought at ${formatMoney(p.entry)} · now ${formatMoney(price)}` }),
       el('div', { class: 'sub', text: p.trail
         ? `Trailing stop at ${formatMoney(p.stop)}${p.stop > p.entry ? ' (above what it cost)' : ''}, highest ${formatMoney(p.high || p.entry)}; no target`
-        : `Sells at the stop ${formatMoney(p.stop)} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}` }),
+        : `Sells at the stop ${formatMoney(p.stop)}${p.lock && p.stop > p.entry ? ' (profit locked)' : ''} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}${p.lock ? `; the stop keeps part of the best gain (highest ${formatMoney(p.high || p.entry)})` : ''}` }),
       outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
       p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
       el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
@@ -2041,7 +2042,7 @@ function renderSettings() {
   $('risk-pct').value = state.settings.riskPct;
   $('paper-start').value = state.settings.paperStart;
   $('filter-toggle').checked = state.settings.tradeFilter !== false;
-  $('paper-exit').value = state.settings.paperExit === 'trail' ? 'trail' : 'target';
+  $('paper-exit').value = ['trail', 'lock'].includes(state.settings.paperExit) ? state.settings.paperExit : 'target';
   $('ndax-mode').value = ['off', 'dry', 'live'].includes(state.settings.ndaxMode) ? state.settings.ndaxMode : 'off';
   $('ndax-budget').value = state.settings.ndaxBudget;
   $('ndax-max').value = state.settings.ndaxMaxTrade;
@@ -2245,7 +2246,7 @@ function bind() {
     $('risk-status').textContent = 'Saved. The paper account uses it from the next check.';
   });
   $('paper-exit').addEventListener('change', e => {
-    state.settings = store.saveSettings({ paperExit: e.target.value === 'trail' ? 'trail' : 'target' });
+    state.settings = store.saveSettings({ paperExit: ['trail', 'lock'].includes(e.target.value) ? e.target.value : 'target' });
     markChanged();
     $('risk-status').textContent = 'Saved. New paper trades use it; open ones keep theirs (change them on the Paper tab).';
   });
