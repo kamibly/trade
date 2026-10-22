@@ -488,12 +488,12 @@ export async function runPaper(job, deps = defaultDeps) {
 
 // You sell a paper position or move its stop and target; the unfiltered
 // shadow does the same, so the trade filter's comparison stays fair.
-// job: { paper, shadow, action: 'sell' | 'levels', key, price, stop, take, trailStop: true | false | undefined }
+// job: { paper, shadow, action: 'sell' | 'levels', key, price, stop, take, trailStop / lockProfit: true | false | undefined }
 // result: { paper, shadow, paperEvents, ok }
 export async function runPaperEdit(job, deps = defaultDeps) {
   const act = acc => (job.action === 'sell'
     ? paper.sellNow(acc, job.key, job.price, deps.now())
-    : paper.setLevels(acc, job.key, { stop: job.stop, take: job.take, trail: typeof job.trailStop === 'boolean' ? job.trailStop : undefined }));
+    : paper.setLevels(acc, job.key, { stop: job.stop, take: job.take, trail: typeof job.trailStop === 'boolean' ? job.trailStop : undefined, lock: typeof job.lockProfit === 'boolean' ? job.lockProfit : undefined }));
   if (job.shadow) act(job.shadow);
   const ev = job.paper ? act(job.paper) : null;
   const paperEvents = ev && ev.kind === 'close' ? [{ ...ev, at: deps.now(), text: paperLine(ev) }] : [];

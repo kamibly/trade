@@ -124,3 +124,18 @@ test('the backtest shows the profit lock next to the target and the trailing sto
   assert.equal(locked.trades[0].reason, 'profit lock');
   assert.ok(locked.totalReturn > target.totalReturn, 'it kept part of the rise the target-only trade gave back');
 });
+
+test('an open trade can switch to the profit lock, and back to its target', () => {
+  const acc = paper.newAccount(10000, 0);
+  const signals = { 'stock:AAA': { symbol: 'AAA', type: 'stock', action: 'buy', entry: 100, stop: 90, take: 130, atr: 5 } };
+  paper.step(acc, { signals, now: 1, budgets: paper.PHONE_BUDGETS });
+  const p = acc.positions[0];
+  const ev = paper.setLevels(acc, 'stock:AAA', { stop: 90, take: 130, lock: true });
+  assert.ok(ev.lock && p.lock && !p.trail && p.risk === 10);
+  paper.step(acc, { signals: { 'stock:AAA': { ...signals['stock:AAA'], action: 'hold', entry: 120 } }, now: 2, budgets: paper.PHONE_BUDGETS });
+  assert.equal(p.stop, 112.5, 'the lock applies from the next price check');
+  paper.setLevels(acc, 'stock:AAA', { trail: true });
+  assert.ok(p.trail && !p.lock, 'trailing replaces the lock');
+  paper.setLevels(acc, 'stock:AAA', { stop: 112.5, take: 130, trail: false, lock: false });
+  assert.ok(!p.trail && !p.lock);
+});

@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.18.0 (profit lock)';
+export const APP_VERSION = '0.18.1 (profit lock per trade)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1758,8 +1758,11 @@ function paperControls(p, price) {
   // Or a target set by what you want to keep: the price where selling makes
   // that much after both brokers' fees.
   const gain = el('input', { type: 'number', inputmode: 'decimal', step: 'any', min: '0', placeholder: 'e.g. 5' });
-  const trail = el('input', { type: 'checkbox' });
-  trail.checked = !!p.trail;
+  // How this trade sells: at the target, on a trailing stop, or at the target with a profit lock.
+  const exit = el('select', { 'aria-label': 'Sells at' },
+    ...[['target', 'The target'], ['trail', 'A trailing stop (no target)'], ['lock', 'The target, with a profit lock']]
+      .map(([v, t]) => el('option', { value: v, text: t, selected: v === (p.trail ? 'trail' : p.lock ? 'lock' : 'target') })));
+  const trail = { get checked() { return exit.value === 'trail'; } };
   const keep = el('p', { class: 'muted small' });
   const showKeep = () => {
     const t = Number(take.value);
@@ -1768,9 +1771,9 @@ function paperControls(p, price) {
     take.disabled = gain.disabled = trail.checked;
     keep.textContent = trail.checked
       ? `No target: the stop moves to break even once the price is up ${formatMoney(p.risk ? p.risk / 2 : (p.entry - s) / 2)}, then follows the highest price.${s > 0 ? ` At the stop now you keep ${signed(net(s))}.` : ''}`
-      : t > 0 ? `At the target you keep ${signed(net(t))} after fees${s > 0 ? `; at the stop, ${signed(net(s))}` : ''}.` : '';
+      : t > 0 ? `At the target you keep ${signed(net(t))} after fees${s > 0 ? `; at the stop, ${signed(net(s))}` : ''}.${exit.value === 'lock' ? ' Profit lock: once the price is up the trade\'s risk, the stop keeps half of the best gain, up to three quarters near the target.' : ''}` : '';
   };
-  trail.addEventListener('change', showKeep);
+  exit.addEventListener('change', showKeep);
   gain.addEventListener('input', () => {
     const t = paper.priceForGain(p, Number(gain.value));
     if (Number.isFinite(t)) take.value = String(t);
@@ -1784,10 +1787,10 @@ function paperControls(p, price) {
       el('label', { class: 'field' }, el('span', { text: 'Stop-loss, USD' }), stop),
       el('label', { class: 'field' }, el('span', { text: 'Target, USD' }), take)),
     el('label', { class: 'field' }, el('span', { text: 'Or: sell when I make, after fees, USD' }), gain),
-    el('label', { class: 'switch' }, trail, el('span', { text: 'Trail the stop instead of a target' })),
+    el('label', { class: 'field' }, el('span', { text: 'Sells at' }), exit),
     keep,
     el('div', { class: 'row' },
-      el('button', { type: 'button', class: 'primary', text: 'Save', onclick: () => editPaper(p, { action: 'levels', stop: Number(stop.value), take: Number(take.value), trail: trail.checked }, status) }),
+      el('button', { type: 'button', class: 'primary', text: 'Save', onclick: () => editPaper(p, { action: 'levels', stop: Number(stop.value), take: Number(take.value), trail: exit.value === 'trail', lock: exit.value === 'lock' }, status) }),
       el('button', { type: 'button', class: 'ghost', text: 'Cancel', onclick: () => { form.hidden = true; state.paperEditing = null; } })),
     status);
   const wrap = el('div', { class: 'paper-actions', onclick: e => e.stopPropagation() },
@@ -1798,7 +1801,7 @@ function paperControls(p, price) {
   return wrap;
 }
 
-async function editPaper(p, { action, price, stop, take, trail }, status) {
+async function editPaper(p, { action, price, stop, take, trail, lock }, status) {
   if (action === 'levels' && !(stop > 0 && (trail || take > stop))) {
     status.textContent = 'The stop must be above zero and below the target.';
     return;
@@ -1810,7 +1813,7 @@ async function editPaper(p, { action, price, stop, take, trail }, status) {
   if (serverPaperOn()) {
     try {
       const path = action === 'sell' ? '/paper/sell' : '/paper/levels';
-      const body = action === 'sell' ? { key: p.key, price } : { key: p.key, stop, take, trail: !!trail };
+      const body = action === 'sell' ? { key: p.key, price } : { key: p.key, stop, take, trail: !!trail, lock: !!lock };
       const { paper: acc } = await srv.serverFetch(state.settings, path, { method: 'POST', body });
       state.serverPaper = { ...state.serverPaper, paper: acc, fetchedAt: Date.now() };
       store.saveServerPaper(state.serverPaper);
@@ -1820,11 +1823,11 @@ async function editPaper(p, { action, price, stop, take, trail }, status) {
       return;
     }
   } else {
-    const ok = action === 'sell' ? paper.sellNow(paperAccount(), p.key, price) : paper.setLevels(paperAccount(), p.key, { stop, take, trail: !!trail });
+    const ok = action === 'sell' ? paper.sellNow(paperAccount(), p.key, price) : paper.setLevels(paperAccount(), p.key, { stop, take, trail: !!trail, lock: !!lock });
     if (!ok) { status.textContent = 'That did not apply.'; return; }
     store.savePaper(state.paper);
   }
-  toast(action === 'sell' ? `Paper trade: sold ${p.symbol}` : trail ? `Paper trade: ${p.symbol} now trails its stop from ${formatMoney(stop)}` : `Paper trade: ${p.symbol} now sells at ${formatMoney(stop)} or ${formatMoney(take)}`);
+  toast(action === 'sell' ? `Paper trade: sold ${p.symbol}` : trail ? `Paper trade: ${p.symbol} now trails its stop from ${formatMoney(stop)}` : lock ? `Paper trade: ${p.symbol} now sells at ${formatMoney(take)} with a profit lock` : `Paper trade: ${p.symbol} now sells at ${formatMoney(stop)} or ${formatMoney(take)}`);
   renderPaper({ force: true });
 }
 

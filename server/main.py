@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.13.0"
+VERSION = "1.13.1"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -148,13 +148,14 @@ def post_paper_sell(x_api_key: Optional[str] = Header(default=None), payload: di
 @app.post("/paper/levels")
 def post_paper_levels(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(default={})):
     """Moves one paper position's stop-loss and target, and turns its trailing stop
-    on or off: {"key", "stop", "take", "trail"?}. A trailing stop may be above the target."""
+    or its profit lock on or off: {"key", "stop", "take", "trail"?, "lock"?}. A trailing stop may be above the target."""
     check_api_key(x_api_key)
     stop, take = _positive(payload.get("stop")), _positive(payload.get("take"))
     trail = payload.get("trail") if isinstance(payload.get("trail"), bool) else None
+    lock = payload.get("lock") if isinstance(payload.get("lock"), bool) else None
     if stop is None or take is None or (take <= stop and trail is not True):
         raise HTTPException(status_code=400, detail="The stop must be above zero and below the target")
-    acc = service.edit_paper("levels", str(payload.get("key") or ""), stop=stop, take=take, trail=trail)
+    acc = service.edit_paper("levels", str(payload.get("key") or ""), stop=stop, take=take, trail=trail, lock=lock)
     if acc is None:
         raise HTTPException(status_code=404, detail="No such paper position")
     return {"ok": True, "paper": acc}

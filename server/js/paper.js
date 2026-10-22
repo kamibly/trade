@@ -249,7 +249,9 @@ export function sellNow(acc, key, price, now = Date.now()) {
 // The stop must be below the target; either may be left as it is (undefined).
 // `trail` turns the trailing stop on or off for this trade (its risk is the
 // distance from the entry to the stop it was bought with).
-export function setLevels(acc, key, { stop, take, trail } = {}) {
+// `lock` turns the profit lock on or off the same way; a trade either trails
+// or locks its profit, not both.
+export function setLevels(acc, key, { stop, take, trail, lock } = {}) {
   const p = acc.positions.find(x => x.key === key);
   if (!p) return null;
   const s = stop === undefined ? p.stop : stop;
@@ -260,12 +262,12 @@ export function setLevels(acc, key, { stop, take, trail } = {}) {
   p.stop = s;
   p.take = t;
   p.edited = true;
-  if (trail === true && !p.trail) {
-    const risk = p.risk || (p.entry > s ? p.entry - s : (p.take - p.entry) * (2 / 3));
-    Object.assign(p, { trail: true, risk, high: Math.max(p.high || 0, p.entry) });
-  }
+  const risk = () => p.risk || (p.entry > s ? p.entry - s : (p.take - p.entry) * (2 / 3));
+  if (trail === true && !p.trail) Object.assign(p, { trail: true, lock: false, risk: risk(), high: Math.max(p.high || 0, p.entry) });
   else if (trail === false) p.trail = false;
-  return { kind: 'levels', symbol: p.symbol, key, stop: s, take: t, trail: !!p.trail };
+  if (lock === true && !p.trail && !p.lock) Object.assign(p, { lock: true, risk: risk(), high: Math.max(p.high || 0, p.entry) });
+  else if (lock === false) p.lock = false;
+  return { kind: 'levels', symbol: p.symbol, key, stop: s, take: t, trail: !!p.trail, lock: !!p.lock };
 }
 
 // Raises a trailing or profit-locking position's stop as the price climbs.
