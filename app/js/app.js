@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.16.4 (latest trade details)';
+export const APP_VERSION = '0.16.5 (close button on pop-ups)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -95,6 +95,7 @@ function toast(message, action) {
   const t = $('toast');
   t.replaceChildren(el('span', { text: message }));
   if (action) t.append(el('button', { type: 'button', class: 'primary', text: action.label, onclick: action.run }));
+  t.append(el('button', { type: 'button', class: 'ghost toast-close', 'aria-label': 'Close', text: '✕', onclick: () => { clearTimeout(toastTimer); t.hidden = true; } }));
   t.hidden = false;
   clearTimeout(toastTimer);
   if (!action) toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
