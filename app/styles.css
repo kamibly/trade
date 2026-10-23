@@ -436,3 +436,5 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .whatif-note { font-size: 11px; color: var(--muted); }
 .whatif-card h3 { margin: 0 0 2px; font-size: 15px; }
 .badge.held { color: var(--up); border-color: var(--up); }
+.eq-readout { color: var(--muted); font-variant-numeric: tabular-nums; min-height: 1.4em; }
+.equity-chart { touch-action: pan-y; cursor: crosshair; }

@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.19.2 (NDAX tidier)';
+export const APP_VERSION = '0.19.3 (graph readout)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1914,11 +1914,16 @@ function equityChart(acc, now, shadow, { bare = false } = {}) {
   const id = `eq${Math.random().toString(36).slice(2, 8)}`;
   const day = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
   const change = now - acc.start;
-  return el('div', { class: bare ? 'equity-in' : 'card' },
-    bare ? null : el('div', { class: 'signal-top' },
-      el('h3', { text: 'Account value' }),
-      el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
-    svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
+  // Touch or drag on the graph: a line and a dot at that moment, with its time
+  // and value (and the grey line's) above the graph. Letting go shows now again.
+  const at = t => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const valueLine = (label, v, sv) => `${label} · ${formatMoney(v)} · ${fmtPct((v - acc.start) / acc.start)}${Number.isFinite(sv) ? ` · without filter ${formatMoney(sv)}` : ''}`;
+  const nearest = (list, t) => list.reduce((a, p) => (Math.abs(p.t - t) < Math.abs(a.t - t) ? p : a), list[0]);
+  const shadowNow = spts.length > 1 ? spts.at(-1).v : NaN;
+  const readout = el('div', { class: 'eq-readout small', text: valueLine('Now', now, shadowNow) });
+  const cursor = svg('line', { y1: padT, y2: H - padB, stroke: 'var(--muted)', 'stroke-width': 1, visibility: 'hidden' });
+  const dot = svg('circle', { r: 5, fill: 'var(--text)', visibility: 'hidden' });
+  const chart = svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
       svg('defs', {},
         svg('clipPath', { id: `${id}a` }, svg('rect', { x: 0, y: 0, width: W, height: base })),
         svg('clipPath', { id: `${id}b` }, svg('rect', { x: 0, y: base, width: W, height: H - base }))),
@@ -1929,7 +1934,36 @@ function equityChart(acc, now, shadow, { bare = false } = {}) {
       svg('path', { d: line, fill: 'none', stroke: 'var(--down)', 'stroke-width': 2, 'clip-path': `url(#${id}b)` }),
       spts.length > 1 ? svg('path', { d: path(spts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.5, 'stroke-dasharray': '6 3' }) : null,
       svg('text', { x: padL, y: H - 6, fill: 'var(--muted)', 'font-size': 20 }, day(t0)),
-      svg('text', { x: W - padR, y: H - 6, fill: 'var(--muted)', 'font-size': 20, 'text-anchor': 'end' }, 'now')),
+      svg('text', { x: W - padR, y: H - 6, fill: 'var(--muted)', 'font-size': 20, 'text-anchor': 'end' }, 'now'),
+      cursor, dot);
+  const show = e => {
+    const box = chart.getBoundingClientRect();
+    if (!box.width) return;
+    const sx = ((e.clientX - box.left) / box.width) * W;
+    const t = t0 + Math.min(1, Math.max(0, (sx - padL) / (W - padL - padR))) * (t1 - t0);
+    const p = nearest(pts, t);
+    const sp = spts.length > 1 && t >= spts[0].t ? nearest(spts, t).v : NaN;
+    for (const [k, v] of [['x1', x(p.t)], ['x2', x(p.t)]]) cursor.setAttribute(k, v.toFixed(1));
+    dot.setAttribute('cx', x(p.t).toFixed(1));
+    dot.setAttribute('cy', y(p.v).toFixed(1));
+    cursor.setAttribute('visibility', 'visible');
+    dot.setAttribute('visibility', 'visible');
+    readout.textContent = valueLine(p === pts.at(-1) ? 'Now' : at(p.t), p.v, sp);
+  };
+  const hide = () => {
+    cursor.setAttribute('visibility', 'hidden');
+    dot.setAttribute('visibility', 'hidden');
+    readout.textContent = valueLine('Now', now, shadowNow);
+  };
+  chart.addEventListener('pointerdown', e => { chart.setPointerCapture(e.pointerId); show(e); });
+  chart.addEventListener('pointermove', e => { if (e.pointerType === 'mouse' || chart.hasPointerCapture(e.pointerId)) show(e); });
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) chart.addEventListener(ev, hide);
+  return el('div', { class: bare ? 'equity-in' : 'card' },
+    bare ? null : el('div', { class: 'signal-top' },
+      el('h3', { text: 'Account value' }),
+      el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
+    readout,
+    chart,
     el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.${spts.length > 1 ? ' Grey line: the same account without the trade filter.' : ''}` }));
 }
 
