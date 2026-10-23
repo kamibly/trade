@@ -500,6 +500,33 @@ export async function runPaperEdit(job, deps = defaultDeps) {
   return { paper: job.paper, shadow: job.shadow || null, paperEvents, ok: !!ev };
 }
 
+// What if: each paper trade replayed with the target, the trailing stop and
+// the profit lock (paper.whatIf), on hourly candles, or daily ones when the
+// hourly history doesn't reach back to the buy.
+// job: { settings, trades: [{ id, key, symbol, type, ...trade }], prices: { key: price } }
+// result: { results: { id: { target, trail, lock } }, errors: { key: message } }
+export async function runWhatIf(job, deps = defaultDeps) {
+  const results = {};
+  const errors = {};
+  const bySymbol = new Map();
+  for (const t of job.trades || []) bySymbol.set(t.key, [...(bySymbol.get(t.key) || []), t]);
+  await pool([...bySymbol.values()], 3, async trades => {
+    const item = { type: trades[0].type, symbol: trades[0].symbol };
+    const first = Math.min(...trades.map(t => t.openedAt));
+    try {
+      let { candles } = await candlesFor(item, '1h', job.settings, deps);
+      if (!candles.length || candles[0].time * 1000 > first) ({ candles } = await candlesFor(item, '1D', job.settings, deps));
+      for (const t of trades) {
+        const r = paper.whatIf(t, candles, { now: deps.now(), price: (job.prices || {})[t.key] });
+        if (r) results[t.id] = r;
+      }
+    } catch (e) {
+      errors[trades[0].key] = e.message;
+    }
+  });
+  return { results, errors };
+}
+
 // Your symbols plus a spread of S&P 500 stocks and top cryptos, so the models
 // learn from more than a handful of charts. `total` caps the list.
 async function trainingItems(job, deps) {
@@ -602,7 +629,7 @@ async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
-  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper, paperEdit: runPaperEdit }[job.mode] || runWatch;
+  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper, paperEdit: runPaperEdit, whatIf: runWhatIf }[job.mode] || runWatch;
   const result = await run(job);
   if (job.stream) {
     // Training data is big: a header line, then one row per line, so Python

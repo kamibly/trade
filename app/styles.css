@@ -421,3 +421,17 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .srv-models { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
 .srv-models th, .srv-models td { text-align: left; padding: 2px 4px; }
 .srv-models thead th { color: var(--muted); font-weight: 500; }
+
+/* What if: the same trade with each exit */
+.whatif { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+.whatif-label { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+.whatif-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 6px 0; }
+.whatif-box { border: 1px solid var(--line); border-radius: 8px; padding: 6px 4px; text-align: center; display: grid; gap: 2px; }
+.whatif-box.mine { border-color: var(--accent); }
+.whatif-box.mine .whatif-name { color: var(--accent); }
+.whatif-name { font-size: 11px; color: var(--muted); }
+.whatif-box strong { font-variant-numeric: tabular-nums; }
+.whatif-box strong.good { color: var(--up); }
+.whatif-box strong.bad { color: var(--down); }
+.whatif-note { font-size: 11px; color: var(--muted); }
+.whatif-card h3 { margin: 0 0 2px; font-size: 15px; }

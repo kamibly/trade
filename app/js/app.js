@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.18.2 (tidier Settings)';
+export const APP_VERSION = '0.19.0 (what if: each exit)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1553,7 +1553,7 @@ function renderPaper({ force = false } = {}) {
     onServer ? filterTrialCard(state.serverPaper) : null,
   ];
   // replaceChildren() writes a null child as the text "null", so drop the empty parts.
-  $('paper-body').replaceChildren(...[summary, tabs, ...body].filter(Boolean));
+  $('paper-body').replaceChildren(...[summary, onServer ? whatIfTotals(acc) : null, tabs, ...body].filter(Boolean));
 
   // One buy or sell. The server's line carries the price, quantity and cost;
   // the matching open or closed trade adds the rest, fees included.
@@ -1709,6 +1709,7 @@ function renderPaper({ force = false } = {}) {
       outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
       p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
       el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
+      whatIfRow(p, pnl, paper.exitOf(p), true),
       paperControls(p, price),
     ], () => { const item = findItem(p.key); if (item) openChart(item, true); });
   }
@@ -1739,6 +1740,7 @@ function renderPaper({ force = false } = {}) {
       el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
       el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)}` }),
       el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }),
+      whatIfRow(t, t.pnl, t.sellsAt, false),
     ], () => { const item = findItem(t.key); if (item) openChart(item, true); });
     return [
       acc.trades.length ? sourceButtons(source, acc.trades, x => x.pnl, id => { state.closedSource = id; state.closedShown = 10; renderPaper({ force: true }); }) : null,
@@ -1750,6 +1752,49 @@ function renderPaper({ force = false } = {}) {
       rows.length > shown ? el('button', { type: 'button', class: 'ghost show-all', text: `Show more (${rows.length - shown} left)`, onclick: () => { state.closedShown = shown + 20; renderPaper({ force: true }); } }) : null,
     ];
   }
+}
+
+// What if: the same trade sold at its target, on a trailing stop and with a
+// profit lock (the server replays each one, see paper.whatIf). Your own exit
+// shows what really happened; the others what the replay says.
+const EXIT_NAMES = { target: 'Target', trail: 'Trail', lock: 'Lock' };
+const whatIfOf = t => ((state.serverPaper && state.serverPaper.whatIf) || {})[`${t.key}:${t.openedAt}`];
+
+function whatIfRow(t, actual, mine, isOpen) {
+  const r = whatIfOf(t);
+  if (!r || !paper.EXITS.every(k => r[k])) return null;
+  const value = k => (k === mine && Number.isFinite(actual) ? actual : r[k].pnl);
+  const best = paper.EXITS.reduce((a, k) => (value(k) > value(a) ? k : a), mine);
+  const note = k => (k === mine ? (isOpen ? 'held' : 'yours') : r[k].open ? 'still held' : r[k].reason === 'target' ? 'at target' : `sold, ${r[k].reason}`);
+  return el('div', { class: 'whatif' },
+    el('div', { class: 'whatif-label', text: isOpen ? 'What if, so far' : 'What if' }),
+    el('div', { class: 'whatif-row' }, ...paper.EXITS.map(k => el('div', { class: `whatif-box ${k === mine ? 'mine' : ''}` },
+      el('span', { class: 'whatif-name', text: `${EXIT_NAMES[k]}${k === mine ? ' (yours)' : ''}` }),
+      el('strong', { class: upDown(value(k)), text: signed(value(k)) }),
+      el('span', { class: 'whatif-note', text: note(k) })))),
+    best !== mine && value(best) - value(mine) >= 0.5
+      ? el('div', { class: 'whatif-note', text: `${EXIT_NAMES[best]} would have ${isOpen ? 'been' : 'made'} ${formatMoney(value(best) - value(mine))} more${isOpen ? ' so far' : ''}` }) : null);
+}
+
+// Every closed trade the server has replayed, added up for each exit. A trade
+// counts with what it really made under the exit it used.
+function whatIfTotals(acc) {
+  const rows = acc.trades.map(t => ({ t, r: whatIfOf(t) })).filter(({ r }) => r && paper.EXITS.every(k => r[k]));
+  if (!rows.length) return null;
+  const total = k => rows.reduce((sum, { t, r }) => sum + (t.sellsAt === k ? t.pnl : r[k].pnl), 0);
+  const sums = Object.fromEntries(paper.EXITS.map(k => [k, total(k)]));
+  const real = rows.reduce((sum, { t }) => sum + t.pnl, 0);
+  const best = paper.EXITS.reduce((a, k) => (sums[k] > sums[a] ? k : a), 'target');
+  const mine = ['target', 'trail', 'lock'].includes(state.settings.paperExit) ? state.settings.paperExit : 'target';
+  const held = rows.filter(({ t, r }) => paper.EXITS.some(k => k !== t.sellsAt && r[k].open)).length;
+  return el('div', { class: 'card whatif-card' },
+    el('h3', { text: 'Which exit would have done best' }),
+    el('div', { class: 'muted small', text: `${rows.length} closed trade${rows.length === 1 ? '' : 's'} replayed · yours made ${signed(real)}` }),
+    el('div', { class: 'whatif-row' }, ...paper.EXITS.map(k => el('div', { class: `whatif-box ${k === mine ? 'mine' : ''}` },
+      el('span', { class: 'whatif-name', text: `${EXIT_NAMES[k]}${k === mine ? ' (yours)' : ''}` }),
+      el('strong', { class: upDown(sums[k]), text: signed(sums[k]) })))),
+    el('div', { class: 'whatif-note', text: sums[best] - real >= 0.5 ? `${EXIT_NAMES[best]} is ahead of your trades by ${formatMoney(sums[best] - real)}` : 'Your trades did better than any one exit' }),
+    held ? el('div', { class: 'whatif-note', text: `${held} would still be held by another exit; counted at today's price` }) : null);
 }
 
 // Your own say on a paper trade: move its stop and target, or sell it now.

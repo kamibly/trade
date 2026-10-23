@@ -258,3 +258,24 @@ def test_you_can_sell_or_move_a_paper_trade(monkeypatch):
     assert jobs[-1]["price"] == 110.0  # the server's own latest price wins over the app's
     st = service.load_state()
     assert st["paperEvents"][0]["text"] == "Sold SOL" and st["paperShadow"] is not None
+
+
+def test_what_if_replays_open_and_unfinished_trades_and_keeps_finished_ones():
+    service.set_profile(PROFILE)
+    pos = {"key": "crypto:SOL", "symbol": "SOL", "type": "crypto", "qty": 1, "entry": 100, "cost": 100.2, "stop": 90, "take": 130, "openedAt": 5}
+    old = {**pos, "key": "crypto:BTC", "openedAt": 1, "closedAt": service.now_ms(), "stop0": 90, "take0": 130, "exit": 120, "pnl": 19.6}
+    gone = {**pos, "key": "crypto:ETH", "openedAt": 1, "closedAt": service.now_ms(), "exit": 120}  # no stop0: from before the update
+    service.update_state(lambda st: st.update(paper={"positions": [pos], "trades": [old, gone]}))
+    seen = []
+    sold = {k: {"pnl": 1, "open": False} for k in ("target", "trail", "lock")}
+
+    def engine(job, timeout):
+        seen.append([t["id"] for t in job["trades"]])
+        return {"results": {t["id"]: sold for t in job["trades"]}, "errors": {}}
+    service.run_whatif(engine=engine)
+    assert seen == [["crypto:SOL:5", "crypto:BTC:1"]]
+    service.run_whatif(engine=engine)
+    assert seen[-1] == ["crypto:SOL:5"]  # the closed trade's versions have all sold
+    r = TestClient(main.app).get("/paper", headers=KEY).json()
+    assert set(r["whatIf"]) == {"crypto:SOL:5", "crypto:BTC:1"}
+    assert service.whatif_due(service.load_state(), service.now_ms()) is False
