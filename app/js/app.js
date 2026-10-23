@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.19.0 (what if: each exit)';
+export const APP_VERSION = '0.19.1 (NDAX held tag)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2047,8 +2047,16 @@ function renderSettingsSummaries() {
   const exits = { target: 'sells at target', trail: 'trailing stop', lock: 'profit lock' };
   $('sum-paper').textContent = [formatMoney(s.paperStart), `${s.riskPct}% risk`, `stop ${s.stopAtr}, target ${s.takeAtr} ATR`, exits[s.paperExit] || exits.target, s.tradeFilter !== false ? 'filter on' : 'filter off'].join(' · ');
   const mode = ['off', 'dry', 'live'].includes(s.ndaxMode) ? s.ndaxMode : 'off';
-  $('sum-ndax').textContent = mode === 'off' ? 'Off' : `${mode === 'dry' ? 'Dry run' : 'Live'} · $${s.ndaxBudget} budget · $${s.ndaxMaxTrade} per trade`;
-  $('sum-ndax').className = `set-sum ${mode === 'live' ? 'warn' : ''}`;
+  const modeName = { off: 'Off', dry: 'Dry run', live: 'Live' }[mode];
+  const nd = state.ndax;
+  const [ndText, ndTone] = !serverOn() ? ['Needs your server', '']
+    : !nd ? [`Checking… · ${modeName}`, '']
+    : nd.error ? ['Can\'t reach your server', 'bad']
+    : !nd.configured ? [`Key not set · ${modeName}`, 'bad']
+    : nd.balanceError ? ['NDAX refused the key', 'bad']
+    : [`Connected · $${Number((nd.balance || {}).CAD || 0).toFixed(2)} CAD cash · ${modeName}`, 'good'];
+  $('sum-ndax').textContent = ndText;
+  $('sum-ndax').className = `set-sum ${ndTone}`;
   for (const b of document.querySelectorAll('#ndax-mode-btns button')) b.classList.toggle('on', b.dataset.mode === mode);
   $('sum-display').textContent = `Charts open on ${tfName(s.timeframe || '1D')}${s.showCad ? ' · CAD shown' : ''}`;
   $('sum-data').textContent = `${s.twelveKey ? 'Stock key saved' : 'No stock key'} · backup`;
@@ -2064,13 +2072,24 @@ async function renderNdax() {
   let r;
   try {
     r = await srv.serverFetch(state.settings, '/ndax');
+    state.ndax = r;
   } catch (e) {
+    state.ndax = { error: e.message };
+    renderSettingsSummaries();
     box.replaceChildren(el('p', { class: 'muted small', text: /404|Not Found/.test(e.message) ? 'Update your server to use NDAX.' : `Couldn't reach your server: ${e.message}` }));
     return;
   }
+  renderSettingsSummaries();
   const fmtCad = v => `$${Number(v).toFixed(2)} CAD`;
   const orders = r.orders || [];
   const held = Object.entries(r.positions || {});
+  // The latest buy of each coin still held gets the Held tag.
+  const heldBuy = new Map();
+  for (const [key, p] of held) {
+    const i = orders.findIndex(o => o.side === 'buy' && o.key === key && ['dry', 'filled'].includes(o.status) && (!p.at || o.at <= p.at + 60_000));
+    if (i >= 0) heldBuy.set(i, p);
+  }
+  const unlisted = held.filter(([, p]) => ![...heldBuy.values()].includes(p));
   const word = { dry: 'Dry run', filled: 'Filled', failed: 'Failed', skipped: 'Skipped' };
   box.replaceChildren(...[
     el('p', { class: 'small', text: !r.configured
@@ -2078,11 +2097,13 @@ async function renderNdax() {
       : r.balanceError ? `Key set, but NDAX refused it: ${r.balanceError}`
       : `Key works. Cash on NDAX: ${fmtCad((r.balance || {}).CAD || 0)}` }),
     el('p', { class: 'muted small', text: `${r.coins ? `${r.coins} coins sold for CAD on NDAX; crypto paper trades buy only these.` : 'NDAX\'s coin list has not loaded yet.'}${r.lossToday ? ` Live losses today: ${fmtCad(r.lossToday)}.` : ''}` }),
-    held.length ? el('div', { class: 'sub', text: `Held (${held.length}): ${held.map(([, p]) => `${p.symbol} ${fmtCad(p.cad)}${p.mode === 'dry' ? ' (dry run)' : ''}`).join(', ')}` }) : null,
+    // Held coins are tagged on their buy below; any whose buy is no longer in the list show here.
+    unlisted.length ? el('div', { class: 'sub', text: `Also held: ${unlisted.map(([, p]) => `${p.symbol} ${fmtCad(p.cad)}${p.mode === 'dry' ? ' (dry run)' : ''}`).join(', ')}` }) : null,
     orders.length ? el('ul', { class: 'list' }, ...orders.map((o, i) => foldCard('holding', `ndax:${o.at}:${i}`, [
       el('div', {},
         el('div', { class: 'sym' }, el('span', { class: `latest-kind ${o.side === 'buy' ? 'good' : 'bad'}`, text: o.side === 'buy' ? 'Buy' : 'Sell' }), o.symbol,
-          el('span', { class: 'badge', text: word[o.status] || o.status })),
+          el('span', { class: 'badge', text: word[o.status] || o.status }),
+          heldBuy.has(i) ? el('span', { class: 'badge held', text: 'Held' }) : null),
         el('div', { class: 'sub', text: new Date(o.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) })),
       el('div', { class: `paper-gain ${o.side === 'sell' ? upDown(o.pnl) : ''}`, text: o.side === 'sell' && Number.isFinite(o.pnl) ? signed(o.pnl) : Number.isFinite(o.cad) ? fmtCad(o.cad) : '–' }),
     ], [

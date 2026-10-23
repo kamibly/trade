@@ -435,3 +435,4 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .whatif-box strong.bad { color: var(--down); }
 .whatif-note { font-size: 11px; color: var(--muted); }
 .whatif-card h3 { margin: 0 0 2px; font-size: 15px; }
+.badge.held { color: var(--up); border-color: var(--up); }
