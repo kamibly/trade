@@ -211,9 +211,10 @@
           <select id="paper-exit">
             <option value="target">The target</option>
             <option value="trail">A trailing stop (no target)</option>
+            <option value="lock">The target, with a profit lock</option>
           </select>
         </label>
-        <p class="muted small">With a trailing stop, once a trade is up 1 ATR its stop moves to break even after fees, then follows the highest price at the stop-loss distance below it. Each backtest shows both ways side by side. It applies to new paper trades from scans and watchlist Buys; opportunities keep their own plan.</p>
+        <p class="muted small">With a trailing stop, once a trade is up 1 ATR its stop moves to break even after fees, then follows the highest price at the stop-loss distance below it. Each backtest shows both ways side by side. It applies to new paper trades from scans and watchlist Buys; opportunities keep their own plan. With the profit lock, every new trade (opportunities too) keeps its target, and once it is up its full risk (2 ATR) the stop keeps half of the best gain, rising to three quarters near the target, so a winner that turns doesn't give it all back.</p>
         <label class="switch">
           <input id="filter-toggle" type="checkbox">
           <span>Trade filter for paper trading</span>

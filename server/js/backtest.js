@@ -4,7 +4,7 @@
 // never saw, then trades the signals so the results are not fitted to the past.
 
 import { votesAt, scoreVotes, actionFor, contextAt, MIN_CANDLES, DEFAULT_THRESHOLDS } from './signals.js';
-import { trailStop } from './paper.js';
+import { trailStop, lockStop } from './paper.js';
 
 export const FEE = 0.001; // 0.1% per side; callers pass the broker's rate for the symbol (fees.js)
 const MIN_VOTE = 0.3; // only count votes with a clear opinion
@@ -51,7 +51,7 @@ export function weightsFrom(stats) {
 // sell score. If one candle touches both stop and target, the stop counts.
 // With `trail`, there is no target: the stop trails (see paper.js trailStop),
 // raised after each candle from its high, so a candle never sells on its own rise.
-export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLDS, stopAtr = 2, takeAtr = 3, fee = FEE, ctx, trail = false } = {}) {
+export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLDS, stopAtr = 2, takeAtr = 3, fee = FEE, ctx, trail = false, lock = false } = {}) {
   const c = S.candles;
   const trades = [];
   let equity = 1;
@@ -73,11 +73,13 @@ export function simulate(S, scores, start, end, { thresholds = DEFAULT_THRESHOLD
   for (let i = start; i < end; i++) {
     if (pos && i > pos.i) {
       const bar = c[i];
-      if (bar.low <= pos.stop) close(i, Math.min(bar.open, pos.stop), trail && pos.stop > pos.entry ? 'trailing stop' : 'stop');
+      if (bar.low <= pos.stop) close(i, Math.min(bar.open, pos.stop), pos.stop > pos.entry ? (trail ? 'trailing stop' : lock ? 'profit lock' : 'stop') : 'stop');
       else if (!trail && bar.high >= pos.take) close(i, Math.max(bar.open, pos.take), 'target');
-      else if (trail) {
+      else if (trail || lock) {
+        // The stop moves after the bar, from its high: it applies from the next bar.
         pos.high = Math.max(pos.high, bar.high);
-        pos.stop = trailStop({ entry: pos.entry, stop: pos.stop, risk: pos.risk, high: pos.high, floor: pos.entry * (1 + fee) / (1 - fee) });
+        const levels = { entry: pos.entry, stop: pos.stop, risk: pos.risk, high: pos.high, floor: pos.entry * (1 + fee) / (1 - fee) };
+        pos.stop = trail ? trailStop(levels) : lockStop({ ...levels, take: pos.take });
       }
     }
     const s = scores[i];
@@ -168,5 +170,7 @@ export function backtest(S, { thresholds = DEFAULT_THRESHOLDS, horizon = 10, tra
   }
   // The same trades with a trailing stop in place of the fixed target.
   out.trailed = simulate(S, weightedScores, split, n, { ...opts, thresholds: out.rule || thresholds, trail: true });
+  // And with the profit lock: the target stays, the stop keeps part of the best gain.
+  out.locked = simulate(S, weightedScores, split, n, { ...opts, thresholds: out.rule || thresholds, lock: true });
   return out;
 }

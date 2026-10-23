@@ -175,3 +175,10 @@ def test_the_trading_account_is_found_from_the_user_id_without_a_login(monkeypat
     assert ex.options["accountId"] == 449
     assert any("GetUserAccounts" in u and "UserId=1" in u for u in seen)
     assert any("GetAccountPositions" in u and "AccountId=449" in u for u in seen)
+
+
+def test_the_profit_lock_setting_reaches_the_paper_account():
+    p = service.clean_profile({"settings": {"paperExit": "lock"}})
+    assert p["settings"]["paperExit"] == "lock"
+    fields = service.paper_fields({}, p)
+    assert fields["lock"] is True and fields["trail"] is False

@@ -86,3 +86,56 @@ test('crypto paper buys only coins the exchange sells, when its list is known', 
   paper.step(any, { signals, now: 1, budgets: paper.PHONE_BUDGETS, tradable: null });
   assert.equal(any.positions.length, 3);
 });
+
+test('profit lock: break even at half the risk, then half to three quarters of the best gain', () => {
+  const base = { entry: 100, stop: 90, risk: 10, take: 130, floor: 100.4 };
+  assert.equal(paper.lockStop({ ...base, high: 104 }), 90); // not up enough yet
+  assert.equal(paper.lockStop({ ...base, high: 106 }), 100.4); // break even after fees
+  assert.equal(paper.lockStop({ ...base, high: 110 }), 105); // up the full risk: keeps half of $10
+  assert.equal(paper.lockStop({ ...base, high: 130 }), 122.5); // at the target: three quarters of $30
+  assert.equal(paper.lockStop({ ...base, high: 120 }), 100 + 0.625 * 20); // halfway between
+  assert.equal(paper.lockStop({ ...base, stop: 112, high: 110 }), 112); // never lowers the stop
+});
+
+test('the paper account locks profit on opportunities too, and keeps the target', () => {
+  const acc = paper.newAccount(10000, 0);
+  const opp = { id: 'o1', setup: 'ranking', key: 'crypto:AAA', symbol: 'AAA', type: 'crypto', entry: 100, stop: 90, take: 130, hold: 30, ev: 1 };
+  paper.openSetups(acc, [opp], { now: 1, lock: true, trail: true });
+  const p = acc.positions[0];
+  assert.ok(p.lock && !p.trail, 'opportunities lock; they never trail');
+  const price = (entry, now) => paper.step(acc, { signals: { 'crypto:AAA': { symbol: 'AAA', type: 'crypto', entry } }, now });
+  price(120, 2);
+  assert.equal(p.stop, 112.5);
+  const [ev] = price(112, 3);
+  assert.equal(ev.reason, 'profit lock');
+  assert.ok(acc.trades[0].pnl > 0, 'sold with a gain instead of riding back down');
+});
+
+test('the backtest shows the profit lock next to the target and the trailing stop', () => {
+  const c = [];
+  for (let i = 0; i < 40; i++) {
+    const close = i < 10 ? 100 : i < 20 ? 100 + (i - 9) * 2 : 120 - (i - 19) * 2;
+    c.push({ time: i, open: close, high: close + 0.5, low: close - 0.5, close, volume: 1 });
+  }
+  const S = { candles: c, close: c.map(x => x.close), atr: c.map(() => 5) };
+  const scores = c.map((_, i) => (i === 9 ? 90 : 0));
+  const target = simulate(S, scores, 0, 40, { stopAtr: 2, takeAtr: 6 });
+  const locked = simulate(S, scores, 0, 40, { stopAtr: 2, takeAtr: 6, lock: true });
+  assert.equal(locked.trades[0].reason, 'profit lock');
+  assert.ok(locked.totalReturn > target.totalReturn, 'it kept part of the rise the target-only trade gave back');
+});
+
+test('an open trade can switch to the profit lock, and back to its target', () => {
+  const acc = paper.newAccount(10000, 0);
+  const signals = { 'stock:AAA': { symbol: 'AAA', type: 'stock', action: 'buy', entry: 100, stop: 90, take: 130, atr: 5 } };
+  paper.step(acc, { signals, now: 1, budgets: paper.PHONE_BUDGETS });
+  const p = acc.positions[0];
+  const ev = paper.setLevels(acc, 'stock:AAA', { stop: 90, take: 130, lock: true });
+  assert.ok(ev.lock && p.lock && !p.trail && p.risk === 10);
+  paper.step(acc, { signals: { 'stock:AAA': { ...signals['stock:AAA'], action: 'hold', entry: 120 } }, now: 2, budgets: paper.PHONE_BUDGETS });
+  assert.equal(p.stop, 112.5, 'the lock applies from the next price check');
+  paper.setLevels(acc, 'stock:AAA', { trail: true });
+  assert.ok(p.trail && !p.lock, 'trailing replaces the lock');
+  paper.setLevels(acc, 'stock:AAA', { stop: 112.5, take: 130, trail: false, lock: false });
+  assert.ok(!p.trail && !p.lock);
+});
