@@ -388,3 +388,36 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .sum-track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
 
 .latest-kind { font-size: 12px; font-weight: 700; margin-right: 6px; }
+
+/* Settings: each section folds to a title and a one-line summary. */
+.set-sec { padding: 0; }
+.set-sec > summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; }
+.set-sec > summary::-webkit-details-marker { display: none; }
+.set-sec > summary::after { content: '▸'; color: var(--muted); transition: transform 0.15s; }
+.set-sec[open] > summary::after { transform: rotate(90deg); }
+.set-sec > summary h2 { margin: 0; font-size: 16px; }
+.set-sum { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.set-sum.good { color: var(--up); }
+.set-sum.bad { color: var(--down); }
+.set-sum.warn { color: var(--warn); }
+.set-body { padding: 0 14px 14px; display: grid; gap: 8px; }
+.set-body h3 { font-size: 14px; margin: 8px 0 0; }
+.set-body p { margin: 0; }
+.set-body .switch { margin: 0; }
+.set-sub > summary { cursor: pointer; color: var(--accent); font-size: 13px; padding: 4px 0; }
+.set-sub[open] { display: grid; gap: 8px; }
+.label-info { display: inline-flex; align-items: center; gap: 4px; }
+.label-info .info-btn { margin-left: 0; min-height: 24px; min-width: 24px; padding: 0 6px; }
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; background: transparent; min-height: 36px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.on { background: var(--accent); color: #fff; }
+.seg button.on[data-mode="live"] { background: var(--down); }
+.srv-rows { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 13px; }
+.srv-rows dt { color: var(--muted); }
+.srv-rows dd { margin: 0; }
+.srv-problems summary { cursor: pointer; }
+.srv-problems ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
+.srv-models { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.srv-models th, .srv-models td { text-align: left; padding: 2px 4px; }
+.srv-models thead th { color: var(--muted); font-weight: 500; }

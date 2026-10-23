@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.18.1 (profit lock per trade)';
+export const APP_VERSION = '0.18.2 (tidier Settings)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1083,37 +1083,50 @@ async function loadServerStatus() {
 
 function renderServer() {
   const st = state.serverStatus;
-  $('server-push').textContent = state.settings.serverPush ? 'Turn off server alerts' : 'Turn on server alerts';
+  $('server-push').checked = !!state.settings.serverPush;
   $('server-push').disabled = !serverOn();
   $('server-test').hidden = !state.settings.serverPush;
   $('server-train').disabled = !serverOn() || trainingNow(st);
+  if (!serverOn()) $('server-conn').open = true;
+  renderSettingsSummaries();
   const info = $('server-info');
-  if (!serverOn()) { info.textContent = 'Not connected.'; return; }
-  if (!st) { info.textContent = 'Checking your server…'; return; }
-  if (st.error) { info.textContent = st.error; return; }
+  if (!serverOn()) { info.replaceChildren(el('p', { class: 'small', text: 'Not connected. Add your server below.' })); return; }
+  if (!st) { info.replaceChildren(el('p', { class: 'muted small', text: 'Checking your server…' })); return; }
+  if (st.error) { info.replaceChildren(el('p', { class: 'small bad', text: st.error })); return; }
   const w = st.watch || {};
-  const errs = Object.keys(w.errors || {}).length;
-  const failed = Object.entries(w.errors || {}).map(([key, msg]) => `${key.split(':').pop()}: ${String(msg).slice(0, 120)}`).join('; ');
-  info.textContent = [
-    `Connected (version ${st.version}).`,
-    st.pushEnabled ? `${st.devices} phone${st.devices === 1 ? '' : 's'} get alerts.` : 'Notification keys are not set on the server yet.',
-    w.lastRunAt ? `Watchlist and holdings checked ${timeAgo(w.lastRunAt)}, right after every candle closes and every ${st.watchEveryMinutes} minutes in between${errs ? `, ${errs} symbol${errs === 1 ? '' : 's'} failed (${failed})` : ''}.` : 'Watchlist checks start within a few minutes.',
-    st.prices && st.prices.lastRunAt ? `Stop-losses and targets checked every minute, last ${timeAgo(st.prices.lastRunAt)}.` : '',
-    cryptoLine(st.crypto),
-    st.market.lastRunAt ? `Stock scan ${timeAgo(st.market.lastRunAt)}.` : '',
-    st.market.nextAt ? `Next stock scan ${new Date(st.market.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '',
-    modelsLine(st),
-  ].filter(Boolean).join(' ');
-}
-
-function cryptoLine(c) {
-  if (!c) return '';
-  if (!c.lastRunAt) return `Crypto scan every ${c.everyMinutes} minutes, starting shortly.`;
-  return [
-    `Crypto scan every ${c.everyMinutes} minutes around the clock, last ${timeAgo(c.lastRunAt)}: ${c.scanned} of ${c.total} coins traded on Coinbase or Kraken.`,
-    c.listError ? `The coin list could not be refreshed: ${c.listError}.` : '',
-    c.pulseAt ? `Fast moves watched every minute${c.lastMoveAt ? `, last one rescored ${timeAgo(c.lastMoveAt)}` : ''}.` : '',
-  ].filter(Boolean).join(' ');
+  const c = st.crypto || {};
+  const when = t => new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  const rows = [
+    ['Alerts', st.pushEnabled ? `${state.settings.serverPush ? 'On' : 'Off'} on this phone · ${st.devices} phone${st.devices === 1 ? '' : 's'} in all` : 'Notification keys are not set on the server'],
+    ['Watchlist', w.lastRunAt ? `${timeAgo(w.lastRunAt)} · every ${st.watchEveryMinutes} min and at each candle close` : 'Starts within a few minutes'],
+    ['Stops and targets', st.prices && st.prices.lastRunAt ? `${timeAgo(st.prices.lastRunAt)} · every minute` : 'Starts within a minute'],
+    ['Crypto scan', c.lastRunAt ? `${timeAgo(c.lastRunAt)} · ${c.scanned} of ${c.total} coins · every ${c.everyMinutes} min` : `Every ${c.everyMinutes || 15} min, starting shortly`],
+    ['Fast moves', c.pulseAt ? `Watched every minute${c.lastMoveAt ? ` · last ${timeAgo(c.lastMoveAt)}` : ''}` : null],
+    ['Stock scan', [st.market && st.market.lastRunAt ? timeAgo(st.market.lastRunAt) : null, st.market && st.market.nextAt ? `next ${when(st.market.nextAt)}` : null].filter(Boolean).join(' · ') || null],
+  ].filter(([, v]) => v);
+  // What went wrong, on its own line, with the details a tap away.
+  const problems = [
+    ...Object.entries(w.errors || {}).map(([key, msg]) => `${key.split(':').pop()}: ${String(msg).slice(0, 160)}`),
+    c.listError ? `Coin list: ${c.listError}` : null,
+    st.market && st.market.error ? `Stock scan: ${st.market.error}` : null,
+    ...Object.entries((st.training && st.training.results) || {}).filter(([, r]) => r.error).map(([tf, r]) => `Training ${tf}: ${r.error}`),
+  ].filter(Boolean);
+  const models = Object.entries(st.models || {});
+  const pct = t => (t ? `${Math.round(t.hit * 100)}%${t.usable ? '' : ' off'}` : '–');
+  const training = trainingNow(st) ? `Training now, started ${timeAgo(st.training.runningSince)}`
+    : st.training && st.training.nextAt ? `Next training ${when(st.training.nextAt)}` : '';
+  info.replaceChildren(...[
+    el('dl', { class: 'srv-rows' }, ...rows.flatMap(([k, v]) => [el('dt', { text: k }), el('dd', { text: v })])),
+    problems.length ? el('details', { class: 'srv-problems' },
+      el('summary', { class: 'bad small', text: `${problems.length} problem${problems.length === 1 ? '' : 's'}: ${problems[0].split(':')[0]}${problems.length > 1 ? ' and more' : ''}` }),
+      el('ul', { class: 'small' }, ...problems.map(t => el('li', { text: t })))) : null,
+    el('div', { class: 'muted small srv-models-head', text: models.length ? `Models, right in their test${training ? ` · ${training}` : ''}` : `Models are not trained yet${training ? ` · ${training}` : ''}` }),
+    models.length ? el('table', { class: 'srv-models' },
+      el('thead', {}, el('tr', {}, ...['', 'LightGBM', 'LSTM', 'Bottom', 'Top'].map(t => el('th', { text: t })))),
+      el('tbody', {}, ...models.map(([tf, m]) => el('tr', {},
+        el('th', { text: TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf }),
+        ...[m.lgbm, m.lstm, m.bottom, m.top].map(t => el('td', { class: t && !t.usable ? 'muted' : '', text: pct(t) })))))) : null,
+  ].filter(Boolean));
 }
 
 // The server marks a training run as started; a run takes up to an hour per
@@ -1136,17 +1149,6 @@ async function trainNow() {
     status.textContent = e.message;
     status.className = 'small bad';
   }
-}
-
-function modelsLine(st) {
-  if (trainingNow(st)) return `Training the models now, started ${timeAgo(st.training.runningSince)}.`;
-  const models = Object.entries(st.models || {});
-  const failed = Object.entries((st.training && st.training.results) || {}).filter(([, r]) => r.error);
-  const next = st.training && st.training.nextAt ? ` Next training ${new Date(st.training.nextAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })}.` : '';
-  if (!models.length) return `${failed.length ? `Model training failed: ${failed[0][1].error}.` : 'Machine-learning models are not trained yet.'}${next}`;
-  const pct = t => (t ? `${Math.round(t.hit * 100)}%${t.usable ? '' : ' (not used)'}` : 'none');
-  const turns = m => (m.bottom || m.top ? `, bottom finder ${pct(m.bottom)}, top finder ${pct(m.top)}` : '');
-  return `${models.map(([tf, m]) => `${TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf}: LightGBM ${pct(m.lgbm)}, LSTM ${pct(m.lstm)}${turns(m)} right in their test, trained ${timeAgo(m.trainedAt)}.`).join(' ')}${failed.length ? ` Last training failed: ${failed.map(([tf, r]) => `${tf}: ${r.error}`).join('; ')}.` : ''}${next}`;
 }
 
 async function saveServer() {
@@ -1203,7 +1205,7 @@ async function toggleServerPush() {
       await syncNow();
       await srv.subscribePush(state.settings, st.publicKey);
       state.settings = store.saveSettings({ serverPush: true, notifications: true });
-      status.textContent = 'Server alerts are on. Tap Send a test alert to check.';
+      status.textContent = 'Server alerts are on. Tap Test alert to check.';
       status.className = 'small good';
     }
   } catch (e) {
@@ -1980,6 +1982,33 @@ async function resetPaper() {
 
 // ---- Settings ---------------------------------------------------------------
 
+// The line under each folded Settings section: what it is set to now.
+function renderSettingsSummaries() {
+  const s = state.settings;
+  const tfName = tf => ({ '15m': '15 min', '1h': '1 hour', '1D': '1 day', '1W': '1 week' })[tf] || tf;
+  const st = state.serverStatus;
+  const server = $('sum-server');
+  server.textContent = !serverOn() ? 'Not connected'
+    : !st ? 'Checking…'
+    : st.error ? 'Can\'t reach it'
+    : `Connected · v${st.version} · alerts ${s.serverPush ? 'on' : 'off'}`;
+  server.className = `set-sum ${!serverOn() || (st && st.error) ? 'bad' : st ? 'good' : ''}`;
+  $('sum-signals').textContent = [`${tfName(s.alertTf)} chart`, autoTune(s) ? 'Auto levels' : `Buy ${s.buyAt}, sell ${s.sellAt}`,
+    s.notifications && canNotify() ? 'notifications on' : 'notifications off', s.quietHours ? 'quiet hours' : null].filter(Boolean).join(' · ');
+  const ids = Object.keys(SETUPS);
+  const on = ids.filter(id => (s.setups || {})[id] !== false).length;
+  const muted = ((state.market && state.market.setupsInfo) || {}).muted || [];
+  $('sum-setups').textContent = `${on} of ${ids.length} on${muted.length ? ` · ${muted.length} muted` : ''}`;
+  const exits = { target: 'sells at target', trail: 'trailing stop', lock: 'profit lock' };
+  $('sum-paper').textContent = [formatMoney(s.paperStart), `${s.riskPct}% risk`, `stop ${s.stopAtr}, target ${s.takeAtr} ATR`, exits[s.paperExit] || exits.target, s.tradeFilter !== false ? 'filter on' : 'filter off'].join(' · ');
+  const mode = ['off', 'dry', 'live'].includes(s.ndaxMode) ? s.ndaxMode : 'off';
+  $('sum-ndax').textContent = mode === 'off' ? 'Off' : `${mode === 'dry' ? 'Dry run' : 'Live'} · $${s.ndaxBudget} budget · $${s.ndaxMaxTrade} per trade`;
+  $('sum-ndax').className = `set-sum ${mode === 'live' ? 'warn' : ''}`;
+  for (const b of document.querySelectorAll('#ndax-mode-btns button')) b.classList.toggle('on', b.dataset.mode === mode);
+  $('sum-display').textContent = `Charts open on ${tfName(s.timeframe || '1D')}${s.showCad ? ' · CAD shown' : ''}`;
+  $('sum-data').textContent = `${s.twelveKey ? 'Stock key saved' : 'No stock key'} · backup`;
+}
+
 // NDAX: your cash there, what is really held and the latest orders.
 async function renderNdax() {
   const box = $('ndax-body');
@@ -2038,7 +2067,7 @@ function renderSettings() {
   $('manual-levels').hidden = autoTune(state.settings);
   $('tune-note').textContent = autoTune(state.settings)
     ? 'Each symbol gets the buy and sell levels, and the way of reading the score (standard or buying the dip in an uptrend), that did best on its older history. Each signal shows how they did on newer candles they never saw.'
-    : '';
+    : 'Every symbol uses the levels and the way of reading the score you set below.';
   $('quiet-toggle').checked = state.settings.quietHours;
   $('stop-atr').value = state.settings.stopAtr;
   $('take-atr').value = state.settings.takeAtr;
@@ -2056,6 +2085,7 @@ function renderSettings() {
   renderNotifyStatus();
   renderSetupSettings();
   renderServer();
+  renderSettingsSummaries();
   if (serverOn()) loadServerStatus();
 }
 
@@ -2095,7 +2125,7 @@ function saveRisk() {
 function renderNotifyStatus() {
   const supported = typeof Notification !== 'undefined';
   const on = state.settings.notifications && canNotify();
-  $('notify-btn').textContent = on ? 'Turn off notifications' : 'Turn on notifications';
+  $('notify-btn').checked = !!on;
   $('notify-btn').disabled = !supported;
   $('notify-status').textContent = !supported ? 'This browser cannot show notifications. Install the app from Chrome first.'
     : Notification.permission === 'denied' ? 'Notifications are blocked. Allow them in Chrome\'s site settings for this app.'
@@ -2241,7 +2271,7 @@ function bind() {
   $('tune-mode').addEventListener('change', saveThresholds);
   $('signal-mode').addEventListener('change', saveThresholds);
   $('sell-at').addEventListener('change', saveThresholds);
-  $('notify-btn').addEventListener('click', toggleNotifications);
+  $('notify-btn').addEventListener('change', toggleNotifications);
   $('quiet-toggle').addEventListener('change', e => { state.settings = store.saveSettings({ quietHours: e.target.checked }); markChanged(); });
   $('filter-toggle').addEventListener('change', e => {
     state.settings = store.saveSettings({ tradeFilter: e.target.checked });
@@ -2257,6 +2287,7 @@ function bind() {
     const mode = e.target.value;
     if (mode === 'live' && !confirm('Live sends real orders to NDAX with your money, following the paper account\'s crypto trades. Continue?')) {
       e.target.value = state.settings.ndaxMode || 'off';
+      renderSettingsSummaries();
       return;
     }
     state.settings = store.saveSettings({ ndaxMode: mode });
@@ -2276,7 +2307,21 @@ function bind() {
     $('ndax-status').textContent = 'Saved. New real orders use these limits.';
   });
   $('server-save').addEventListener('click', saveServer);
-  $('server-push').addEventListener('click', toggleServerPush);
+  $('server-push').addEventListener('change', toggleServerPush);
+  for (const b of document.querySelectorAll('#ndax-mode-btns button')) b.addEventListener('click', () => {
+    $('ndax-mode').value = b.dataset.mode;
+    $('ndax-mode').dispatchEvent(new Event('change'));
+  });
+  // ⓘ buttons show or hide the longer explanation they point to.
+  for (const b of document.querySelectorAll('#view-settings .info-btn[data-info]')) b.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const box = $(b.dataset.info);
+    box.hidden = !box.hidden;
+    b.setAttribute('aria-expanded', String(!box.hidden));
+  });
+  // Every change in Settings refreshes the one-line summaries on the folded sections.
+  $('view-settings').addEventListener('change', () => setTimeout(renderSettingsSummaries, 0));
   $('server-test').addEventListener('click', testServerPush);
   $('server-train').addEventListener('click', trainNow);
 
