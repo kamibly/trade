@@ -40,6 +40,12 @@ services:
       # name a contact; insider buying and earnings dates load once it is set.
       # It stays on your server and is only sent to the SEC.
       SEC_CONTACT: ""
+      # Optional: real crypto orders on NDAX (Settings, API Key in NDAX; the user
+      # ID is under Personal User Info). Give the key trading permission only,
+      # never withdrawals. Nothing is sent until you pick Live in the app.
+      NDAX_API_KEY: ""
+      NDAX_API_SECRET: ""
+      NDAX_USER_ID: ""
     # Training briefly needs about 1 GB; this keeps it from starving jobspy-service.
     mem_limit: 1500m
     volumes:

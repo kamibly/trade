@@ -17,6 +17,7 @@ Environment variables:
     TRAIN_SYMBOLS      - how many charts the models learn from, default 120
     SEC_CONTACT        - your email, which the SEC asks for in its requests; insider buying
                          and earnings dates load only once it is set (see events.py)
+    NDAX_API_KEY, NDAX_API_SECRET, NDAX_USER_ID - real crypto orders on NDAX (see ndax.py)
 """
 import json
 import logging
@@ -28,6 +29,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
+
+import ndax
 
 logger = logging.getLogger("trade-service")
 
@@ -220,6 +223,10 @@ def clean_profile(raw: dict) -> dict:
             "paperStart": round(_num(s.get("paperStart"), 10000, 100, 10_000_000)),
             "tradeFilter": bool(s.get("tradeFilter", True)),
             "paperExit": "trail" if s.get("paperExit") == "trail" else "target",
+            "ndaxMode": s.get("ndaxMode") if s.get("ndaxMode") in ndax.MODES else "off",
+            "ndaxBudget": round(_num(s.get("ndaxBudget"), 100, 0, 1_000_000), 2),
+            "ndaxMaxTrade": round(_num(s.get("ndaxMaxTrade"), 25, 0, 1_000_000), 2),
+            "ndaxDailyLoss": round(_num(s.get("ndaxDailyLoss"), 20, 0, 1_000_000), 2),
             "setups": {k: bool((s.get("setups") or {}).get(k, True)) if isinstance(s.get("setups"), dict) else True for k in SETUP_IDS},
         },
         "updatedAt": int(_num(raw.get("updatedAt"), now_ms(), 0, 1e15)),
@@ -503,6 +510,7 @@ def paper_fields(state: dict, profile: dict) -> dict:
         "useFilter": bool(profile["settings"].get("tradeFilter", True)) and trial.get("result") != "behind",
         "budgets": (state.get("paperBudgets") or {}).get("shares"),
         "trail": profile["settings"].get("paperExit") == "trail",
+        "tradable": ndax.tradable(state),
     }
 
 
@@ -513,6 +521,7 @@ def save_paper(st: dict, result: dict) -> None:
         st["paperShadow"] = result["shadow"]
     if result.get("paperEvents"):
         st["paperEvents"] = (list(reversed(result["paperEvents"])) + st.get("paperEvents", []))[:50]
+        ndax.queue_events(st, result["paperEvents"])
     st["filterTrial"] = filter_trial(st)
     st["paperBudgets"] = follow_results(st)
 
@@ -1202,6 +1211,11 @@ def prices_due(state: dict, now: int) -> bool:
     return now - ((state.get("prices") or {}).get("lastRunAt") or 0) >= PRICES_EVERY_MS
 
 
+def run_ndax() -> List[dict]:
+    """Real NDAX orders for the paper account's latest crypto buys and sells."""
+    return ndax.process(load_state, update_state, tz())
+
+
 def _spawn(fn) -> None:
     """Each job runs in its own thread, so a long market scan or training never
     delays the candle-close and every-minute checks. Each job's lock skips a
@@ -1232,6 +1246,11 @@ def start_scheduler() -> None:
                     _spawn(run_pulse)
                 if events_due(state, now):
                     _spawn(run_events)
+                if state.get("ndaxQueue"):
+                    _spawn(run_ndax)
+                if ndax.coins_due(state, now):
+                    update_state(lambda st: ndax._box(st).update(coinsAt=now))
+                    _spawn(lambda: ndax.refresh_coins(update_state))
                 train = train_due(state, datetime.now(tz()))
                 if train:
                     update_state(lambda st: st.update(lastTrainSlot=train))

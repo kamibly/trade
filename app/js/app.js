@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.16.5 (close button on pop-ups)';
+export const APP_VERSION = '0.17.0 (NDAX real trading)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -670,7 +670,7 @@ function backtestCard(bt) {
   const w = bt.weighted;
   return el('div', { class: 'card' },
     el('h3', { text: 'Backtest' }),
-    el('p', { class: 'muted small', text: `Weights learned from ${fmtDate(bt.trainFrom)} to ${fmtDate(bt.testFrom)}, then tested on the ${bt.testCandles} newer candles they never saw. Long only, buying on a new Buy score and selling on the stop-loss, target or a Sell score, with ${state.chartItem.type === 'crypto' ? 'Kraken\'s 0.4%' : 'IBKR\'s fee (0.1% on a $1,000 order)'} on each buy and sell.` }),
+    el('p', { class: 'muted small', text: `Weights learned from ${fmtDate(bt.trainFrom)} to ${fmtDate(bt.testFrom)}, then tested on the ${bt.testCandles} newer candles they never saw. Long only, buying on a new Buy score and selling on the stop-loss, target or a Sell score, with ${state.chartItem.type === 'crypto' ? 'NDAX\'s 0.2%' : 'IBKR\'s fee (0.1% on a $1,000 order)'} on each buy and sell.` }),
     bt.rule ? line(`Tuned levels (${bt.rule.mode === 'dip' ? 'dip mode' : 'standard'}, ${fmtScore(bt.rule.buy)} / ${fmtScore(bt.rule.sell)})`, bt.tuned) : null,
     bt.rule ? line('Standard levels (+40 / -40)', bt.standard) : line('Weighted methods', w),
     line('All methods equal', bt.equal),
@@ -1976,6 +1976,48 @@ async function resetPaper() {
 
 // ---- Settings ---------------------------------------------------------------
 
+// NDAX: your cash there, what is really held and the latest orders.
+async function renderNdax() {
+  const box = $('ndax-body');
+  if (!serverOn()) {
+    box.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server below first; it places the orders.' }));
+    return;
+  }
+  let r;
+  try {
+    r = await srv.serverFetch(state.settings, '/ndax');
+  } catch (e) {
+    box.replaceChildren(el('p', { class: 'muted small', text: /404|Not Found/.test(e.message) ? 'Update your server to use NDAX.' : `Couldn't reach your server: ${e.message}` }));
+    return;
+  }
+  const fmtCad = v => `$${Number(v).toFixed(2)} CAD`;
+  const orders = r.orders || [];
+  const held = Object.entries(r.positions || {});
+  const word = { dry: 'Dry run', filled: 'Filled', failed: 'Failed', skipped: 'Skipped' };
+  box.replaceChildren(...[
+    el('p', { class: 'small', text: !r.configured
+      ? 'The NDAX key is not set on your server yet (NDAX_API_KEY, NDAX_API_SECRET and NDAX_USER_ID). A dry run still works without it.'
+      : r.balanceError ? `Key set, but NDAX refused it: ${r.balanceError}`
+      : `Key works. Cash on NDAX: ${fmtCad((r.balance || {}).CAD || 0)}` }),
+    el('p', { class: 'muted small', text: `${r.coins ? `${r.coins} coins sold for CAD on NDAX; crypto paper trades buy only these.` : 'NDAX\'s coin list has not loaded yet.'}${r.lossToday ? ` Live losses today: ${fmtCad(r.lossToday)}.` : ''}` }),
+    held.length ? el('div', { class: 'sub', text: `Held (${held.length}): ${held.map(([, p]) => `${p.symbol} ${fmtCad(p.cad)}${p.mode === 'dry' ? ' (dry run)' : ''}`).join(', ')}` }) : null,
+    orders.length ? el('ul', { class: 'list' }, ...orders.map((o, i) => foldCard('holding', `ndax:${o.at}:${i}`, [
+      el('div', {},
+        el('div', { class: 'sym' }, el('span', { class: `latest-kind ${o.side === 'buy' ? 'good' : 'bad'}`, text: o.side === 'buy' ? 'Buy' : 'Sell' }), o.symbol,
+          el('span', { class: 'badge', text: word[o.status] || o.status })),
+        el('div', { class: 'sub', text: new Date(o.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) })),
+      el('div', { class: `paper-gain ${o.side === 'sell' ? upDown(o.pnl) : ''}`, text: o.side === 'sell' && Number.isFinite(o.pnl) ? signed(o.pnl) : Number.isFinite(o.cad) ? fmtCad(o.cad) : '–' }),
+    ], [
+      Number.isFinite(o.qty) ? el('dl', { class: 'money-row' },
+        stat('Quantity', `${Number(o.qty.toPrecision(6))}`),
+        stat('Price', Number.isFinite(o.price) ? fmtCad(o.price) : '–'),
+        stat('Fee', Number.isFinite(o.fee) ? fmtCad(o.fee) : '–')) : null,
+      el('div', { class: 'sub', text: `${o.mode === 'live' ? 'Sent to NDAX' : 'Dry run, not sent'}${o.reason ? ` · ${o.reason}` : ''}${o.id ? ` · order ${o.id}` : ''}` }),
+      o.error ? el('div', { class: 'sub', text: o.error }) : null,
+    ], () => { const item = findItem(o.key); if (item) openChart(item, true); }))) : el('p', { class: 'muted small', text: 'No real or dry-run orders yet.' }),
+  ].filter(Boolean));
+}
+
 function renderSettings() {
   $('key-input').value = state.settings.twelveKey;
   $('tf-default').value = state.settings.timeframe;
@@ -2000,6 +2042,11 @@ function renderSettings() {
   $('paper-start').value = state.settings.paperStart;
   $('filter-toggle').checked = state.settings.tradeFilter !== false;
   $('paper-exit').value = state.settings.paperExit === 'trail' ? 'trail' : 'target';
+  $('ndax-mode').value = ['off', 'dry', 'live'].includes(state.settings.ndaxMode) ? state.settings.ndaxMode : 'off';
+  $('ndax-budget').value = state.settings.ndaxBudget;
+  $('ndax-max').value = state.settings.ndaxMaxTrade;
+  $('ndax-loss').value = state.settings.ndaxDailyLoss;
+  renderNdax();
   $('server-url').value = state.settings.serverUrl;
   $('server-key').value = state.settings.serverKey;
   renderNotifyStatus();
@@ -2201,6 +2248,28 @@ function bind() {
     state.settings = store.saveSettings({ paperExit: e.target.value === 'trail' ? 'trail' : 'target' });
     markChanged();
     $('risk-status').textContent = 'Saved. New paper trades use it; open ones keep theirs (change them on the Paper tab).';
+  });
+  $('ndax-mode').addEventListener('change', e => {
+    const mode = e.target.value;
+    if (mode === 'live' && !confirm('Live sends real orders to NDAX with your money, following the paper account\'s crypto trades. Continue?')) {
+      e.target.value = state.settings.ndaxMode || 'off';
+      return;
+    }
+    state.settings = store.saveSettings({ ndaxMode: mode });
+    markChanged();
+    $('ndax-status').textContent = mode === 'off' ? 'Off. No new real buys; coins already bought are still sold with the paper trade.'
+      : mode === 'dry' ? 'Dry run. The next crypto paper trades show here as the orders they would be.'
+      : 'Live. The next crypto paper trades are sent to NDAX.';
+  });
+  $('ndax-save').addEventListener('click', () => {
+    const budget = Number($('ndax-budget').value), max = Number($('ndax-max').value), loss = Number($('ndax-loss').value);
+    if (![budget, max, loss].every(v => Number.isFinite(v) && v >= 0)) {
+      $('ndax-status').textContent = 'Enter amounts of 0 or more.';
+      return;
+    }
+    state.settings = store.saveSettings({ ndaxBudget: budget, ndaxMaxTrade: max, ndaxDailyLoss: loss });
+    markChanged();
+    $('ndax-status').textContent = 'Saved. New real orders use these limits.';
   });
   $('server-save').addEventListener('click', saveServer);
   $('server-push').addEventListener('click', toggleServerPush);
