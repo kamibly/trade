@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.19.1 (NDAX held tag)';
+export const APP_VERSION = '0.19.2 (NDAX tidier)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2092,10 +2092,10 @@ async function renderNdax() {
   const unlisted = held.filter(([, p]) => ![...heldBuy.values()].includes(p));
   const word = { dry: 'Dry run', filled: 'Filled', failed: 'Failed', skipped: 'Skipped' };
   box.replaceChildren(...[
-    el('p', { class: 'small', text: !r.configured
+    // The cash shows on the section's folded line; only a key problem needs words here.
+    !r.configured || r.balanceError ? el('p', { class: 'small', text: !r.configured
       ? 'The NDAX key is not set on your server yet (NDAX_API_KEY, NDAX_API_SECRET and NDAX_USER_ID). A dry run still works without it.'
-      : r.balanceError ? `Key set, but NDAX refused it: ${r.balanceError}`
-      : `Key works. Cash on NDAX: ${fmtCad((r.balance || {}).CAD || 0)}` }),
+      : `Key set, but NDAX refused it: ${r.balanceError}` }) : null,
     el('p', { class: 'muted small', text: `${r.coins ? `${r.coins} coins sold for CAD on NDAX; crypto paper trades buy only these.` : 'NDAX\'s coin list has not loaded yet.'}${r.lossToday ? ` Live losses today: ${fmtCad(r.lossToday)}.` : ''}` }),
     // Held coins are tagged on their buy below; any whose buy is no longer in the list show here.
     unlisted.length ? el('div', { class: 'sub', text: `Also held: ${unlisted.map(([, p]) => `${p.symbol} ${fmtCad(p.cad)}${p.mode === 'dry' ? ' (dry run)' : ''}`).join(', ')}` }) : null,
