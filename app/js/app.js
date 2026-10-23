@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.18.2 (tidier Settings)';
+export const APP_VERSION = '0.18.3 (NDAX status line)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2002,8 +2002,16 @@ function renderSettingsSummaries() {
   const exits = { target: 'sells at target', trail: 'trailing stop', lock: 'profit lock' };
   $('sum-paper').textContent = [formatMoney(s.paperStart), `${s.riskPct}% risk`, `stop ${s.stopAtr}, target ${s.takeAtr} ATR`, exits[s.paperExit] || exits.target, s.tradeFilter !== false ? 'filter on' : 'filter off'].join(' · ');
   const mode = ['off', 'dry', 'live'].includes(s.ndaxMode) ? s.ndaxMode : 'off';
-  $('sum-ndax').textContent = mode === 'off' ? 'Off' : `${mode === 'dry' ? 'Dry run' : 'Live'} · $${s.ndaxBudget} budget · $${s.ndaxMaxTrade} per trade`;
-  $('sum-ndax').className = `set-sum ${mode === 'live' ? 'warn' : ''}`;
+  const modeName = { off: 'Off', dry: 'Dry run', live: 'Live' }[mode];
+  const nd = state.ndax;
+  const [ndText, ndTone] = !serverOn() ? ['Needs your server', '']
+    : !nd ? [`Checking… · ${modeName}`, '']
+    : nd.error ? ['Can\'t reach your server', 'bad']
+    : !nd.configured ? [`Key not set · ${modeName}`, 'bad']
+    : nd.balanceError ? ['NDAX refused the key', 'bad']
+    : [`Connected · $${Number((nd.balance || {}).CAD || 0).toFixed(2)} CAD cash · ${modeName}`, 'good'];
+  $('sum-ndax').textContent = ndText;
+  $('sum-ndax').className = `set-sum ${ndTone}`;
   for (const b of document.querySelectorAll('#ndax-mode-btns button')) b.classList.toggle('on', b.dataset.mode === mode);
   $('sum-display').textContent = `Charts open on ${tfName(s.timeframe || '1D')}${s.showCad ? ' · CAD shown' : ''}`;
   $('sum-data').textContent = `${s.twelveKey ? 'Stock key saved' : 'No stock key'} · backup`;
@@ -2019,10 +2027,14 @@ async function renderNdax() {
   let r;
   try {
     r = await srv.serverFetch(state.settings, '/ndax');
+    state.ndax = r;
   } catch (e) {
+    state.ndax = { error: e.message };
+    renderSettingsSummaries();
     box.replaceChildren(el('p', { class: 'muted small', text: /404|Not Found/.test(e.message) ? 'Update your server to use NDAX.' : `Couldn't reach your server: ${e.message}` }));
     return;
   }
+  renderSettingsSummaries();
   const fmtCad = v => `$${Number(v).toFixed(2)} CAD`;
   const orders = r.orders || [];
   const held = Object.entries(r.positions || {});
