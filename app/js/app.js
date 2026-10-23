@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.16.0 (budgets by money)';
+export const APP_VERSION = '0.16.5 (close button on pop-ups)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -42,6 +42,7 @@ const state = {
   paperSort: 'loss',
   paperSource: 'all',
   closedFilter: 'all',
+  closedSource: 'all',
   closedShown: 10,
   filter: 'all',
   editing: false,
@@ -94,6 +95,7 @@ function toast(message, action) {
   const t = $('toast');
   t.replaceChildren(el('span', { text: message }));
   if (action) t.append(el('button', { type: 'button', class: 'primary', text: action.label, onclick: action.run }));
+  t.append(el('button', { type: 'button', class: 'ghost toast-close', 'aria-label': 'Close', text: '✕', onclick: () => { clearTimeout(toastTimer); t.hidden = true; } }));
   t.hidden = false;
   clearTimeout(toastTimer);
   if (!action) toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
@@ -790,6 +792,9 @@ function renderSignals() {
 const setupName = id => (id === 'signal' ? 'Buy and Sell signals' : id === 'scan' ? 'Market scan ideas' : SETUPS[id] ? SETUPS[id].name : id);
 // Stock or crypto, in its own colour so the two are told apart at a glance.
 const typeBadge = type => el('span', { class: `badge type-${type === 'crypto' ? 'crypto' : 'stock'}`, text: type === 'crypto' ? 'Crypto' : 'Stock' });
+// The paper page's source filters, and which one a trade belongs to.
+const SOURCES = [['all', 'All'], ['signal', 'Signals'], ['scan', 'Scan'], ['opps', 'Opportunities']];
+const sourceOf = p => { const s = paper.setupOf(p); return s === 'signal' || s === 'scan' ? s : 'opps'; };
 // A short tag for where a paper trade came from.
 const sourceTag = id => (id === 'signal' ? 'Signal' : id === 'scan' ? 'Scan' : SETUPS[id] ? SETUPS[id].name : id);
 const holdText = o => `${o.hold} ${o.type === 'stock' ? 'trading days' : 'days'}`;
@@ -1495,9 +1500,10 @@ function renderPaper({ force = false } = {}) {
   const acc = paperAccount();
   const onServer = serverPaperOn();
   const serverPrices = (onServer && state.serverPaper.prices) || {};
-  // Your watchlist's quote, else the server's latest price, else the last scan's close.
+  // Your watchlist's quote, else the server's latest price, else the last scan's close
+  // (its buy and sell ideas and its opportunities).
   const m = state.market || {};
-  const scanned = Object.fromEntries([...(m.buys || []), ...(m.sells || [])].map(s => [s.key, s.entry]));
+  const scanned = Object.fromEntries([...(m.opportunities || []), ...(m.buys || []), ...(m.sells || [])].map(s => [s.key, s.entry]));
   const lastPrice = key => [priceOf(key), serverPrices[key], ((state.serverSignals || {})[key] || {}).entry, scanned[key]].find(Number.isFinite);
   const prices = Object.fromEntries(acc.positions.map(p => [p.key, lastPrice(p.key)]));
   const sum = paper.summary(acc, prices);
@@ -1537,8 +1543,7 @@ function renderPaper({ force = false } = {}) {
 
   const body = tab === 'open' ? openTab() : tab === 'closed' ? closedTab() : tab === 'latest' ? [
     // Every buy and sell, newest first.
-    events.length ? el('ul', { class: 'list compact' }, ...events.slice(0, 50).map(ev => el('li', { class: 'holding' },
-      el('div', { class: 'sub', text: `${new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${ev.text}` }))))
+    events.length ? el('ul', { class: 'list' }, ...events.slice(0, 50).map(latestCard))
       : el('p', { class: 'muted small', text: onServer ? 'No paper buys or sells yet.' : 'The latest buys and sells show here when your server runs the paper account.' }),
   ] : [
     bySetupTable(acc, onServer ? state.serverPaper.budgets : null),
@@ -1547,20 +1552,138 @@ function renderPaper({ force = false } = {}) {
   // replaceChildren() writes a null child as the text "null", so drop the empty parts.
   $('paper-body').replaceChildren(...[summary, tabs, ...body].filter(Boolean));
 
+  // One buy or sell. The server's line carries the price, quantity and cost;
+  // the matching open or closed trade adds the rest, fees included.
+  function latestCard(ev, i) {
+    const when = new Date(ev.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const near = t => Number.isFinite(t) && Math.abs(t - ev.at) < 10 * 60000;
+    const type = String(ev.key || '').startsWith('crypto:') ? 'crypto' : 'stock';
+    const top = (word, cls, right, rightCls) => [
+      el('div', {},
+        el('div', { class: 'sym' }, el('span', { class: `latest-kind ${cls}`, text: word }), ev.symbol, typeBadge(type)),
+        el('div', { class: 'sub', text: when })),
+      el('div', { class: `paper-gain ${rightCls || ''}`, text: right }),
+    ];
+    const tile = (label, value, cls) => stat(label, value, cls);
+    const cents = v => `$${v.toFixed(2)}`;
+    const chart = () => { const item = findItem(ev.key); if (item) openChart(item, true); };
+    if (ev.kind === 'open') {
+      const pos = acc.positions.find(p => p.key === ev.key && near(p.openedAt)) || acc.trades.find(t => t.key === ev.key && near(t.openedAt));
+      const value = ev.qty * ev.price;
+      return foldCard('holding', `latest:${ev.key}:${ev.at}:${i}`, top('Bought', 'good', formatMoney(ev.cost)), [
+        el('div', { class: 'sub', text: sourceTag(ev.setup || 'signal') }),
+        el('dl', { class: 'money-row' },
+          tile('Quantity', fmtQty({ qty: ev.qty, type })),
+          tile('Buy price', formatMoney(ev.price)),
+          tile('Order value', formatMoney(value))),
+        el('dl', { class: 'money-row' },
+          tile('Fee', cents(Math.max(0, ev.cost - value))),
+          tile('Total paid', formatMoney(ev.cost))),
+        pos && Number.isFinite(pos.stop) ? el('div', { class: 'sub', text: pos.trail
+          ? `Bought with a trailing stop from ${formatMoney(pos.trail && pos.risk ? pos.entry - pos.risk : pos.stop)} and no target`
+          : `Bought with the stop at ${formatMoney(pos.stop)} and the target at ${formatMoney(pos.take)}` }) : null,
+        pos && !acc.positions.includes(pos) ? el('div', { class: 'sub', text: 'Sold since; see the Closed tab.' }) : null,
+      ], chart);
+    }
+    if (ev.kind === 'close') {
+      const t = acc.trades.find(x => x.key === ev.key && near(x.closedAt));
+      const why = ev.reason === 'time' ? 'holding period over' : ev.reason;
+      const pct = t && costOf(t) > 0 ? ` · ${fmtPct(t.pnl / costOf(t))}` : '';
+      const head = top('Sold', 'bad', `${signed(ev.pnl)}${pct}`, upDown(ev.pnl));
+      if (!t) return foldCard('holding', `latest:${ev.key}:${ev.at}:${i}`, head, [el('div', { class: 'sub', text: ev.text || why })], chart);
+      const value = t.qty * t.exit;
+      const back = costOf(t) + t.pnl;
+      const buyFee = Math.max(0, costOf(t) - t.qty * t.entry);
+      const sellFee = Math.max(0, value - back);
+      const days = Math.max(0, Math.round((t.closedAt - t.openedAt) / 86400000));
+      return foldCard('holding', `latest:${ev.key}:${ev.at}:${i}`, head, [
+        el('div', { class: 'sub', text: `${sourceTag(t.setup || 'signal')} · ${why}` }),
+        el('dl', { class: 'money-row' },
+          tile('Quantity', fmtQty(t)),
+          tile('Sell price', formatMoney(t.exit)),
+          tile('Order value', formatMoney(value))),
+        el('dl', { class: 'money-row' },
+          tile('Fee', cents(sellFee)),
+          tile('Got back', formatMoney(back)),
+          tile('It cost', formatMoney(costOf(t)))),
+        el('div', { class: 'sub', text: `Bought at ${formatMoney(t.entry)} on ${fmtTime(t.openedAt)}, held ${days < 1 ? 'under a day' : `${days} day${days === 1 ? '' : 's'}`}` }),
+        el('div', { class: 'sub', text: `Fees on this trade: ${cents(buyFee + sellFee)} (buy ${cents(buyFee)}, sell ${cents(sellFee)})` }),
+      ], chart);
+    }
+    return el('li', { class: 'holding' }, el('div', { class: 'sub', text: `${when} · ${ev.text || ''}` }));
+  }
+
+  // Where trades came from, for the filter buttons on Open and Closed.
+  function sourceButtons(source, list, gainOf, pick) {
+    const sum = id => list.filter(x => id === 'all' || sourceOf(x) === id).reduce((t, x) => t + (Number.isFinite(gainOf(x)) ? gainOf(x) : 0), 0);
+    return el('div', { class: 'chips' }, ...SOURCES.map(([id, label]) => {
+      const n = list.filter(x => id === 'all' || sourceOf(x) === id).length;
+      const g = sum(id);
+      return el('button', { type: 'button', class: id === source ? 'on' : '', onclick: () => pick(id) },
+        label, n ? el('span', { class: `chip-gain ${upDown(g)}`, text: ` ${signed(g)}` }) : null);
+    }));
+  }
+
+  // A picture of one source: three tiles, a bar of trades that went up
+  // against down (or won against lost), and for opportunities a gain bar
+  // for each setup.
+  function sourceSummary(source, { tiles, split, setups }) {
+    const name = (SOURCES.find(([id]) => id === source) || SOURCES[0])[1];
+    const [good, bad, goodLabel, badLabel] = split;
+    const n = good + bad;
+    const most = Math.max(1, ...(setups || []).map(x => Math.abs(x.gain)));
+    return el('div', { class: 'card source-sum' },
+      el('div', { class: 'sum-title', text: name }),
+      el('div', { class: 'sum-tiles' }, ...tiles.map(([label, value, cls, note]) => el('div', { class: 'sum-tile' },
+        el('span', { class: 'sum-label', text: label }),
+        el('strong', { class: cls || '', text: value }),
+        note ? el('span', { class: `sum-note ${cls || ''}`, text: note }) : null))),
+      n ? el('div', { class: 'sum-split-label', text: `${good} ${goodLabel}, ${bad} ${badLabel}` }) : null,
+      n ? el('div', { class: 'sum-split' },
+        good ? el('span', { class: 'good', style: `width:${(good / n) * 100}%` }) : null,
+        bad ? el('span', { class: 'bad', style: `width:${(bad / n) * 100}%` }) : null) : null,
+      setups && setups.length ? el('div', { class: 'sum-split-label', text: 'Gain by setup' }) : null,
+      setups && setups.length ? el('div', { class: 'sum-setups' }, ...setups.flatMap(x => [
+        el('span', { text: `${x.name} (${x.count})` }),
+        el('div', { class: 'sum-track' }, el('span', { class: upDown(x.gain), style: `width:${Math.max(3, (Math.abs(x.gain) / most) * 100)}%` })),
+        el('span', { class: upDown(x.gain), text: signed(x.gain) }),
+      ])) : null);
+  }
+  function bySetup(list, gainOf) {
+    const groups = {};
+    for (const x of list) (groups[x.setup || 'signal'] ||= []).push(x);
+    return Object.entries(groups).map(([id, xs]) => ({
+      name: setupName(id), count: xs.length,
+      gain: xs.reduce((t, x) => t + (Number.isFinite(gainOf(x)) ? gainOf(x) : 0), 0),
+    })).sort((a, b) => b.gain - a.gain);
+  }
+
   function openTab() {
-    const sources = [['all', 'All'], ['signal', 'Signals'], ['scan', 'Scan'], ['opps', 'Opportunities']];
-    const source = sources.some(([id]) => id === state.paperSource) ? state.paperSource : 'all';
-    const sourceOf = p => { const s = paper.setupOf(p); return s === 'signal' || s === 'scan' ? s : 'opps'; };
+    const source = SOURCES.some(([id]) => id === state.paperSource) ? state.paperSource : 'all';
     const sorts = { loss: (a, b) => (a.pnl || 0) - (b.pnl || 0), gain: (a, b) => (b.pnl || 0) - (a.pnl || 0), newest: (a, b) => b.p.openedAt - a.p.openedAt };
     const sort = sorts[state.paperSort] ? state.paperSort : 'loss';
     const rows = open.filter(o => source === 'all' || sourceOf(o.p) === source).sort(sorts[sort]);
+    const pricedRows = rows.filter(o => Number.isFinite(o.value));
+    const cost = pricedRows.reduce((t, o) => t + o.p.cost, 0);
+    const worth = pricedRows.reduce((t, o) => t + o.value, 0);
+    const unpriced = rows.filter(o => !Number.isFinite(o.value)).reduce((t, o) => t + o.p.cost, 0);
+    const summary = rows.length ? sourceSummary(source, {
+      tiles: [
+        ['Invested', formatMoney(rows.reduce((t, o) => t + o.p.cost, 0)), '', `${rows.length} open`],
+        ['Worth now', pricedRows.length ? formatMoney(worth + unpriced) : '–'],
+        ['Gain', pricedRows.length ? signed(worth - cost) : '–', upDown(worth - cost), pricedRows.length ? fmtPct((worth - cost) / cost) : ''],
+      ],
+      split: [pricedRows.filter(o => o.pnl > 0).length, pricedRows.filter(o => o.pnl <= 0).length, 'up', 'down'],
+      setups: source === 'opps' ? bySetup(rows.map(o => ({ setup: o.p.setup, pnl: o.pnl })), x => x.pnl) : null,
+    }) : null;
     const select = el('select', { 'aria-label': 'Sort', onchange: e => { state.paperSort = e.target.value; renderPaper({ force: true }); } },
       ...[['loss', 'Biggest loss first'], ['gain', 'Biggest gain first'], ['newest', 'Newest first']].map(([v, t]) => el('option', { value: v, text: t, selected: v === sort })));
     return [
       acc.positions.length ? el('div', { class: 'paper-tools' },
-        el('div', { class: 'chips' }, ...sources.map(([id, label]) => el('button', { type: 'button', class: id === source ? 'on' : '', text: label, onclick: () => { state.paperSource = id; renderPaper({ force: true }); } }))),
+        sourceButtons(source, open.map(o => ({ ...o.p, pnl: o.pnl })), x => x.pnl, id => { state.paperSource = id; renderPaper({ force: true }); }),
         select) : null,
-      pnlBars(rows.filter(o => Number.isFinite(o.value))),
+      summary,
+      pnlBars(pricedRows),
       rows.length ? el('ul', { class: 'list' }, ...rows.map(openCard))
         : el('p', { class: 'muted small', text: acc.positions.length ? 'No open trades from this source.' : 'No open paper trades. The next new Buy signal opens one.' }),
     ];
@@ -1589,7 +1712,21 @@ function renderPaper({ force = false } = {}) {
 
   function closedTab() {
     const result = ['all', 'won', 'lost'].includes(state.closedFilter) ? state.closedFilter : 'all';
-    const rows = acc.trades.filter(t => result === 'all' || (result === 'won' ? t.pnl > 0 : t.pnl <= 0)).slice().reverse();
+    const source = SOURCES.some(([id]) => id === state.closedSource) ? state.closedSource : 'all';
+    const fromSource = acc.trades.filter(t => source === 'all' || sourceOf(t) === source);
+    const rows = fromSource.filter(t => result === 'all' || (result === 'won' ? t.pnl > 0 : t.pnl <= 0)).slice().reverse();
+    const won = fromSource.filter(t => t.pnl > 0).length;
+    const total = fromSource.reduce((t, x) => t + x.pnl, 0);
+    const invested = fromSource.reduce((t, x) => t + costOf(x), 0);
+    const summary = fromSource.length ? sourceSummary(source, {
+      tiles: [
+        ['Trades', String(fromSource.length), '', 'closed'],
+        ['Won', `${Math.round((won / fromSource.length) * 100)}%`, '', `${won} of ${fromSource.length}`],
+        ['Gain', signed(total), upDown(total), invested > 0 ? fmtPct(total / invested) : ''],
+      ],
+      split: [won, fromSource.length - won, 'won', 'lost'],
+      setups: source === 'opps' ? bySetup(fromSource, x => x.pnl) : null,
+    }) : null;
     const shown = state.closedShown || 10;
     const why = t => (t.reason === 'time' ? 'holding period over' : t.reason);
     const card = t => foldCard('holding', `closed:${t.key}:${t.closedAt}`, [
@@ -1601,8 +1738,10 @@ function renderPaper({ force = false } = {}) {
       el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }),
     ], () => { const item = findItem(t.key); if (item) openChart(item, true); });
     return [
+      acc.trades.length ? sourceButtons(source, acc.trades, x => x.pnl, id => { state.closedSource = id; state.closedShown = 10; renderPaper({ force: true }); }) : null,
       acc.trades.length ? el('div', { class: 'chips' }, ...[['all', 'All'], ['won', 'Won'], ['lost', 'Lost']].map(([id, label]) =>
         el('button', { type: 'button', class: id === result ? 'on' : '', text: label, onclick: () => { state.closedFilter = id; state.closedShown = 10; renderPaper({ force: true }); } }))) : null,
+      summary,
       rows.length ? el('ul', { class: 'list' }, ...rows.slice(0, shown).map(card))
         : el('p', { class: 'muted small', text: acc.trades.length ? 'No trades here.' : 'No closed paper trades yet.' }),
       rows.length > shown ? el('button', { type: 'button', class: 'ghost show-all', text: `Show more (${rows.length - shown} left)`, onclick: () => { state.closedShown = shown + 20; renderPaper({ force: true }); } }) : null,

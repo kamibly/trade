@@ -623,15 +623,17 @@ def us_market_open(now: Optional[datetime] = None) -> bool:
 
 
 def price_items(state: dict, now: Optional[datetime] = None) -> List[dict]:
-    """Holdings with a stop or target, and paper positions. Stocks only while their market is open."""
+    """Holdings with a stop or target, and paper positions. Stocks only while their market is
+    open, or once to get a first price for one bought after the close."""
     profile = state.get("profile") or {}
+    known = (state.get("prices") or {}).get("values") or {}
     items, seen = [], set()
     rows = [h for h in profile.get("holdings", []) if h.get("stop") or h.get("take")] + list((state.get("paper") or {}).get("positions", [])) \
         + list((state.get("paperShadow") or {}).get("positions", []))
     stocks_open = us_market_open(now)
     for r in rows:
         k = f"{r['type']}:{r['symbol']}"
-        if k in seen or (r["type"] == "stock" and not stocks_open):
+        if k in seen or (r["type"] == "stock" and not stocks_open and k in known):
             continue
         seen.add(k)
         items.append({x: r[x] for x in ("type", "symbol", "name", "geckoId") if x in r})

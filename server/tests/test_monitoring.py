@@ -67,7 +67,10 @@ def test_market_hours_and_what_the_minute_check_covers():
     open_ = [i["symbol"] for i in service.price_items(st, datetime(2026, 10, 15, 11, 0, tzinfo=NY))]
     closed = [i["symbol"] for i in service.price_items(st, datetime(2026, 10, 15, 20, 0, tzinfo=NY))]
     assert open_ == ["NVDA", "SOL"]  # ETH has no stop or target
-    assert closed == ["SOL"]  # stocks wait for the market
+    assert closed == ["NVDA", "SOL"]  # a stock with no price yet gets one after the close
+    st["prices"] = {"values": {"stock:NVDA": 90.0}}
+    closed = [i["symbol"] for i in service.price_items(st, datetime(2026, 10, 15, 20, 0, tzinfo=NY))]
+    assert closed == ["SOL"]  # then stocks wait for the market
 
 
 def test_minute_check_alerts_and_moves_paper(monkeypatch):

@@ -231,6 +231,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
   display: flex;
   align-items: center;
   gap: 12px;
+  width: max-content;
   max-width: calc(100vw - 32px);
   padding: 10px 14px;
   border-radius: 12px;
@@ -240,6 +241,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
   font-size: 14px;
 }
 .toast button { min-height: 32px; padding: 4px 10px; }
+.toast .toast-close { min-width: 32px; padding: 4px 8px; margin-left: -4px; color: var(--muted); font-size: 16px; line-height: 1; }
 
 .row.two { flex-wrap: nowrap; }
 .row.two .field { flex: 1; margin: 0; }
@@ -364,3 +366,25 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .equity-in p { margin: 4px 0 0; }
 .pnl-row { cursor: pointer; }
 .list li.fold { scroll-margin-top: 64px; }
+.chip-gain { font-weight: 600; font-variant-numeric: tabular-nums; }
+.chip-gain.good { color: var(--up); }
+.chip-gain.bad { color: var(--down); }
+.source-sum { padding: 10px 12px; margin: 6px 0; }
+.source-sum .sum-title { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.sum-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.sum-tile { display: grid; background: var(--panel-2); border-radius: 8px; padding: 6px 8px; min-width: 0; }
+.sum-tile strong { font-size: 16px; font-variant-numeric: tabular-nums; }
+.sum-label, .sum-note { font-size: 11px; color: var(--muted); }
+.source-sum .good { color: var(--up); }
+.source-sum .bad { color: var(--down); }
+.sum-split-label { font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+.sum-split { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: var(--line); }
+.sum-split span, .sum-track span { display: block; height: 100%; }
+.sum-split span, .sum-track span { background: var(--muted); }
+.sum-split .good, .sum-track .good { background: var(--up); }
+.sum-split .bad, .sum-track .bad { background: var(--down); }
+.sum-setups { display: grid; grid-template-columns: minmax(0, auto) 1fr auto; gap: 4px 8px; align-items: center; font-size: 12px; }
+.sum-setups > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sum-track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+
+.latest-kind { font-size: 12px; font-weight: 700; margin-right: 6px; }
