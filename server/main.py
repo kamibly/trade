@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.13.1"
+VERSION = "1.14.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -112,7 +112,7 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
     state = service.load_state()
     return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {}),
             "shadow": state.get("paperShadow"), "filterTrial": state.get("filterTrial"), "budgets": state.get("paperBudgets"),
-            "skips": (state.get("paper") or {}).get("skips", {})}
+            "skips": (state.get("paper") or {}).get("skips", {}), "whatIf": (state.get("whatIf") or {}).get("results", {})}
 
 
 @app.get("/ndax")

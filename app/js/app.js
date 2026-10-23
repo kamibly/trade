@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.18.2 (tidier Settings)';
+export const APP_VERSION = '0.19.3 (graph readout)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1553,7 +1553,7 @@ function renderPaper({ force = false } = {}) {
     onServer ? filterTrialCard(state.serverPaper) : null,
   ];
   // replaceChildren() writes a null child as the text "null", so drop the empty parts.
-  $('paper-body').replaceChildren(...[summary, tabs, ...body].filter(Boolean));
+  $('paper-body').replaceChildren(...[summary, onServer ? whatIfTotals(acc) : null, tabs, ...body].filter(Boolean));
 
   // One buy or sell. The server's line carries the price, quantity and cost;
   // the matching open or closed trade adds the rest, fees included.
@@ -1709,6 +1709,7 @@ function renderPaper({ force = false } = {}) {
       outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
       p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
       el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
+      whatIfRow(p, pnl, paper.exitOf(p), true),
       paperControls(p, price),
     ], () => { const item = findItem(p.key); if (item) openChart(item, true); });
   }
@@ -1739,6 +1740,7 @@ function renderPaper({ force = false } = {}) {
       el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
       el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)}` }),
       el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }),
+      whatIfRow(t, t.pnl, t.sellsAt, false),
     ], () => { const item = findItem(t.key); if (item) openChart(item, true); });
     return [
       acc.trades.length ? sourceButtons(source, acc.trades, x => x.pnl, id => { state.closedSource = id; state.closedShown = 10; renderPaper({ force: true }); }) : null,
@@ -1750,6 +1752,49 @@ function renderPaper({ force = false } = {}) {
       rows.length > shown ? el('button', { type: 'button', class: 'ghost show-all', text: `Show more (${rows.length - shown} left)`, onclick: () => { state.closedShown = shown + 20; renderPaper({ force: true }); } }) : null,
     ];
   }
+}
+
+// What if: the same trade sold at its target, on a trailing stop and with a
+// profit lock (the server replays each one, see paper.whatIf). Your own exit
+// shows what really happened; the others what the replay says.
+const EXIT_NAMES = { target: 'Target', trail: 'Trail', lock: 'Lock' };
+const whatIfOf = t => ((state.serverPaper && state.serverPaper.whatIf) || {})[`${t.key}:${t.openedAt}`];
+
+function whatIfRow(t, actual, mine, isOpen) {
+  const r = whatIfOf(t);
+  if (!r || !paper.EXITS.every(k => r[k])) return null;
+  const value = k => (k === mine && Number.isFinite(actual) ? actual : r[k].pnl);
+  const best = paper.EXITS.reduce((a, k) => (value(k) > value(a) ? k : a), mine);
+  const note = k => (k === mine ? (isOpen ? 'held' : 'yours') : r[k].open ? 'still held' : r[k].reason === 'target' ? 'at target' : `sold, ${r[k].reason}`);
+  return el('div', { class: 'whatif' },
+    el('div', { class: 'whatif-label', text: isOpen ? 'What if, so far' : 'What if' }),
+    el('div', { class: 'whatif-row' }, ...paper.EXITS.map(k => el('div', { class: `whatif-box ${k === mine ? 'mine' : ''}` },
+      el('span', { class: 'whatif-name', text: `${EXIT_NAMES[k]}${k === mine ? ' (yours)' : ''}` }),
+      el('strong', { class: upDown(value(k)), text: signed(value(k)) }),
+      el('span', { class: 'whatif-note', text: note(k) })))),
+    best !== mine && value(best) - value(mine) >= 0.5
+      ? el('div', { class: 'whatif-note', text: `${EXIT_NAMES[best]} would have ${isOpen ? 'been' : 'made'} ${formatMoney(value(best) - value(mine))} more${isOpen ? ' so far' : ''}` }) : null);
+}
+
+// Every closed trade the server has replayed, added up for each exit. A trade
+// counts with what it really made under the exit it used.
+function whatIfTotals(acc) {
+  const rows = acc.trades.map(t => ({ t, r: whatIfOf(t) })).filter(({ r }) => r && paper.EXITS.every(k => r[k]));
+  if (!rows.length) return null;
+  const total = k => rows.reduce((sum, { t, r }) => sum + (t.sellsAt === k ? t.pnl : r[k].pnl), 0);
+  const sums = Object.fromEntries(paper.EXITS.map(k => [k, total(k)]));
+  const real = rows.reduce((sum, { t }) => sum + t.pnl, 0);
+  const best = paper.EXITS.reduce((a, k) => (sums[k] > sums[a] ? k : a), 'target');
+  const mine = ['target', 'trail', 'lock'].includes(state.settings.paperExit) ? state.settings.paperExit : 'target';
+  const held = rows.filter(({ t, r }) => paper.EXITS.some(k => k !== t.sellsAt && r[k].open)).length;
+  return el('div', { class: 'card whatif-card' },
+    el('h3', { text: 'Which exit would have done best' }),
+    el('div', { class: 'muted small', text: `${rows.length} closed trade${rows.length === 1 ? '' : 's'} replayed · yours made ${signed(real)}` }),
+    el('div', { class: 'whatif-row' }, ...paper.EXITS.map(k => el('div', { class: `whatif-box ${k === mine ? 'mine' : ''}` },
+      el('span', { class: 'whatif-name', text: `${EXIT_NAMES[k]}${k === mine ? ' (yours)' : ''}` }),
+      el('strong', { class: upDown(sums[k]), text: signed(sums[k]) })))),
+    el('div', { class: 'whatif-note', text: sums[best] - real >= 0.5 ? `${EXIT_NAMES[best]} is ahead of your trades by ${formatMoney(sums[best] - real)}` : 'Your trades did better than any one exit' }),
+    held ? el('div', { class: 'whatif-note', text: `${held} would still be held by another exit; counted at today's price` }) : null);
 }
 
 // Your own say on a paper trade: move its stop and target, or sell it now.
@@ -1869,11 +1914,16 @@ function equityChart(acc, now, shadow, { bare = false } = {}) {
   const id = `eq${Math.random().toString(36).slice(2, 8)}`;
   const day = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
   const change = now - acc.start;
-  return el('div', { class: bare ? 'equity-in' : 'card' },
-    bare ? null : el('div', { class: 'signal-top' },
-      el('h3', { text: 'Account value' }),
-      el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
-    svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
+  // Touch or drag on the graph: a line and a dot at that moment, with its time
+  // and value (and the grey line's) above the graph. Letting go shows now again.
+  const at = t => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  const valueLine = (label, v, sv) => `${label} · ${formatMoney(v)} · ${fmtPct((v - acc.start) / acc.start)}${Number.isFinite(sv) ? ` · without filter ${formatMoney(sv)}` : ''}`;
+  const nearest = (list, t) => list.reduce((a, p) => (Math.abs(p.t - t) < Math.abs(a.t - t) ? p : a), list[0]);
+  const shadowNow = spts.length > 1 ? spts.at(-1).v : NaN;
+  const readout = el('div', { class: 'eq-readout small', text: valueLine('Now', now, shadowNow) });
+  const cursor = svg('line', { y1: padT, y2: H - padB, stroke: 'var(--muted)', 'stroke-width': 1, visibility: 'hidden' });
+  const dot = svg('circle', { r: 5, fill: 'var(--text)', visibility: 'hidden' });
+  const chart = svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
       svg('defs', {},
         svg('clipPath', { id: `${id}a` }, svg('rect', { x: 0, y: 0, width: W, height: base })),
         svg('clipPath', { id: `${id}b` }, svg('rect', { x: 0, y: base, width: W, height: H - base }))),
@@ -1884,7 +1934,36 @@ function equityChart(acc, now, shadow, { bare = false } = {}) {
       svg('path', { d: line, fill: 'none', stroke: 'var(--down)', 'stroke-width': 2, 'clip-path': `url(#${id}b)` }),
       spts.length > 1 ? svg('path', { d: path(spts), fill: 'none', stroke: 'var(--muted)', 'stroke-width': 1.5, 'stroke-dasharray': '6 3' }) : null,
       svg('text', { x: padL, y: H - 6, fill: 'var(--muted)', 'font-size': 20 }, day(t0)),
-      svg('text', { x: W - padR, y: H - 6, fill: 'var(--muted)', 'font-size': 20, 'text-anchor': 'end' }, 'now')),
+      svg('text', { x: W - padR, y: H - 6, fill: 'var(--muted)', 'font-size': 20, 'text-anchor': 'end' }, 'now'),
+      cursor, dot);
+  const show = e => {
+    const box = chart.getBoundingClientRect();
+    if (!box.width) return;
+    const sx = ((e.clientX - box.left) / box.width) * W;
+    const t = t0 + Math.min(1, Math.max(0, (sx - padL) / (W - padL - padR))) * (t1 - t0);
+    const p = nearest(pts, t);
+    const sp = spts.length > 1 && t >= spts[0].t ? nearest(spts, t).v : NaN;
+    for (const [k, v] of [['x1', x(p.t)], ['x2', x(p.t)]]) cursor.setAttribute(k, v.toFixed(1));
+    dot.setAttribute('cx', x(p.t).toFixed(1));
+    dot.setAttribute('cy', y(p.v).toFixed(1));
+    cursor.setAttribute('visibility', 'visible');
+    dot.setAttribute('visibility', 'visible');
+    readout.textContent = valueLine(p === pts.at(-1) ? 'Now' : at(p.t), p.v, sp);
+  };
+  const hide = () => {
+    cursor.setAttribute('visibility', 'hidden');
+    dot.setAttribute('visibility', 'hidden');
+    readout.textContent = valueLine('Now', now, shadowNow);
+  };
+  chart.addEventListener('pointerdown', e => { chart.setPointerCapture(e.pointerId); show(e); });
+  chart.addEventListener('pointermove', e => { if (e.pointerType === 'mouse' || chart.hasPointerCapture(e.pointerId)) show(e); });
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) chart.addEventListener(ev, hide);
+  return el('div', { class: bare ? 'equity-in' : 'card' },
+    bare ? null : el('div', { class: 'signal-top' },
+      el('h3', { text: 'Account value' }),
+      el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
+    readout,
+    chart,
     el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.${spts.length > 1 ? ' Grey line: the same account without the trade filter.' : ''}` }));
 }
 
@@ -2002,8 +2081,16 @@ function renderSettingsSummaries() {
   const exits = { target: 'sells at target', trail: 'trailing stop', lock: 'profit lock' };
   $('sum-paper').textContent = [formatMoney(s.paperStart), `${s.riskPct}% risk`, `stop ${s.stopAtr}, target ${s.takeAtr} ATR`, exits[s.paperExit] || exits.target, s.tradeFilter !== false ? 'filter on' : 'filter off'].join(' · ');
   const mode = ['off', 'dry', 'live'].includes(s.ndaxMode) ? s.ndaxMode : 'off';
-  $('sum-ndax').textContent = mode === 'off' ? 'Off' : `${mode === 'dry' ? 'Dry run' : 'Live'} · $${s.ndaxBudget} budget · $${s.ndaxMaxTrade} per trade`;
-  $('sum-ndax').className = `set-sum ${mode === 'live' ? 'warn' : ''}`;
+  const modeName = { off: 'Off', dry: 'Dry run', live: 'Live' }[mode];
+  const nd = state.ndax;
+  const [ndText, ndTone] = !serverOn() ? ['Needs your server', '']
+    : !nd ? [`Checking… · ${modeName}`, '']
+    : nd.error ? ['Can\'t reach your server', 'bad']
+    : !nd.configured ? [`Key not set · ${modeName}`, 'bad']
+    : nd.balanceError ? ['NDAX refused the key', 'bad']
+    : [`Connected · $${Number((nd.balance || {}).CAD || 0).toFixed(2)} CAD cash · ${modeName}`, 'good'];
+  $('sum-ndax').textContent = ndText;
+  $('sum-ndax').className = `set-sum ${ndTone}`;
   for (const b of document.querySelectorAll('#ndax-mode-btns button')) b.classList.toggle('on', b.dataset.mode === mode);
   $('sum-display').textContent = `Charts open on ${tfName(s.timeframe || '1D')}${s.showCad ? ' · CAD shown' : ''}`;
   $('sum-data').textContent = `${s.twelveKey ? 'Stock key saved' : 'No stock key'} · backup`;
@@ -2019,25 +2106,38 @@ async function renderNdax() {
   let r;
   try {
     r = await srv.serverFetch(state.settings, '/ndax');
+    state.ndax = r;
   } catch (e) {
+    state.ndax = { error: e.message };
+    renderSettingsSummaries();
     box.replaceChildren(el('p', { class: 'muted small', text: /404|Not Found/.test(e.message) ? 'Update your server to use NDAX.' : `Couldn't reach your server: ${e.message}` }));
     return;
   }
+  renderSettingsSummaries();
   const fmtCad = v => `$${Number(v).toFixed(2)} CAD`;
   const orders = r.orders || [];
   const held = Object.entries(r.positions || {});
+  // The latest buy of each coin still held gets the Held tag.
+  const heldBuy = new Map();
+  for (const [key, p] of held) {
+    const i = orders.findIndex(o => o.side === 'buy' && o.key === key && ['dry', 'filled'].includes(o.status) && (!p.at || o.at <= p.at + 60_000));
+    if (i >= 0) heldBuy.set(i, p);
+  }
+  const unlisted = held.filter(([, p]) => ![...heldBuy.values()].includes(p));
   const word = { dry: 'Dry run', filled: 'Filled', failed: 'Failed', skipped: 'Skipped' };
   box.replaceChildren(...[
-    el('p', { class: 'small', text: !r.configured
+    // The cash shows on the section's folded line; only a key problem needs words here.
+    !r.configured || r.balanceError ? el('p', { class: 'small', text: !r.configured
       ? 'The NDAX key is not set on your server yet (NDAX_API_KEY, NDAX_API_SECRET and NDAX_USER_ID). A dry run still works without it.'
-      : r.balanceError ? `Key set, but NDAX refused it: ${r.balanceError}`
-      : `Key works. Cash on NDAX: ${fmtCad((r.balance || {}).CAD || 0)}` }),
+      : `Key set, but NDAX refused it: ${r.balanceError}` }) : null,
     el('p', { class: 'muted small', text: `${r.coins ? `${r.coins} coins sold for CAD on NDAX; crypto paper trades buy only these.` : 'NDAX\'s coin list has not loaded yet.'}${r.lossToday ? ` Live losses today: ${fmtCad(r.lossToday)}.` : ''}` }),
-    held.length ? el('div', { class: 'sub', text: `Held (${held.length}): ${held.map(([, p]) => `${p.symbol} ${fmtCad(p.cad)}${p.mode === 'dry' ? ' (dry run)' : ''}`).join(', ')}` }) : null,
+    // Held coins are tagged on their buy below; any whose buy is no longer in the list show here.
+    unlisted.length ? el('div', { class: 'sub', text: `Also held: ${unlisted.map(([, p]) => `${p.symbol} ${fmtCad(p.cad)}${p.mode === 'dry' ? ' (dry run)' : ''}`).join(', ')}` }) : null,
     orders.length ? el('ul', { class: 'list' }, ...orders.map((o, i) => foldCard('holding', `ndax:${o.at}:${i}`, [
       el('div', {},
         el('div', { class: 'sym' }, el('span', { class: `latest-kind ${o.side === 'buy' ? 'good' : 'bad'}`, text: o.side === 'buy' ? 'Buy' : 'Sell' }), o.symbol,
-          el('span', { class: 'badge', text: word[o.status] || o.status })),
+          el('span', { class: 'badge', text: word[o.status] || o.status }),
+          heldBuy.has(i) ? el('span', { class: 'badge held', text: 'Held' }) : null),
         el('div', { class: 'sub', text: new Date(o.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) })),
       el('div', { class: `paper-gain ${o.side === 'sell' ? upDown(o.pnl) : ''}`, text: o.side === 'sell' && Number.isFinite(o.pnl) ? signed(o.pnl) : Number.isFinite(o.cad) ? fmtCad(o.cad) : '–' }),
     ], [
