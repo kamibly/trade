@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.20.0 (own storage)';
+export const APP_VERSION = '0.21.0 (IBKR paper)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2092,6 +2092,18 @@ function renderSettingsSummaries() {
   $('sum-ndax').textContent = ndText;
   $('sum-ndax').className = `set-sum ${ndTone}`;
   for (const b of document.querySelectorAll('#ndax-mode-btns button')) b.classList.toggle('on', b.dataset.mode === mode);
+  const ibMode = s.ibkrMode === 'paper' ? 'paper' : 'off';
+  const ib = state.ibkr;
+  const acct = ib && ib.account;
+  const [ibText, ibTone] = !serverOn() ? ['Needs your server', '']
+    : !ib ? [`Checking… · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, '']
+    : ib.fetchError ? [/404|Not Found/.test(ib.fetchError) ? 'Update your server' : 'Can\'t reach your server', 'bad']
+    : !ib.configured ? ['Gateway not set up', '']
+    : ib.error || !acct ? ['Gateway not answering', 'bad']
+    : [`Connected · ${acct.paper ? 'paper' : 'live'} ${acct.id}${Number.isFinite(acct.available) ? ` · ${formatMoney(acct.available)} ${acct.currency || ''}` : ''} · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, acct.paper ? 'good' : 'warn'];
+  $('sum-ibkr').textContent = ibText;
+  $('sum-ibkr').className = `set-sum ${ibTone}`;
+  for (const b of document.querySelectorAll('#ibkr-mode-btns button')) b.classList.toggle('on', b.dataset.mode === ibMode);
   $('sum-display').textContent = `Charts open on ${tfName(s.timeframe || '1D')}${s.showCad ? ' · CAD shown' : ''}`;
   $('sum-data').textContent = `${s.twelveKey ? 'Stock key saved' : 'No stock key'} · backup`;
 }
@@ -2151,6 +2163,58 @@ async function renderNdax() {
   ].filter(Boolean));
 }
 
+// IBKR: the account IB Gateway is logged in to, what is held and the latest orders.
+async function renderIbkr() {
+  const box = $('ibkr-body');
+  if (!serverOn()) {
+    box.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server first; it places the orders.' }));
+    return;
+  }
+  let r;
+  try {
+    r = await srv.serverFetch(state.settings, '/ibkr');
+    state.ibkr = r;
+  } catch (e) {
+    state.ibkr = { fetchError: e.message };
+    renderSettingsSummaries();
+    box.replaceChildren(el('p', { class: 'muted small', text: /404|Not Found/.test(e.message) ? 'Update your server to use IBKR.' : `Couldn't reach your server: ${e.message}` }));
+    return;
+  }
+  renderSettingsSummaries();
+  const orders = r.orders || [];
+  const held = Object.entries(r.positions || {});
+  const heldBuy = new Map();
+  for (const [key, p] of held) {
+    const i = orders.findIndex(o => o.side === 'buy' && o.key === key && ['filled', 'working'].includes(o.status) && (!p.at || o.at <= p.at + 60_000));
+    if (i >= 0) heldBuy.set(i, p);
+  }
+  const unlisted = held.filter(([, p]) => ![...heldBuy.values()].includes(p));
+  const word = { filled: 'Filled', working: 'Waiting for the open', failed: 'Failed', skipped: 'Skipped' };
+  const acct = r.account;
+  box.replaceChildren(...[
+    !r.configured ? el('p', { class: 'small', text: 'IB Gateway is not set up on your server yet (the ib-gateway service and IBKR_HOST; see the server README).' })
+      : r.error ? el('p', { class: 'small', text: `IB Gateway didn't answer: ${r.error}` })
+      : acct && !acct.paper ? el('p', { class: 'small warn', text: `The gateway is logged in to live account ${acct.id}. Paper mode sends nothing to it.` }) : null,
+    r.lossToday ? el('p', { class: 'muted small', text: `Losses today: ${formatMoney(r.lossToday)}.` }) : null,
+    unlisted.length ? el('div', { class: 'sub', text: `Also held: ${unlisted.map(([, p]) => `${p.symbol} ${p.qty} shares`).join(', ')}` }) : null,
+    orders.length ? el('ul', { class: 'list' }, ...orders.map((o, i) => foldCard('holding', `ibkr:${o.at}:${i}`, [
+      el('div', {},
+        el('div', { class: 'sym' }, el('span', { class: `latest-kind ${o.side === 'buy' ? 'good' : 'bad'}`, text: o.side === 'buy' ? 'Buy' : 'Sell' }), o.symbol,
+          el('span', { class: 'badge', text: word[o.status] || o.status }),
+          heldBuy.has(i) ? el('span', { class: 'badge held', text: 'Held' }) : null),
+        el('div', { class: 'sub', text: new Date(o.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) })),
+      el('div', { class: `paper-gain ${o.side === 'sell' ? upDown(o.pnl) : ''}`, text: o.side === 'sell' && Number.isFinite(o.pnl) ? signed(o.pnl) : Number.isFinite(o.usd) ? formatMoney(o.usd) : '–' }),
+    ], [
+      Number.isFinite(o.qty) ? el('dl', { class: 'money-row' },
+        stat('Shares', String(o.qty)),
+        stat('Price', o.price > 0 ? formatMoney(o.price) : '–'),
+        stat('Fee', Number.isFinite(o.fee) ? formatMoney(o.fee) : '–')) : null,
+      el('div', { class: 'sub', text: `Sent to IBKR (${o.mode})${o.reason ? ` · ${o.reason}` : ''}${o.id ? ` · order ${o.id}` : ''}` }),
+      o.error ? el('div', { class: 'sub', text: o.error }) : null,
+    ], () => { const item = findItem(o.key); if (item) openChart(item, true); }))) : el('p', { class: 'muted small', text: 'No IBKR orders yet.' }),
+  ].filter(Boolean));
+}
+
 function renderSettings() {
   $('key-input').value = state.settings.twelveKey;
   $('tf-default').value = state.settings.timeframe;
@@ -2180,6 +2244,10 @@ function renderSettings() {
   $('ndax-max').value = state.settings.ndaxMaxTrade;
   $('ndax-loss').value = state.settings.ndaxDailyLoss;
   renderNdax();
+  $('ibkr-budget').value = state.settings.ibkrBudget;
+  $('ibkr-max').value = state.settings.ibkrMaxTrade;
+  $('ibkr-loss').value = state.settings.ibkrDailyLoss;
+  renderIbkr();
   $('server-url').value = state.settings.serverUrl;
   $('server-key').value = state.settings.serverKey;
   renderNotifyStatus();
@@ -2405,6 +2473,24 @@ function bind() {
     state.settings = store.saveSettings({ ndaxBudget: budget, ndaxMaxTrade: max, ndaxDailyLoss: loss });
     markChanged();
     $('ndax-status').textContent = 'Saved. New real orders use these limits.';
+  });
+  for (const b of document.querySelectorAll('#ibkr-mode-btns button')) b.addEventListener('click', () => {
+    const mode = b.dataset.mode === 'paper' ? 'paper' : 'off';
+    state.settings = store.saveSettings({ ibkrMode: mode });
+    markChanged();
+    renderSettingsSummaries();
+    $('ibkr-status').textContent = mode === 'off' ? 'Off. No new IBKR buys; shares already bought are still sold with the paper trade.'
+      : 'Paper. The next stock paper trades are sent to your IBKR paper account.';
+  });
+  $('ibkr-save').addEventListener('click', () => {
+    const budget = Number($('ibkr-budget').value), max = Number($('ibkr-max').value), loss = Number($('ibkr-loss').value);
+    if (![budget, max, loss].every(v => Number.isFinite(v) && v >= 0)) {
+      $('ibkr-status').textContent = 'Enter amounts of 0 or more.';
+      return;
+    }
+    state.settings = store.saveSettings({ ibkrBudget: budget, ibkrMaxTrade: max, ibkrDailyLoss: loss });
+    markChanged();
+    $('ibkr-status').textContent = 'Saved. New IBKR orders use these limits.';
   });
   $('server-save').addEventListener('click', saveServer);
   $('server-push').addEventListener('change', toggleServerPush);
