@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.22.0 (stocks / crypto filter)';
+export const APP_VERSION = '0.22.1 (stocks / crypto filter)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1525,6 +1525,7 @@ function renderPaper({ force = false } = {}) {
   const priced = open.filter(o => Number.isFinite(o.value));
   const openCost = priced.reduce((t, o) => t + o.p.cost, 0);
   const openPnl = priced.length ? priced.reduce((t, o) => t + o.pnl, 0) : NaN;
+  const closedPnl = acc.trades.reduce((t, x) => t + x.pnl, 0);
   const sumMore = state.openCards.has('paper:more');
   const kindChips = el('div', { class: 'chips', role: 'group', 'aria-label': 'Show' }, ...[['all', 'All'], ['stock', 'Stocks'], ['crypto', 'Crypto']]
     .map(([id, label]) => el('button', { type: 'button', class: id === kind ? 'on' : '', 'aria-pressed': id === kind ? 'true' : 'false', text: label,
@@ -1535,6 +1536,7 @@ function renderPaper({ force = false } = {}) {
     el('dl', { class: 'stats' },
       stat('Return', fmtPct(sum.totalReturn), upDown(sum.totalReturn)),
       stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
+      stat('Closed gain/loss', acc.trades.length ? signed(closedPnl) : '–', upDown(closedPnl)),
       stat('Invested now', formatMoney(invested)),
       stat('Cash', formatMoney(acc.cash))),
     equityChart(acc, sum.equity, onServer ? state.serverPaper.shadow : null, { bare: true }),
@@ -1566,7 +1568,7 @@ function renderPaper({ force = false } = {}) {
   // as they sold, open ones at today's price) and its running gain over time.
   // Cash and the account value stay under All, since both kinds share the cash.
   function kindSummary() {
-    const closed = acc.trades.reduce((t, x) => t + x.pnl, 0);
+    const closed = closedPnl;
     const gain = closed + (Number.isFinite(openPnl) ? openPnl : 0);
     const used = acc.trades.reduce((t, x) => t + costOf(x), 0) + acc.positions.reduce((t, p) => t + p.cost, 0);
     const won = acc.trades.filter(t => t.pnl > 0).length;
@@ -1584,9 +1586,9 @@ function renderPaper({ force = false } = {}) {
     return el('div', { class: 'card' },
       el('div', { class: 'muted small', text: `${name} trades since ${fmtTime(full.createdAt)}${onServer ? ` · on your server, updated ${timeAgo(state.serverPaper.fetchedAt)}` : ''}` }),
       el('div', { class: `big ${upDown(gain)}`, text: acc.trades.length || acc.positions.length ? signed(gain) : '–' }),
-      el('div', { class: 'muted small', text: 'Gain/loss, closed and open, after the fees paid so far' }),
+      el('div', { class: 'muted small', text: 'Gain/loss, closed and open, after the fees paid so far. Return is on the money these trades used.' }),
       el('dl', { class: 'stats' },
-        stat('Return on money used', used > 0 ? fmtPct(gain / used) : '–', upDown(gain)),
+        stat('Return', used > 0 ? fmtPct(gain / used) : '–', upDown(gain)),
         stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
         stat('Closed gain/loss', acc.trades.length ? signed(closed) : '–', upDown(closed)),
         stat('Invested now', formatMoney(invested))),
