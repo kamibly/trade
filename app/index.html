@@ -254,6 +254,25 @@
           <div id="ndax-body"></div>
         </div>
       </details>
+      <details class="card set-sec" data-sec="ibkr">
+        <summary><div><h2>Stock trading on IBKR</h2><div class="set-sum" id="sum-ibkr"></div></div></summary>
+        <div class="set-body">
+          <p class="muted small">Your server copies the paper account's stock buys and sells to your IBKR paper account, in whole shares, through IB Gateway on your VM. Paper money only for now.</p>
+          <div class="seg" id="ibkr-mode-btns" role="group" aria-label="Stock orders on IBKR">
+            <button type="button" data-mode="off">Off</button>
+            <button type="button" data-mode="paper">Paper</button>
+          </div>
+          <div class="row two">
+            <label class="field"><span>Budget, USD</span><input id="ibkr-budget" type="number" inputmode="decimal" min="0" step="50"></label>
+            <label class="field"><span>Most per trade, USD</span><input id="ibkr-max" type="number" inputmode="decimal" min="0" step="10"></label>
+          </div>
+          <label class="field"><span>Daily loss limit, USD</span><input id="ibkr-loss" type="number" inputmode="decimal" min="0" step="10"></label>
+          <p class="muted small">Once today's losses reach the limit, no new buys until tomorrow.</p>
+          <button id="ibkr-save" type="button" class="ghost">Save limits</button>
+          <p id="ibkr-status" class="small" role="status"></p>
+          <div id="ibkr-body"></div>
+        </div>
+      </details>
 
       <details class="card set-sec" data-sec="display">
         <summary><div><h2>Display</h2><div class="set-sum" id="sum-display"></div></div></summary>
