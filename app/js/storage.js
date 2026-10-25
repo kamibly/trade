@@ -43,6 +43,7 @@ export const DEFAULT_SETTINGS = {
   takeAtr: 3,
   signalsTab: 'watchlist', // the Signals page's tab: watchlist, opps or market
   paperTab: 'open', // the Paper page's tab: open, closed or results
+  paperKind: 'all', // the Paper page's filter: all, stock or crypto
   paperExit: 'target', // 'target': sell paper trades at the target; 'trail': a trailing stop instead; 'lock': the target with a profit lock
   ndaxMode: 'off', // real crypto orders on NDAX: 'off', 'dry' (recorded, not sent) or 'live'
   ndaxBudget: 100, // CAD the real crypto trades may use in all

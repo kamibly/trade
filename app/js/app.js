@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.21.0 (IBKR paper)';
+export const APP_VERSION = '0.22.0 (stocks / crypto filter)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1500,7 +1500,11 @@ function renderPaper({ force = false } = {}) {
   // Background refreshes wait while you are changing a trade's stop and target.
   if (!force && state.paperEditing && document.querySelector('.paper-edit:not([hidden])')) return;
   state.paperEditing = null;
-  const acc = paperAccount();
+  const full = paperAccount();
+  // All, Stocks or Crypto: the summary, the tabs and the lists below show that kind only.
+  const kind = ['all', 'stock', 'crypto'].includes(state.settings.paperKind) ? state.settings.paperKind : 'all';
+  const ofKind = x => kind === 'all' || (String(x.key || '').startsWith('crypto:') ? 'crypto' : 'stock') === kind;
+  const acc = kind === 'all' ? full : { ...full, positions: full.positions.filter(ofKind), trades: full.trades.filter(ofKind) };
   const onServer = serverPaperOn();
   const serverPrices = (onServer && state.serverPaper.prices) || {};
   // Your watchlist's quote, else the server's latest price, else the last scan's close
@@ -1509,8 +1513,8 @@ function renderPaper({ force = false } = {}) {
   const scanned = Object.fromEntries([...(m.opportunities || []), ...(m.buys || []), ...(m.sells || [])].map(s => [s.key, s.entry]));
   const lastPrice = key => [priceOf(key), serverPrices[key], ((state.serverSignals || {})[key] || {}).entry, scanned[key]].find(Number.isFinite);
   const prices = Object.fromEntries(acc.positions.map(p => [p.key, lastPrice(p.key)]));
-  const sum = paper.summary(acc, prices);
-  const events = onServer ? state.serverPaper.events || [] : [];
+  const sum = paper.summary(full, prices);
+  const events = (onServer ? state.serverPaper.events || [] : []).filter(ofKind);
   const fmtTime = t => new Date(t).toLocaleDateString([], { month: 'short', day: 'numeric' });
   const open = acc.positions.map(p => {
     const price = prices[p.key];
@@ -1522,7 +1526,10 @@ function renderPaper({ force = false } = {}) {
   const openCost = priced.reduce((t, o) => t + o.p.cost, 0);
   const openPnl = priced.length ? priced.reduce((t, o) => t + o.pnl, 0) : NaN;
   const sumMore = state.openCards.has('paper:more');
-  const summary = el('div', { class: 'card' },
+  const kindChips = el('div', { class: 'chips', role: 'group', 'aria-label': 'Show' }, ...[['all', 'All'], ['stock', 'Stocks'], ['crypto', 'Crypto']]
+    .map(([id, label]) => el('button', { type: 'button', class: id === kind ? 'on' : '', 'aria-pressed': id === kind ? 'true' : 'false', text: label,
+      onclick: () => { state.settings = store.saveSettings({ paperKind: id }); renderPaper({ force: true }); } })));
+  const summary = kind !== 'all' ? kindSummary() : el('div', { class: 'card' },
     el('div', { class: 'muted small', text: `Paper account, started ${fmtTime(acc.createdAt)} with ${formatMoney(acc.start)}${onServer ? ` · on your server, updated ${timeAgo(state.serverPaper.fetchedAt)}` : ''}` }),
     el('div', { class: 'big', text: formatMoney(sum.equity) }),
     el('dl', { class: 'stats' },
@@ -1553,7 +1560,44 @@ function renderPaper({ force = false } = {}) {
     onServer ? filterTrialCard(state.serverPaper) : null,
   ];
   // replaceChildren() writes a null child as the text "null", so drop the empty parts.
-  $('paper-body').replaceChildren(...[summary, onServer ? whatIfTotals(acc) : null, tabs, ...body].filter(Boolean));
+  $('paper-body').replaceChildren(...[kindChips, summary, onServer ? whatIfTotals(acc) : null, tabs, ...body].filter(Boolean));
+
+  // One kind's results: its gain/loss after the fees paid so far (closed trades
+  // as they sold, open ones at today's price) and its running gain over time.
+  // Cash and the account value stay under All, since both kinds share the cash.
+  function kindSummary() {
+    const closed = acc.trades.reduce((t, x) => t + x.pnl, 0);
+    const gain = closed + (Number.isFinite(openPnl) ? openPnl : 0);
+    const used = acc.trades.reduce((t, x) => t + costOf(x), 0) + acc.positions.reduce((t, p) => t + p.cost, 0);
+    const won = acc.trades.filter(t => t.pnl > 0).length;
+    const name = kind === 'crypto' ? 'Crypto' : 'Stock';
+    let run = 0;
+    let peak = 0;
+    let worst = 0;
+    const history = [{ t: full.createdAt, equity: full.start }];
+    for (const t of acc.trades.slice().sort((a, b) => a.closedAt - b.closedAt)) {
+      run += t.pnl;
+      peak = Math.max(peak, run);
+      worst = Math.max(worst, (peak - run) / (full.start + peak));
+      history.push({ t: t.closedAt, equity: full.start + run });
+    }
+    return el('div', { class: 'card' },
+      el('div', { class: 'muted small', text: `${name} trades since ${fmtTime(full.createdAt)}${onServer ? ` · on your server, updated ${timeAgo(state.serverPaper.fetchedAt)}` : ''}` }),
+      el('div', { class: `big ${upDown(gain)}`, text: acc.trades.length || acc.positions.length ? signed(gain) : '–' }),
+      el('div', { class: 'muted small', text: 'Gain/loss, closed and open, after the fees paid so far' }),
+      el('dl', { class: 'stats' },
+        stat('Return on money used', used > 0 ? fmtPct(gain / used) : '–', upDown(gain)),
+        stat('Open gain/loss', Number.isFinite(openPnl) ? `${signed(openPnl)} (${fmtPct(openPnl / openCost)})` : '–', upDown(openPnl)),
+        stat('Closed gain/loss', acc.trades.length ? signed(closed) : '–', upDown(closed)),
+        stat('Invested now', formatMoney(invested))),
+      equityChart({ ...full, history }, full.start + gain, null, { bare: true, gainOf: name.toLowerCase() }),
+      el('details', { class: 'report', open: sumMore, ontoggle: e => { if (e.currentTarget.open) state.openCards.add('paper:more'); else state.openCards.delete('paper:more'); } },
+        el('summary', { text: 'More' }),
+        el('dl', { class: 'stats' },
+          stat('Closed trades', String(acc.trades.length)),
+          stat('Won', acc.trades.length ? `${Math.round((won / acc.trades.length) * 100)}%` : '–'),
+          stat('Worst drop', acc.trades.length ? fmtPct(-worst) : '–'))));
+  }
 
   // One buy or sell. The server's line carries the price, quantity and cost;
   // the matching open or closed trade adds the rest, fees included.
@@ -1894,7 +1938,8 @@ function svg(tag, attrs = {}, ...children) {
 // The account's value over time against what it started with: green above, red below.
 // A grey line shows the same account without the trade filter, from when it began.
 // `bare`: just the chart and its note, to sit inside another card.
-function equityChart(acc, now, shadow, { bare = false } = {}) {
+// With gainOf, the line is that kind's running gain/loss over the starting amount.
+function equityChart(acc, now, shadow, { bare = false, gainOf = null } = {}) {
   const pts = [...acc.history.map(h => ({ t: h.t, v: h.equity })), { t: Date.now(), v: now }]
     .filter(p => Number.isFinite(p.v) && p.t >= acc.createdAt - 60_000);
   if (pts.length < 2) return null;
@@ -1917,13 +1962,13 @@ function equityChart(acc, now, shadow, { bare = false } = {}) {
   // Touch or drag on the graph: a line and a dot at that moment, with its time
   // and value (and the grey line's) above the graph. Letting go shows now again.
   const at = t => new Date(t).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  const valueLine = (label, v, sv) => `${label} · ${formatMoney(v)} · ${fmtPct((v - acc.start) / acc.start)}${Number.isFinite(sv) ? ` · without filter ${formatMoney(sv)}` : ''}`;
+  const valueLine = (label, v, sv) => gainOf ? `${label} · ${signed(v - acc.start)}` : `${label} · ${formatMoney(v)} · ${fmtPct((v - acc.start) / acc.start)}${Number.isFinite(sv) ? ` · without filter ${formatMoney(sv)}` : ''}`;
   const nearest = (list, t) => list.reduce((a, p) => (Math.abs(p.t - t) < Math.abs(a.t - t) ? p : a), list[0]);
   const shadowNow = spts.length > 1 ? spts.at(-1).v : NaN;
   const readout = el('div', { class: 'eq-readout small', text: valueLine('Now', now, shadowNow) });
   const cursor = svg('line', { y1: padT, y2: H - padB, stroke: 'var(--muted)', 'stroke-width': 1, visibility: 'hidden' });
   const dot = svg('circle', { r: 5, fill: 'var(--text)', visibility: 'hidden' });
-  const chart = svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
+  const chart = svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'equity-chart', role: 'img', 'aria-label': gainOf ? `Running ${gainOf} gain/loss, now ${signed(now - acc.start)}` : `Account value from ${formatMoney(acc.start)} to ${formatMoney(now)}` },
       svg('defs', {},
         svg('clipPath', { id: `${id}a` }, svg('rect', { x: 0, y: 0, width: W, height: base })),
         svg('clipPath', { id: `${id}b` }, svg('rect', { x: 0, y: base, width: W, height: H - base }))),
@@ -1964,7 +2009,7 @@ function equityChart(acc, now, shadow, { bare = false } = {}) {
       el('span', { class: changeClass(change), text: `${signed(change)} (${fmtPct(change / acc.start)})` })),
     readout,
     chart,
-    el('p', { class: 'muted small', text: `Dashed line: the ${formatMoney(acc.start)} you started with.${spts.length > 1 ? ' Grey line: the same account without the trade filter.' : ''}` }));
+    el('p', { class: 'muted small', text: gainOf ? 'Dashed line: no gain or loss. The line steps as trades close; its end adds the open ones at today\'s price.' : `Dashed line: the ${formatMoney(acc.start)} you started with.${spts.length > 1 ? ' Grey line: the same account without the trade filter.' : ''}` }));
 }
 
 // The filtered account against the same account without the filter, on the
