@@ -18,6 +18,7 @@ Environment variables:
     SEC_CONTACT        - your email, which the SEC asks for in its requests; insider buying
                          and earnings dates load only once it is set (see events.py)
     NDAX_API_KEY, NDAX_API_SECRET, NDAX_USER_ID - real crypto orders on NDAX (see ndax.py)
+    IBKR_HOST, IBKR_PORT - IB Gateway, for stock orders on Interactive Brokers (see ibkr.py)
 """
 import json
 import logging
@@ -30,6 +31,7 @@ from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+import ibkr
 import ndax
 
 logger = logging.getLogger("trade-service")
@@ -61,13 +63,15 @@ QUIET_START, QUIET_END = 22, 7
 TIMEFRAMES = set(WATCH_EVERY)
 
 _lock = threading.RLock()
-_run_locks = {name: threading.Lock() for name in ("watch", "market", "crypto", "pulse", "train", "events")}
+_run_locks = {name: threading.Lock() for name in ("watch", "market", "crypto", "pulse", "train", "events", "whatif")}
 CRYPTO_SCAN_MINUTES = int(os.environ.get("CRYPTO_SCAN_MINUTES", "15") or 15)
 UNIVERSE_EVERY_MS = 20 * 3600_000  # the crypto list is rebuilt about once a day
 PULSE_EVERY_MS = 60_000            # fast-move watch
 SP500_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sp500.csv")
 SETUP_IDS = ("insider", "earnings", "ranking", "crowd")
 EVENTS_EVERY_MS = 3600_000   # outside data for the setups (insiders, earnings, crowd)
+WHATIF_EVERY_MS = 30 * 60_000  # each paper trade replayed with every exit
+WHATIF_DAYS = 60              # closed trades older than this are no longer replayed
 MUTE_VOTES, MUTE_AT = 10, 7  # "Not useful" on 7 of the last 10 ratings mutes a setup's alerts
 
 
@@ -119,6 +123,7 @@ def _empty_state() -> dict:
         "events": {"lastRunAt": None},  # last refresh of the setups' outside data
         "announced": [],          # opportunity and warning ids already sent
         "feedback": {},           # setup -> your latest ratings, True for useful
+        "whatIf": {"lastRunAt": None, "results": {}},  # each paper trade with the target, trailing stop and profit lock
     }
 
 
@@ -227,6 +232,10 @@ def clean_profile(raw: dict) -> dict:
             "ndaxBudget": round(_num(s.get("ndaxBudget"), 100, 0, 1_000_000), 2),
             "ndaxMaxTrade": round(_num(s.get("ndaxMaxTrade"), 25, 0, 1_000_000), 2),
             "ndaxDailyLoss": round(_num(s.get("ndaxDailyLoss"), 20, 0, 1_000_000), 2),
+            "ibkrMode": s.get("ibkrMode") if s.get("ibkrMode") in ibkr.MODES else "off",
+            "ibkrBudget": round(_num(s.get("ibkrBudget"), 1000, 0, 10_000_000), 2),
+            "ibkrMaxTrade": round(_num(s.get("ibkrMaxTrade"), 250, 0, 10_000_000), 2),
+            "ibkrDailyLoss": round(_num(s.get("ibkrDailyLoss"), 50, 0, 10_000_000), 2),
             "setups": {k: bool((s.get("setups") or {}).get(k, True)) if isinstance(s.get("setups"), dict) else True for k in SETUP_IDS},
         },
         "updatedAt": int(_num(raw.get("updatedAt"), now_ms(), 0, 1e15)),
@@ -523,6 +532,7 @@ def save_paper(st: dict, result: dict) -> None:
     if result.get("paperEvents"):
         st["paperEvents"] = (list(reversed(result["paperEvents"])) + st.get("paperEvents", []))[:50]
         ndax.queue_events(st, result["paperEvents"])
+        ibkr.queue_events(st, result["paperEvents"])
     st["filterTrial"] = filter_trial(st)
     st["paperBudgets"] = follow_results(st)
 
@@ -1212,6 +1222,63 @@ def prices_due(state: dict, now: int) -> bool:
     return now - ((state.get("prices") or {}).get("lastRunAt") or 0) >= PRICES_EVERY_MS
 
 
+def trade_id(t: dict) -> str:
+    return f"{t.get('key')}:{t.get('openedAt')}"
+
+
+def whatif_due(state: dict, now: int) -> bool:
+    acc = state.get("paper") or {}
+    return bool(acc.get("positions") or acc.get("trades")) and \
+        now - ((state.get("whatIf") or {}).get("lastRunAt") or 0) >= WHATIF_EVERY_MS
+
+
+def run_whatif(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """Replays each paper trade with the target, the trailing stop and the profit
+    lock, so the app can show which exit would have done best. A closed trade is
+    replayed until every version of it has sold, then kept as it is."""
+    lock = _run_locks["whatif"]
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        state = load_state()
+        profile = state.get("profile")
+        acc = state.get("paper") or {}
+        done = (state.get("whatIf") or {}).get("results") or {}
+        since = now_ms() - WHATIF_DAYS * 86400_000
+        trades = [{**t, "id": trade_id(t)} for t in acc.get("positions", [])]
+        trades += [{**t, "id": trade_id(t)} for t in acc.get("trades", [])
+                   if t.get("stop0") and (t.get("closedAt") or 0) >= since
+                   and not (done.get(trade_id(t)) and not any(v.get("open") for v in done[trade_id(t)].values()))]
+        update_state(lambda st: st.setdefault("whatIf", {"results": {}}).update(lastRunAt=now_ms()))
+        if not profile or not trades:
+            return None
+        job = {"mode": "whatIf", "settings": engine_settings(profile), "trades": trades,
+               "prices": (state.get("prices") or {}).get("values", {})}
+        try:
+            result = engine(job, 300)
+        except Exception as e:
+            logger.warning("What-if replay failed: %s", e)
+            return None
+
+        def apply(st):
+            box = st.setdefault("whatIf", {"results": {}})
+            a = st.get("paper") or {}
+            keep = {trade_id(t) for t in [*a.get("positions", []), *a.get("trades", [])]}
+            box["results"] = {k: v for k, v in {**box.get("results", {}), **result.get("results", {})}.items() if k in keep}
+            box["errors"] = result.get("errors", {})
+            box["lastRunAt"] = now_ms()
+
+        update_state(apply)
+        return result
+    finally:
+        lock.release()
+
+
+def run_ibkr() -> List[dict]:
+    """IBKR orders for the paper account's latest stock buys and sells."""
+    return ibkr.process(load_state, update_state, tz())
+
+
 def run_ndax() -> List[dict]:
     """Real NDAX orders for the paper account's latest crypto buys and sells."""
     return ndax.process(load_state, update_state, tz())
@@ -1247,6 +1314,10 @@ def start_scheduler() -> None:
                     _spawn(run_pulse)
                 if events_due(state, now):
                     _spawn(run_events)
+                if whatif_due(state, now):
+                    _spawn(run_whatif)
+                if state.get("ibkrQueue"):
+                    _spawn(run_ibkr)
                 if state.get("ndaxQueue"):
                     _spawn(run_ndax)
                 if ndax.coins_due(state, now):

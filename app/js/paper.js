@@ -84,9 +84,69 @@ function closePosition(acc, p, price, reason, now) {
   const value = p.qty * price - feeOf(p.type, p.qty, price);
   acc.cash = round2(acc.cash + value);
   const pnl = value - p.cost;
-  acc.trades.push({ key: p.key, symbol: p.symbol, type: p.type, qty: p.qty, entry: p.entry, cost: p.cost, exit: price, openedAt: p.openedAt, closedAt: now, pnl: round2(pnl), ret: pnl / p.cost, reason, setup: setupOf(p), ...(p.filter ? { filter: p.filter } : {}) });
+  acc.trades.push({ key: p.key, symbol: p.symbol, type: p.type, qty: p.qty, entry: p.entry, cost: p.cost, exit: price, openedAt: p.openedAt, closedAt: now, pnl: round2(pnl), ret: pnl / p.cost, reason, setup: setupOf(p),
+    sellsAt: exitOf(p), ...firstLevels(p), ...(p.until ? { until: p.until } : {}), ...(p.filter ? { filter: p.filter } : {}) });
   acc.positions = acc.positions.filter(x => x !== p);
   return { kind: 'close', symbol: p.symbol, key: p.key, price, pnl: round2(pnl), reason, setup: setupOf(p) };
+}
+
+// ---- What if: the same trade with each exit --------------------------------
+
+// The three ways a trade can sell: at its target, on a trailing stop, or at
+// its target with a profit lock.
+export const EXITS = ['target', 'trail', 'lock'];
+export const exitOf = p => (p.trail ? 'trail' : p.lock ? 'lock' : 'target');
+
+// The stop and target a trade was bought with: { stop0, take0 }, or {} when
+// they aren't known (older trades whose stop you moved).
+export function firstLevels(p) {
+  const stop = ok(p.stop0) ? p.stop0 : p.risk > 0 ? p.entry - p.risk : !p.edited && !p.trail && !p.lock ? p.stop : NaN;
+  const take = ok(p.take0) ? p.take0 : p.take;
+  return stop > 0 && stop < p.entry && take > p.entry ? { stop0: stop, take0: take } : {};
+}
+
+// Sells that end the trade whatever its stop: a Sell signal, an opportunity's
+// time limit, or you selling it.
+const FORCED = new Set(['sell signal', 'time', 'sold by you']);
+
+// Replays a trade (open or closed) on its candles once with each exit, the way
+// the backtest does: a bar that reaches the stop sells there, one that reaches
+// the target sells there, and a trailing or locking stop moves after each bar.
+// A Sell signal, time limit or your own sale ends every version at the same
+// moment and price. `candles` must start at or before the buy.
+// Returns { target, trail, lock }: each { pnl, open, reason, at, price }, with
+// `open` true while that version would still hold the trade (valued at `price`
+// or the last close), or null when the candles or levels don't allow it.
+export function whatIf(t, candles, { now = Date.now(), price: last } = {}) {
+  const { stop0, take0 } = firstLevels(t);
+  if (!ok(stop0) || !(t.qty > 0) || !(t.cost > 0) || !candles || !candles.length || candles[0].time * 1000 > t.openedAt) return null;
+  const bars = candles.filter(c => c.time * 1000 >= t.openedAt && c.time * 1000 <= now);
+  const end = FORCED.has(t.reason) && ok(t.closedAt) ? { at: t.closedAt, price: t.exit, reason: t.reason }
+    : ok(t.until) ? { at: t.until, price: null, reason: 'time' } : null;
+  const risk = t.entry - stop0;
+  const floor = breakEven(t);
+  const mark = ok(last) && last > 0 ? last : (bars.length ? bars.at(-1).close : t.entry);
+  const out = {};
+  for (const kind of EXITS) {
+    let stop = stop0;
+    let high = t.entry;
+    let sold = null;
+    for (const bar of bars) {
+      const at = bar.time * 1000;
+      if (end && at >= end.at) { sold = { price: end.price ?? bar.open, reason: end.reason, at: end.at }; break; }
+      if (bar.low <= stop) { sold = { price: Math.min(bar.open, stop), reason: stop > t.entry ? (kind === 'trail' ? 'trailing stop' : kind === 'lock' ? 'profit lock' : 'stop') : 'stop', at }; break; }
+      if (kind !== 'trail' && bar.high >= take0) { sold = { price: Math.max(bar.open, take0), reason: 'target', at }; break; }
+      if (kind !== 'target') {
+        high = Math.max(high, bar.high);
+        const levels = { entry: t.entry, stop, risk, high, floor: ok(floor) ? floor : t.entry };
+        stop = kind === 'trail' ? trailStop(levels) : lockStop({ ...levels, take: take0 });
+      }
+    }
+    if (!sold && end && end.price > 0 && end.at <= now) sold = { price: end.price, reason: end.reason, at: end.at };
+    const price = sold ? sold.price : mark;
+    out[kind] = { pnl: round2(t.qty * price - feeOf(t.type, t.qty, price) - t.cost), open: !sold, price, ...(sold ? { reason: sold.reason, at: sold.at } : {}) };
+  }
+  return out;
 }
 
 // What opened a position: 'signal' (a Buy signal) or an opportunity setup.
@@ -122,7 +182,7 @@ function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter
   // Under $10 the fees outweigh the trade.
   if (!(qty > 0) || cost < 10 || cost > acc.cash + 0.005) return null;
   acc.cash = round2(acc.cash - cost);
-  acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}), ...(filter ? { filter } : {}), ...(trail ? { trail: true, risk: s.entry - s.stop, high: s.entry } : lock ? { lock: true, risk: s.entry - s.stop, high: s.entry } : {}) });
+  acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, stop0: s.stop, take0: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}), ...(filter ? { filter } : {}), ...(trail ? { trail: true, risk: s.entry - s.stop, high: s.entry } : lock ? { lock: true, risk: s.entry - s.stop, high: s.entry } : {}) });
   return { kind: 'open', symbol: s.symbol, key, price: s.entry, qty, cost: round2(cost), setup };
 }
 

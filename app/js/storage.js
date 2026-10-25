@@ -1,9 +1,13 @@
-// Everything the app remembers lives in this phone's browser storage.
+// Everything the app remembers lives in this phone's browser storage:
+// IndexedDB, which has its own allowance, so Trade leaves the 5 MB of
+// localStorage it would share with other apps on the same site. The data is
+// loaded into memory once at start (the await below), so reads stay instant;
+// each write updates memory and is saved in the background. Without
+// IndexedDB (some private modes) it falls back to localStorage.
 // Browser storage can be missing or full (private mode, cleared data), so
 // every access is guarded and the app still runs without it.
 
 const PREFIX = 'trade:';
-const CANDLE_PREFIX = `${PREFIX}candles:`;
 const MAX_CANDLE_SETS = 40;
 
 export const DEFAULT_WATCHLIST = [
@@ -39,11 +43,16 @@ export const DEFAULT_SETTINGS = {
   takeAtr: 3,
   signalsTab: 'watchlist', // the Signals page's tab: watchlist, opps or market
   paperTab: 'open', // the Paper page's tab: open, closed or results
+  paperKind: 'all', // the Paper page's filter: all, stock or crypto
   paperExit: 'target', // 'target': sell paper trades at the target; 'trail': a trailing stop instead; 'lock': the target with a profit lock
   ndaxMode: 'off', // real crypto orders on NDAX: 'off', 'dry' (recorded, not sent) or 'live'
   ndaxBudget: 100, // CAD the real crypto trades may use in all
   ndaxMaxTrade: 25, // CAD at most in one real trade
   ndaxDailyLoss: 20, // CAD of live losses in a day that stops new buys until tomorrow
+  ibkrMode: 'off', // stock orders on IBKR: 'off' or 'paper' (an IBKR paper account, through IB Gateway)
+  ibkrBudget: 1000, // USD the IBKR trades may use in all
+  ibkrMaxTrade: 250, // USD at most in one IBKR trade
+  ibkrDailyLoss: 50, // USD of losses in a day that stops new buys until tomorrow
   serverUrl: '',
   serverKey: '',
   serverPush: false,
@@ -51,9 +60,105 @@ export const DEFAULT_SETTINGS = {
   setups: { insider: true, earnings: true, ranking: true, crowd: true }, // opportunity setups the server looks for
 };
 
+const DB_NAME = 'trade';
+const STORE = 'kv';
+const mem = new Map(); // key (without PREFIX) → the saved JSON text
+let db = null;
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function localKeys() {
+  const keys = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(PREFIX)) keys.push(k);
+    }
+  } catch { /* storage unavailable */ }
+  return keys;
+}
+
+// Loads everything into memory. The first time, it moves what an older
+// version kept in localStorage over to IndexedDB and frees that space.
+export async function init() {
+  try {
+    if (typeof indexedDB === 'undefined') throw new Error('no IndexedDB');
+    db = await openDb();
+    const tx = db.transaction(STORE, 'readwrite');
+    const kv = tx.objectStore(STORE);
+    await new Promise((resolve, reject) => {
+      const req = kv.openCursor();
+      req.onsuccess = () => {
+        const c = req.result;
+        if (!c) return resolve();
+        if (typeof c.value === 'string') mem.set(String(c.key), c.value);
+        c.continue();
+      };
+      req.onerror = () => reject(req.error);
+    });
+    const moved = localKeys();
+    for (const k of moved) {
+      const key = k.slice(PREFIX.length);
+      const raw = localStorage.getItem(k);
+      if (raw !== null && !mem.has(key)) {
+        mem.set(key, raw);
+        kv.put(raw, key);
+      }
+    }
+    await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error); });
+    for (const k of moved) {
+      try { localStorage.removeItem(k); } catch { /* ignore */ }
+    }
+  } catch {
+    db = null;
+    mem.clear();
+  }
+}
+
+// Where the data is kept, shown under About: 'IndexedDB' or 'localStorage'.
+export const backend = () => (db ? 'IndexedDB' : 'localStorage');
+
+function save(key, raw) {
+  if (!db) {
+    localStorage.setItem(PREFIX + key, raw);
+    return;
+  }
+  mem.set(key, raw);
+  try {
+    db.transaction(STORE, 'readwrite').objectStore(STORE).put(raw, key);
+  } catch { /* saved in memory for this visit */ }
+}
+
+function remove(key) {
+  if (!db) {
+    try { localStorage.removeItem(PREFIX + key); } catch { /* ignore */ }
+    return;
+  }
+  mem.delete(key);
+  try {
+    db.transaction(STORE, 'readwrite').objectStore(STORE).delete(key);
+  } catch { /* ignore */ }
+}
+
+function rawOf(key) {
+  if (db) return mem.has(key) ? mem.get(key) : null;
+  return localStorage.getItem(PREFIX + key);
+}
+
+function keys() {
+  return db ? [...mem.keys()] : localKeys().map(k => k.slice(PREFIX.length));
+}
+
 function read(key, fallback) {
   try {
-    const raw = localStorage.getItem(PREFIX + key);
+    const raw = rawOf(key);
     return raw === null ? fallback : JSON.parse(raw);
   } catch {
     return fallback;
@@ -62,12 +167,14 @@ function read(key, fallback) {
 
 function write(key, value) {
   try {
-    localStorage.setItem(PREFIX + key, JSON.stringify(value));
+    save(key, JSON.stringify(value));
     return true;
   } catch {
     return false;
   }
 }
+
+await init();
 
 export const itemKey = item => `${item.type}:${item.symbol}`;
 
@@ -157,32 +264,18 @@ export function saveCandles(item, tf, candles) {
   write(`candles:${itemKey(item)}:${tf}`, entry);
 }
 
-function candleKeys() {
-  const keys = [];
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.startsWith(CANDLE_PREFIX)) keys.push(k);
-    }
-  } catch { /* storage unavailable */ }
-  return keys;
-}
+const CANDLE_KEY = 'candles:';
+const candleKeys = () => keys().filter(k => k.startsWith(CANDLE_KEY));
 
 function pruneCandles(keep = MAX_CANDLE_SETS) {
-  const keys = candleKeys();
-  if (keys.length <= keep) return;
-  const dated = keys.map(k => {
-    try { return { k, at: JSON.parse(localStorage.getItem(k)).savedAt || 0 }; } catch { return { k, at: 0 }; }
-  }).sort((a, b) => a.at - b.at);
-  for (const { k } of dated.slice(0, keys.length - keep)) {
-    try { localStorage.removeItem(k); } catch { /* ignore */ }
-  }
+  const list = candleKeys();
+  if (list.length <= keep) return;
+  const dated = list.map(k => ({ k, at: (read(k, null) || {}).savedAt || 0 })).sort((a, b) => a.at - b.at);
+  for (const { k } of dated.slice(0, list.length - keep)) remove(k);
 }
 
 export function clearCachedPrices() {
-  for (const k of candleKeys()) {
-    try { localStorage.removeItem(k); } catch { /* ignore */ }
-  }
+  for (const k of candleKeys()) remove(k);
   write('quotes', {});
 }
 
