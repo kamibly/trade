@@ -20,7 +20,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.19.3 (graph readout)';
+export const APP_VERSION = '0.20.0 (own storage)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2158,7 +2158,7 @@ function renderSettings() {
   $('fx-status').textContent = state.fx
     ? `1 USD = ${state.fx.rate.toFixed(4)} CAD (${state.fx.source}, ${timeAgo(state.fx.at)})`
     : 'USD to CAD rate not loaded yet.';
-  $('version').textContent = `Version ${APP_VERSION}`;
+  $('version').textContent = `Version ${APP_VERSION} · data in ${store.backend()}`;
   $('alert-tf').value = state.settings.alertTf;
   $('buy-at').value = state.settings.buyAt;
   $('sell-at').value = -state.settings.sellAt;
