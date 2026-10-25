@@ -1,7 +1,7 @@
 // Scores every watchlist symbol on the alert timeframe while the app is open,
 // reusing saved candles while they are fresh so the free data limits last.
 
-import { analyze, signalAt, MIN_CANDLES } from './signals.js';
+import { analyze, signalAt, breakdown, MIN_CANDLES } from './signals.js';
 import { backtest } from './backtest.js';
 import { feeRate } from './fees.js';
 
@@ -95,6 +95,8 @@ export function summarize(item, sig, tf, learned = null) {
     ctx: sig.ctx,
     tuned: autoTuned(learned),
     record: (learned && learned.record) || null,
+    // Buys and Sells keep how their score added up, for the paper trades they open or close.
+    ...(sig.action !== 'hold' ? { why: breakdown(sig, (learned && learned.weights) || {}) } : {}),
   };
 }
 

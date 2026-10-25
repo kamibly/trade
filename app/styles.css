@@ -438,3 +438,26 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .badge.held { color: var(--up); border-color: var(--up); }
 .eq-readout { color: var(--muted); font-variant-numeric: tabular-nums; min-height: 1.4em; }
 .equity-chart { touch-action: pan-y; cursor: crosshair; }
+
+/* Score breakdown: a trade's "Why it bought / sold" and the chart's card. */
+details.why-fold { margin-top: 6px; }
+details.why-fold > summary { cursor: pointer; list-style: none; }
+details.why-fold > summary::-webkit-details-marker { display: none; }
+details.why-fold > summary::before { content: '▸ '; color: var(--muted); }
+details.why-fold[open] > summary::before { content: '▾ '; }
+.why-top { display: flex; justify-content: space-between; gap: 8px; margin: 6px 0 2px; }
+.why-table { margin-top: 6px; }
+.why-row, .why-table > details.why-fold > summary { display: grid; grid-template-columns: 1fr 64px 84px; gap: 6px; align-items: baseline; }
+.why-table > details.why-fold > summary::before { position: absolute; left: 0; }
+.why-table > details.why-fold > summary { position: relative; padding: 4px 0 4px 14px; border-top: 1px solid var(--line, rgba(127,127,127,.2)); font-size: .9em; }
+.why-table > details.why-fold > summary > span:not(:first-child), .why-head > span:not(:first-child) { text-align: right; }
+.why-head { padding-left: 14px; }
+.why-votes { list-style: none; margin: 4px 0 6px 14px; padding: 0; }
+.why-votes li { padding: 4px 0; }
+.why-votes li > div:first-child { display: flex; justify-content: space-between; gap: 8px; }
+.why-steps { margin: 4px 0 4px 14px; padding-left: 16px; }
+.why-steps li { margin: 3px 0; }
+.why-filter { margin-top: 8px; padding: 6px 8px; border: 1px solid var(--line, rgba(127,127,127,.3)); border-radius: 8px; }
+.why-votes li, .why-steps li { display: block; border: 0; background: none; border-radius: 0; box-shadow: none; }
+.why-votes li { padding: 4px 0; margin: 0; }
+.why-votes li > div:first-child > span:last-child { white-space: nowrap; }

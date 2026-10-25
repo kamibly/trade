@@ -80,12 +80,14 @@ export function equity(acc, prices = {}) {
   return acc.cash + acc.positions.reduce((sum, p) => sum + p.qty * (ok(prices[p.key]) ? prices[p.key] : p.entry), 0);
 }
 
-function closePosition(acc, p, price, reason, now) {
+// soldWhy: the Sell's score breakdown, when a Sell signal closed it.
+function closePosition(acc, p, price, reason, now, soldWhy = null) {
   const value = p.qty * price - feeOf(p.type, p.qty, price);
   acc.cash = round2(acc.cash + value);
   const pnl = value - p.cost;
   acc.trades.push({ key: p.key, symbol: p.symbol, type: p.type, qty: p.qty, entry: p.entry, cost: p.cost, exit: price, openedAt: p.openedAt, closedAt: now, pnl: round2(pnl), ret: pnl / p.cost, reason, setup: setupOf(p),
-    sellsAt: exitOf(p), ...firstLevels(p), ...(p.until ? { until: p.until } : {}), ...(p.filter ? { filter: p.filter } : {}) });
+    sellsAt: exitOf(p), ...firstLevels(p), ...(p.until ? { until: p.until } : {}), ...(p.filter ? { filter: p.filter } : {}),
+    ...(p.why ? { why: p.why } : {}), ...(soldWhy ? { whySold: soldWhy } : {}) });
   acc.positions = acc.positions.filter(x => x !== p);
   return { kind: 'close', symbol: p.symbol, key: p.key, price, pnl: round2(pnl), reason, setup: setupOf(p) };
 }
@@ -182,7 +184,7 @@ function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter
   // Under $10 the fees outweigh the trade.
   if (!(qty > 0) || cost < 10 || cost > acc.cash + 0.005) return null;
   acc.cash = round2(acc.cash - cost);
-  acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, stop0: s.stop, take0: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}), ...(filter ? { filter } : {}), ...(trail ? { trail: true, risk: s.entry - s.stop, high: s.entry } : lock ? { lock: true, risk: s.entry - s.stop, high: s.entry } : {}) });
+  acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, stop0: s.stop, take0: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}), ...(filter ? { filter } : {}), ...(s.why ? { why: s.why } : {}), ...(trail ? { trail: true, risk: s.entry - s.stop, high: s.entry } : lock ? { lock: true, risk: s.entry - s.stop, high: s.entry } : {}) });
   return { kind: 'open', symbol: s.symbol, key, price: s.entry, qty, cost: round2(cost), setup };
 }
 
@@ -202,7 +204,7 @@ export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(),
     else if (!p.trail && s.entry >= p.take) events.push(closePosition(acc, p, s.entry, 'target', now));
     // Opportunity trades keep to their own plan: stop, target or time.
     else if (p.until && now >= p.until) events.push(closePosition(acc, p, s.entry, 'time', now));
-    else if (s.action === 'sell' && setupOf(p) === 'signal') events.push(closePosition(acc, p, s.entry, 'sell signal', now));
+    else if (s.action === 'sell' && setupOf(p) === 'signal') events.push(closePosition(acc, p, s.entry, 'sell signal', now, s.why || null));
   }
   // Watchlist Buys: not only a new Buy, but any current Buy the account
   // doesn't hold yet, while the price is within 1 ATR of where the Buy began.
@@ -362,12 +364,13 @@ export function priceForGain(p, gain) {
 }
 
 // Market scan trades are sold when a later scan rates them Sell.
-// sells: [{ key, entry }]
+// sells: [{ key, entry, why? }]
 export function closeOnSells(acc, sells, setup, { now = Date.now() } = {}) {
-  const at = new Map(sells.map(s => [s.key, s.entry]));
+  const at = new Map(sells.map(s => [s.key, s]));
   const events = [];
   for (const p of [...acc.positions]) {
-    if (setupOf(p) === setup && ok(at.get(p.key))) events.push(closePosition(acc, p, at.get(p.key), 'sell signal', now));
+    const s = at.get(p.key);
+    if (setupOf(p) === setup && s && ok(s.entry)) events.push(closePosition(acc, p, s.entry, 'sell signal', now, s.why || null));
   }
   if (events.length) mark(acc, {}, now);
   return events;

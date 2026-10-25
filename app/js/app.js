@@ -7,8 +7,9 @@ import {
 import { PriceChart } from './chart.js';
 import * as F from './forecast.js';
 import {
-  analyze, signalAt, scoreVotes, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
+  analyze, signalAt, scoreVotes, scoreParts, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
 } from './signals.js';
+import { METHOD_INFO, SCORE_STEPS } from './explain.js';
 import { scanItem, alertFor, manualRule, autoTune, learnKey, backtestOptions, learnedFrom, ruleOf, tradeRecordLine } from './scanner.js';
 import { SETUPS, recordLine, proven as setupProven, MIN_PROVEN } from './setups.js';
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
@@ -20,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.22.1 (stocks / crypto filter)';
+export const APP_VERSION = '0.23.0 (score breakdown)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -468,6 +469,54 @@ function pickChartSymbol() {
 // ---- Analysis under the chart ----------------------------------------------
 
 const fmtScore = v => `${v > 0 ? '+' : ''}${Math.round(v)}`;
+const fmtVote = v => (v === 0 ? '0.00' : `${v > 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`);
+const fmtPts = v => (Math.abs(v) < 0.05 ? '0.0' : `${v > 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}`);
+
+// A folded section that remembers whether it was open (by `id`).
+function fold(id, summary, ...body) {
+  // Taps inside stay here: they don't fold the card it sits in.
+  return el('details', { class: 'why-fold', open: state.openCards.has(id), onclick: e => e.stopPropagation(), ontoggle: e => { if (e.currentTarget.open) state.openCards.add(id); else state.openCards.delete(id); } },
+    el('summary', {}, ...[].concat(summary)), ...body);
+}
+
+// How a score added up, group by group, with each method's vote × weight.
+// votes: [{ id, name, group, vote, weight, note?, hit? }]. `id` keeps what is open.
+function scoreTable(votes, id) {
+  const { parts, groups } = scoreParts(votes);
+  const order = Object.keys(GROUPS);
+  parts.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));
+  return el('div', {}, el('div', { class: 'why-table' },
+    el('div', { class: 'why-row why-head muted small' }, el('span', { text: 'Group' }), el('span', { text: 'Vote' }), el('span', { text: 'Adds' })),
+    ...parts.map(g => fold(`${id}:${g.group}`, [
+      el('span', { text: GROUPS[g.group] || g.group }),
+      el('span', { class: upDown(g.vote), text: Number.isFinite(g.vote) ? fmtVote(g.vote) : '–' }),
+      el('span', { class: upDown(g.adds), text: Number.isFinite(g.vote) ? fmtPts(g.adds) : 'not counted' }),
+    ], el('ul', { class: 'why-votes' }, ...g.votes.map(v => el('li', {},
+      el('div', {}, el('span', { text: v.name }), el('span', { class: `small ${upDown(v.vote)}`, text: `${fmtVote(v.vote)} × ${v.weight.toFixed(2)}${v.weight > 0 ? '' : ' (no vote)'}` })),
+      v.note ? el('div', { class: 'muted small', text: `Now: ${v.note}${Number.isFinite(v.hit) ? ` · right ${Math.round(v.hit * 100)}% in the backtest` : ''}` }) : null,
+      METHOD_INFO[v.id] ? el('div', { class: 'muted small', text: METHOD_INFO[v.id] }) : null))),
+      Number.isFinite(g.vote) ? el('div', { class: 'muted small', text: `Group vote ${fmtVote(g.vote)} = Σ(vote × weight) ÷ Σ weight; adds 100 × ${fmtVote(g.vote)} ÷ ${groups} groups = ${fmtPts(g.adds)}` }) : el('div', { class: 'muted small', text: 'Every method here has weight 0, so this group is left out.' })))),
+    fold(`${id}:how`, el('span', { text: 'How the score is worked out' }),
+      el('ol', { class: 'small why-steps' }, ...SCORE_STEPS.map(t => el('li', { text: t })))));
+}
+
+const snapVotes = snap => snap.votes.map(([id, name, group, vote, weight]) => ({ id, name, group, vote, weight }));
+const lineText = (rule, side) => (rule ? `${side === 'sell' ? 'Sell' : 'Buy'} line ${fmtScore(side === 'sell' ? rule.sell : rule.buy)}${rule.mode === 'dip' && side !== 'sell' ? ' (buy the dip)' : ''}` : '');
+
+// A paper trade's saved score: "Why it bought" or "Why it sold".
+function whyFold(snap, id, side, filter = null) {
+  if (!snap || !Array.isArray(snap.votes)) return null;
+  const when = Number.isFinite(snap.time) ? new Date(snap.time * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  const parts = scoreParts(snapVotes(snap)).parts;
+  const pulls = side === 'sell' ? parts.filter(g => g.adds < -0.05).sort((a, b) => a.adds - b.adds).slice(0, 3) : [];
+  return fold(id, [el('span', { text: side === 'sell' ? 'Why it sold' : 'Why it bought' }), el('span', { class: 'muted small', text: ` score ${fmtScore(snap.score)}${when ? ` · candle of ${when}` : ''}` })],
+    el('div', { class: 'why-top small' },
+      el('span', {}, 'Score ', el('strong', { class: upDown(snap.score), text: fmtPts(snap.score) })),
+      el('span', { class: 'muted', text: lineText(snap.rule, side) })),
+    pulls.length ? el('div', { class: 'muted small', text: `Pulled down most by ${pulls.map(g => `${GROUPS[g.group] || g.group} ${fmtPts(g.adds)}`).join(' · ')}` }) : null,
+    scoreTable(snapVotes(snap), id),
+    filter ? el('div', { class: 'why-filter small', text: filterText(filter) }) : null);
+}
 
 function scoreMeter(score) {
   // A bar from the middle: right and green for buy, left and red for sell.
@@ -589,6 +638,10 @@ function renderAnalysis() {
       rule.mode === 'dip' ? el('p', { class: 'muted small', text: dipLine(sig.ctx) }) : null,
       el('p', { class: 'small', text: levelsLine(sig) }),
       el('p', { class: 'muted small', text: `Stop is ${state.settings.stopAtr} × ATR and target ${state.settings.takeAtr} × ATR from the entry. ${bt ? 'Methods are weighted by how often they were right in the backtest below.' : 'Methods count equally until there is enough history to backtest.'} Not financial advice: these methods are often wrong.` })),
+    el('div', { class: 'card why-card' },
+      el('h3', { text: 'How this score was worked out' }),
+      el('p', { class: 'muted small', text: `Each group's votes are averaged using their weights, then the groups count equally. ${lineText(rule, 'buy')}, ${lineText(rule, 'sell')}.` }),
+      scoreTable(sig.votes.map(v => ({ ...v, weight: (weights || {})[v.id] ?? 1, hit: bt && bt.stats[v.id] ? bt.stats[v.id].hit : NaN })), 'why:chart')),
     bt ? backtestCard(bt) : el('p', { class: 'muted small', text: 'The backtest needs about 180 candles; this chart has fewer.' }),
     ...Object.entries(GROUPS).filter(([g]) => byGroup[g]).map(([g, title]) => el('div', { class: 'card votes' },
       el('h3', { text: title }),
@@ -1753,7 +1806,8 @@ function renderPaper({ force = false } = {}) {
         ? `Trailing stop at ${formatMoney(p.stop)}${p.stop > p.entry ? ' (above what it cost)' : ''}, highest ${formatMoney(p.high || p.entry)}; no target`
         : `Sells at the stop ${formatMoney(p.stop)}${p.lock && p.stop > p.entry ? ' (profit locked)' : ''} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}${p.lock ? `; the stop keeps part of the best gain (highest ${formatMoney(p.high || p.entry)})` : ''}` }),
       outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
-      p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
+      p.filter && !p.why ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
+      whyFold(p.why, `why:${p.key}:${p.openedAt}`, 'buy', p.filter),
       el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
       whatIfRow(p, pnl, paper.exitOf(p), true),
       paperControls(p, price),
@@ -1786,6 +1840,8 @@ function renderPaper({ force = false } = {}) {
       el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
       el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)}` }),
       el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }),
+      whyFold(t.why, `why:${t.key}:${t.openedAt}`, 'buy', t.filter),
+      whyFold(t.whySold, `whysold:${t.key}:${t.closedAt}`, 'sell'),
       whatIfRow(t, t.pnl, t.sellsAt, false),
     ], () => { const item = findItem(t.key); if (item) openChart(item, true); });
     return [
