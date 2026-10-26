@@ -264,7 +264,12 @@ Paper.
 - Every stock buy and sell of the paper account is copied to your IBKR paper
   account in US dollars, in whole shares. A buy gets the paper trade's share of
   the paper account, applied to your budget, within the per-trade limit and
-  what is left of the budget. If one share costs more than that, it's skipped.
+  what is left of the budget. If that comes to less than one share, one share is
+  bought when it fits the per-trade limit, the budget left and the cash;
+  otherwise the buy is skipped.
+- If the gateway doesn't answer or hangs up, the server tries twice more, 5
+  seconds apart. Orders connect as client 18 and the Settings check as client 17
+  (IBKR_CLIENT_ID and the next number), so neither waits on the other.
 - Orders are market orders. Outside market hours IBKR holds them until the
   open, and the app shows them as waiting until they fill.
 - The paper account decides when to sell. A sale never sells more than IBKR

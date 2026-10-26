@@ -51,6 +51,7 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(service, "STATE_FILE", str(tmp_path / "trade.json"))
     monkeypatch.setattr(ibkr, "HOST", "ib-gateway")
+    monkeypatch.setattr(ibkr, "CONNECT_RETRY_S", 0)
     yield
 
 
@@ -66,6 +67,10 @@ SELL = {"kind": "close", "key": "stock:MSFT", "symbol": "MSFT", "price": 110, "p
 
 def run(fake):
     return ibkr.process(service.load_state, service.update_state, TZ, make=lambda: fake)
+
+
+def run_with(make):
+    return ibkr.process(service.load_state, service.update_state, TZ, make=make)
 
 
 def test_settings_are_kept_from_the_app():
@@ -105,6 +110,39 @@ def test_a_share_dearer_than_the_trade_is_skipped():
     fake = FakeGateway()
     [rec] = run(fake)
     assert rec["status"] == "skipped" and "one share" in rec["error"] and fake.sent == []
+
+
+def test_a_trade_under_one_share_buys_one_when_it_fits_the_limit():
+    setup_state("paper")
+    # $12 of the paper account is $12 of the budget: under one $100 share, so one share is bought.
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [{**BUY, "cost": 12}]}))
+    fake = FakeGateway()
+    [rec] = run(fake)
+    assert fake.sent == [("MSFT", "buy", 1)] and rec["status"] == "filled" and rec["qty"] == 1
+
+
+def test_a_dropped_connection_is_tried_again():
+    setup_state("paper")
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [BUY]}))
+    fake, tries = FakeGateway(), []
+
+    def flaky():
+        tries.append(1)
+        if len(tries) < 2:
+            raise TimeoutError()
+        return fake
+    [rec] = run_with(flaky)
+    assert len(tries) == 2 and rec["status"] == "filled"
+
+
+def test_an_unanswering_gateway_names_the_error():
+    setup_state("paper")
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [BUY]}))
+
+    def down():
+        raise TimeoutError()
+    [rec] = run_with(down)
+    assert rec["status"] == "failed" and rec["error"].endswith("TimeoutError") and "3 tries" in rec["error"]
 
 
 def test_a_live_account_is_never_traded_in_paper_mode():
