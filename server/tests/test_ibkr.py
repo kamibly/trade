@@ -206,3 +206,16 @@ def test_the_app_reads_the_ibkr_summary(monkeypatch):
 def test_class_shares_use_ibkrs_spelling():
     assert ibkr.ib_symbol("BRK.B") == "BRK B"
     assert ibkr.fee_estimate(10, 100) == 1.0 and ibkr.fee_estimate(1000, 10) == 5.0 and ibkr.fee_estimate(1, 50) == 0.5
+
+
+def test_a_job_stuck_on_the_gateway_is_reported():
+    setup_state("paper")
+    assert ibkr._take("placing orders")
+    try:
+        ibkr._busy["since"] = ibkr.now_ms() - 6 * 60_000
+        r = ibkr.summary(service.load_state(), service.update_state, make=lambda: FakeGateway())
+        assert "placing orders" in r["error"] and "6 min without an answer" in r["error"]
+    finally:
+        ibkr._give()
+    r = ibkr.summary(service.load_state(), service.update_state, make=lambda: FakeGateway())
+    assert not r.get("error")

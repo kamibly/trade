@@ -39,6 +39,8 @@ CLIENT_ID = int(os.environ.get("IBKR_CLIENT_ID", "17") or 17)
 ORDER_CLIENT_ID = CLIENT_ID + 1   # orders never wait on Settings' check closing its connection
 CONNECT_TRIES = 3
 CONNECT_RETRY_S = 5       # the gateway can hang up on a connection (it did once at the market open)
+REQUEST_TIMEOUT_S = 30    # ib_async waits forever for an answer by default; a silent gateway then held _lock for good
+STUCK_MS = 5 * 60_000     # the IBKR lock held longer than this is reported as stuck
 MIN_ORDER_USD = 10
 QTY_DECIMALS = 4          # IBKR fractional shares go to 4 decimal places
 FILL_WAIT_S = 20          # a market order outside market hours waits for the open ("working")
@@ -47,6 +49,19 @@ KEEP_ORDERS = 100
 MODES = ("off", "paper")
 
 _lock = threading.Lock()
+_busy = {"since": None, "what": None}   # who holds _lock, for Settings when it seems stuck
+
+
+def _take(what: str) -> bool:
+    if not _lock.acquire(blocking=False):
+        return False
+    _busy.update(since=now_ms(), what=what)
+    return True
+
+
+def _give() -> None:
+    _busy.update(since=None, what=None)
+    _lock.release()
 
 
 def configured() -> bool:
@@ -74,6 +89,7 @@ class Gateway:
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         self.ib = IB()
+        self.ib.RequestTimeout = REQUEST_TIMEOUT_S
         try:
             self.ib.connect(HOST, PORT, clientId=client_id, timeout=15)
             accounts = self.ib.managedAccounts()
@@ -276,7 +292,7 @@ def _failed(ev: dict, mode: str, error: str) -> dict:
 def process(load_state: Callable[[], dict], update_state: Callable, tz: ZoneInfo, make: Optional[Callable] = None) -> List[dict]:
     """Takes the queued paper buys and sells and places their IBKR orders, one
     at a time. A failed order is recorded and not retried."""
-    if not _lock.acquire(blocking=False):
+    if not _take("placing orders"):
         return []
     try:
         taken: List[dict] = []
@@ -332,7 +348,7 @@ def process(load_state: Callable[[], dict], update_state: Callable, tz: ZoneInfo
         update_state(save)
         return records
     finally:
-        _lock.release()
+        _give()
 
 
 def settle_working(box: dict, gw) -> bool:
@@ -364,7 +380,14 @@ def summary(state: dict, update_state: Callable, make: Optional[Callable] = None
     asked at most once a minute."""
     box = dict(state.get("ibkr") or {})
     error = None
-    if configured() and now_ms() - (box.get("accountAt") or 0) >= ACCOUNT_EVERY_MS and _lock.acquire(blocking=False):
+    due = configured() and now_ms() - (box.get("accountAt") or 0) >= ACCOUNT_EVERY_MS
+    if due and not _take("checking the account"):
+        # Another IBKR job is running; only if it has run for minutes is something wrong.
+        since = _busy.get("since")
+        if since and now_ms() - since >= STUCK_MS:
+            error = f"the server has been {_busy.get('what') or 'busy'} with IB Gateway for {(now_ms() - since) // 60_000} min without an answer"
+        due = False
+    if due:
         gw = None
         try:
             gw = (make or Gateway)()
@@ -384,7 +407,7 @@ def summary(state: dict, update_state: Callable, make: Optional[Callable] = None
         finally:
             if gw is not None:
                 gw.close()
-            _lock.release()
+            _give()
     cfg = settings_of(state.get("profile"))
     return {
         "configured": configured(),
