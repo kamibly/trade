@@ -21,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.23.0 (score breakdown)';
+export const APP_VERSION = '0.23.2 (IBKR fractional shares)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2202,8 +2202,10 @@ function renderSettingsSummaries() {
     : !ib ? [`Checking… · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, '']
     : ib.fetchError ? [/404|Not Found/.test(ib.fetchError) ? 'Update your server' : 'Can\'t reach your server', 'bad']
     : !ib.configured ? ['Gateway not set up', '']
-    : ib.error || !acct ? ['Gateway not answering', 'bad']
-    : [`Connected · ${acct.paper ? 'paper' : 'live'} ${acct.id}${Number.isFinite(acct.available) ? ` · ${formatMoney(acct.available)} ${acct.currency || ''}` : ''} · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, acct.paper ? 'good' : 'warn'];
+    : ib.error || !acct ? [`Gateway not answering${acct && ib.accountAt ? ` · last reached ${timeAgo(ib.accountAt)}` : ''}`, 'bad']
+    // The account is the last reading the server saved: older than 10 minutes, it may no longer be true.
+    : ib.accountAt && Date.now() - ib.accountAt > 10 * 60_000 ? [`Not checked since ${timeAgo(ib.accountAt)} · ${acct.id}`, 'warn']
+    : [`Connected · ${acct.paper ? 'paper' : 'live'} ${acct.id}${Number.isFinite(acct.available) ? ` · ${formatMoney(acct.available)} ${acct.currency || ''}` : ''} · ${ibMode === 'paper' ? 'Paper' : 'Off'}${ib.accountAt ? ` · checked ${timeAgo(ib.accountAt)}` : ''}`, acct.paper ? 'good' : 'warn'];
   $('sum-ibkr').textContent = ibText;
   $('sum-ibkr').className = `set-sum ${ibTone}`;
   for (const b of document.querySelectorAll('#ibkr-mode-btns button')) b.classList.toggle('on', b.dataset.mode === ibMode);

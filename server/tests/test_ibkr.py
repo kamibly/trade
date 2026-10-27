@@ -51,6 +51,7 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(service, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(service, "STATE_FILE", str(tmp_path / "trade.json"))
     monkeypatch.setattr(ibkr, "HOST", "ib-gateway")
+    monkeypatch.setattr(ibkr, "CONNECT_RETRY_S", 0)
     yield
 
 
@@ -66,6 +67,10 @@ SELL = {"kind": "close", "key": "stock:MSFT", "symbol": "MSFT", "price": 110, "p
 
 def run(fake):
     return ibkr.process(service.load_state, service.update_state, TZ, make=lambda: fake)
+
+
+def run_with(make):
+    return ibkr.process(service.load_state, service.update_state, TZ, make=make)
 
 
 def test_settings_are_kept_from_the_app():
@@ -99,12 +104,53 @@ def test_paper_buys_whole_shares_from_the_budget_and_sells_them():
     assert service.load_state()["ibkr"]["positions"] == {}
 
 
-def test_a_share_dearer_than_the_trade_is_skipped():
+def test_a_share_dearer_than_the_trade_buys_a_fraction():
     setup_state("paper", max_trade=50)
     service.update_state(lambda st: service.save_paper(st, {"paperEvents": [BUY]}))
     fake = FakeGateway()
     [rec] = run(fake)
-    assert rec["status"] == "skipped" and "one share" in rec["error"] and fake.sent == []
+    # $50 at most per trade, $100 a share: half a share.
+    assert fake.sent == [("MSFT", "buy", 0.5)] and rec["status"] == "filled"
+
+
+def test_fractions_round_down_to_four_decimals():
+    setup_state("paper")
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [{**BUY, "cost": 12.13, "price": 342.33}]}))
+    fake = FakeGateway()
+    run(fake)
+    assert fake.sent == [("MSFT", "buy", 0.0354)]  # $12.13 ÷ $342.33 = 0.03543…
+
+
+def test_under_ten_dollars_is_skipped():
+    setup_state("paper")
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [{**BUY, "cost": 5}]}))
+    fake = FakeGateway()
+    [rec] = run(fake)
+    assert rec["status"] == "skipped" and fake.sent == []
+
+
+def test_a_dropped_connection_is_tried_again():
+    setup_state("paper")
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [BUY]}))
+    fake, tries = FakeGateway(), []
+
+    def flaky():
+        tries.append(1)
+        if len(tries) < 2:
+            raise TimeoutError()
+        return fake
+    [rec] = run_with(flaky)
+    assert len(tries) == 2 and rec["status"] == "filled"
+
+
+def test_an_unanswering_gateway_names_the_error():
+    setup_state("paper")
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [BUY]}))
+
+    def down():
+        raise TimeoutError()
+    [rec] = run_with(down)
+    assert rec["status"] == "failed" and rec["error"].endswith("TimeoutError") and "3 tries" in rec["error"]
 
 
 def test_a_live_account_is_never_traded_in_paper_mode():
@@ -160,3 +206,16 @@ def test_the_app_reads_the_ibkr_summary(monkeypatch):
 def test_class_shares_use_ibkrs_spelling():
     assert ibkr.ib_symbol("BRK.B") == "BRK B"
     assert ibkr.fee_estimate(10, 100) == 1.0 and ibkr.fee_estimate(1000, 10) == 5.0 and ibkr.fee_estimate(1, 50) == 0.5
+
+
+def test_a_job_stuck_on_the_gateway_is_reported():
+    setup_state("paper")
+    assert ibkr._take("placing orders")
+    try:
+        ibkr._busy["since"] = ibkr.now_ms() - 6 * 60_000
+        r = ibkr.summary(service.load_state(), service.update_state, make=lambda: FakeGateway())
+        assert "placing orders" in r["error"] and "6 min without an answer" in r["error"]
+    finally:
+        ibkr._give()
+    r = ibkr.summary(service.load_state(), service.update_state, make=lambda: FakeGateway())
+    assert not r.get("error")

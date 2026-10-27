@@ -3,7 +3,7 @@ Stock orders on Interactive Brokers that follow the paper account.
 
 When the paper account buys or sells a stock, the same trade is placed on
 IBKR through IB Gateway (a second container on the VM that stays logged in),
-sized from your budget in US dollars, in whole shares. For now only a paper
+sized from your budget in US dollars, in fractional shares. For now only a paper
 IBKR account is traded: "Paper" in the app's Settings refuses to send orders
 if the gateway is logged in to a live account (live accounts start with U,
 paper ones with D). Stops and targets stay with the app's paper account: when
@@ -13,7 +13,8 @@ Environment variables for this service (the IBKR username and password go to
 the gateway container, not here; see docker-compose.snippet.yml):
     IBKR_HOST      - the gateway's name on the Docker network, e.g. ib-gateway (unset: IBKR off)
     IBKR_PORT      - its API port: 4004 for paper (4003 for live)
-    IBKR_CLIENT_ID - any number no other program uses on the gateway (default 17)
+    IBKR_CLIENT_ID - any number no other program uses on the gateway (default 17);
+                     Settings' check uses it and orders use the next number
 
 Saved state, under state["ibkr"]:
     positions - key -> what was really bought: { symbol, qty, usd, at, mode, id, status }
@@ -35,13 +36,32 @@ logger = logging.getLogger("trade-service")
 HOST = os.environ.get("IBKR_HOST", "")
 PORT = int(os.environ.get("IBKR_PORT", "4004") or 4004)
 CLIENT_ID = int(os.environ.get("IBKR_CLIENT_ID", "17") or 17)
+ORDER_CLIENT_ID = CLIENT_ID + 1   # orders never wait on Settings' check closing its connection
+CONNECT_TRIES = 3
+CONNECT_RETRY_S = 5       # the gateway can hang up on a connection (it did once at the market open)
+REQUEST_TIMEOUT_S = 30    # ib_async waits forever for an answer by default; a silent gateway then held _lock for good
+STUCK_MS = 5 * 60_000     # the IBKR lock held longer than this is reported as stuck
 MIN_ORDER_USD = 10
+QTY_DECIMALS = 4          # IBKR fractional shares go to 4 decimal places
 FILL_WAIT_S = 20          # a market order outside market hours waits for the open ("working")
 ACCOUNT_EVERY_MS = 60_000
 KEEP_ORDERS = 100
 MODES = ("off", "paper")
 
 _lock = threading.Lock()
+_busy = {"since": None, "what": None}   # who holds _lock, for Settings when it seems stuck
+
+
+def _take(what: str) -> bool:
+    if not _lock.acquire(blocking=False):
+        return False
+    _busy.update(since=now_ms(), what=what)
+    return True
+
+
+def _give() -> None:
+    _busy.update(since=None, what=None)
+    _lock.release()
 
 
 def configured() -> bool:
@@ -63,20 +83,30 @@ class Gateway:
     """The few IB Gateway calls the app needs, through ib_async. Tests use a
     fake with the same methods."""
 
-    def __init__(self):
+    def __init__(self, client_id: int = CLIENT_ID):
         from ib_async import IB
-        # ib_async runs on asyncio; each worker thread gets its own loop.
-        asyncio.set_event_loop(asyncio.new_event_loop())
+        # ib_async runs on asyncio; each connection gets its own loop, closed with it.
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
         self.ib = IB()
-        self.ib.connect(HOST, PORT, clientId=CLIENT_ID, timeout=15)
-        accounts = self.ib.managedAccounts()
-        if not accounts:
-            raise RuntimeError("IB Gateway is not logged in to an account")
+        self.ib.RequestTimeout = REQUEST_TIMEOUT_S
+        try:
+            self.ib.connect(HOST, PORT, clientId=client_id, timeout=15)
+            accounts = self.ib.managedAccounts()
+            if not accounts:
+                raise RuntimeError("IB Gateway is not logged in to an account")
+        except Exception:
+            self.close()
+            raise
         self.account = accounts[0]
 
     def close(self) -> None:
         try:
             self.ib.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.loop.close()
         except Exception:  # noqa: BLE001
             pass
 
@@ -93,7 +123,7 @@ class Gateway:
                 out[p.contract.symbol.replace(" ", ".")] = float(p.position)
         return out
 
-    def order(self, symbol: str, side: str, qty: int) -> dict:
+    def order(self, symbol: str, side: str, qty: float) -> dict:
         from ib_async import MarketOrder, Stock
         contract = Stock(ib_symbol(symbol), "SMART", "USD")
         if not self.ib.qualifyContracts(contract):
@@ -116,6 +146,24 @@ class Gateway:
 
     def working(self) -> set:
         return {t.order.permId or t.order.orderId for t in self.ib.openTrades()}
+
+
+def error_text(e: Exception) -> str:
+    """A timeout or a dropped connection can come with no message: name its kind then."""
+    return (str(e) or type(e).__name__)[:150]
+
+
+def connect(make: Callable):
+    """Opens a gateway connection, trying again a few seconds later when the
+    gateway doesn't answer or hangs up. Raises the last error."""
+    for attempt in range(CONNECT_TRIES):
+        try:
+            return make()
+        except Exception as e:  # noqa: BLE001
+            if attempt == CONNECT_TRIES - 1:
+                raise
+            logger.info("IB Gateway didn't connect (%s); trying again", error_text(e))
+            time.sleep(CONNECT_RETRY_S)
 
 
 def settings_of(profile: Optional[dict]) -> dict:
@@ -196,10 +244,10 @@ def handle(ev: dict, cfg: dict, box: dict, gw, equity: Optional[float], tz: Zone
         acct = box.get("account") or {}
         cash = acct.get("available") if acct.get("currency") == "USD" else None
         usd = size_buy(ev, cfg, box, equity, cash)
-        qty = math.floor(usd / price) if price > 0 else 0
-        if usd < MIN_ORDER_USD or qty < 1:
-            why = f"one share (${price:,.2f}) costs more than this trade's ${usd:,.2f}" if usd >= MIN_ORDER_USD else "under the $10 minimum, or the budget is used up"
-            return {**base, "side": "buy", "status": "skipped", "usd": usd, "error": why}
+        # Fractional shares: rounded down so the order never costs more than the budget allows.
+        qty = math.floor(usd / price * 10 ** QTY_DECIMALS) / 10 ** QTY_DECIMALS if price > 0 else 0
+        if usd < MIN_ORDER_USD or qty <= 0:
+            return {**base, "side": "buy", "status": "skipped", "usd": usd, "error": "under the $10 minimum, or the budget is used up"}
         r = gw.order(symbol, "buy", qty)
         if r["status"] == "failed":
             return {**base, "side": "buy", "status": "failed", "qty": qty, "error": r.get("error"), "id": r.get("id")}
@@ -215,8 +263,8 @@ def handle(ev: dict, cfg: dict, box: dict, gw, equity: Optional[float], tz: Zone
     if not pos:
         return None
     held = gw.positions().get(symbol) or 0
-    qty = int(min(pos["qty"], held))
-    if qty < 1:
+    qty = round(min(pos["qty"], held), QTY_DECIMALS)
+    if qty <= 0:
         # Never sell what isn't held: on a margin account that would open a short.
         box["positions"].pop(key, None)
         return {**base, "mode": pos.get("mode"), "side": "sell", "status": "skipped", "error": "IBKR holds none of it (the buy may not have filled)"}
@@ -241,10 +289,10 @@ def _failed(ev: dict, mode: str, error: str) -> dict:
             "mode": mode, "status": "failed", "error": error}
 
 
-def process(load_state: Callable[[], dict], update_state: Callable, tz: ZoneInfo, make: Callable = Gateway) -> List[dict]:
+def process(load_state: Callable[[], dict], update_state: Callable, tz: ZoneInfo, make: Optional[Callable] = None) -> List[dict]:
     """Takes the queued paper buys and sells and places their IBKR orders, one
     at a time. A failed order is recorded and not retried."""
-    if not _lock.acquire(blocking=False):
+    if not _take("placing orders"):
         return []
     try:
         taken: List[dict] = []
@@ -260,14 +308,14 @@ def process(load_state: Callable[[], dict], update_state: Callable, tz: ZoneInfo
             records = [_failed(e, cfg["mode"], "IB Gateway is not set up on the server (IBKR_HOST)") for e in taken]
         else:
             try:
-                gw = make()
+                gw = connect(make or (lambda: Gateway(ORDER_CLIENT_ID)))
                 refresh_account(box, gw, now_ms())
             except Exception as e:  # noqa: BLE001 - gateway down or logged out: each order is recorded as failed
-                logger.warning("IB Gateway unreachable: %s", e)
+                logger.warning("IB Gateway unreachable: %s", error_text(e))
                 if gw is not None:
                     gw.close()
                 gw = None
-                records = [_failed(ev, cfg["mode"], f"IB Gateway unreachable: {str(e)[:150]}") for ev in taken]
+                records = [_failed(ev, cfg["mode"], f"IB Gateway unreachable after {CONNECT_TRIES} tries: {error_text(e)}") for ev in taken]
         if gw is not None and not box["account"]["paper"]:
             records = [_failed(ev, cfg["mode"], f"the gateway is logged in to live account {box['account']['id']}; only a paper account is traded for now") for ev in taken]
             gw.close()
@@ -300,7 +348,7 @@ def process(load_state: Callable[[], dict], update_state: Callable, tz: ZoneInfo
         update_state(save)
         return records
     finally:
-        _lock.release()
+        _give()
 
 
 def settle_working(box: dict, gw) -> bool:
@@ -326,16 +374,23 @@ def settle_working(box: dict, gw) -> bool:
     return changed
 
 
-def summary(state: dict, update_state: Callable, make: Callable = Gateway) -> dict:
+def summary(state: dict, update_state: Callable, make: Optional[Callable] = None) -> dict:
     """What the app's Settings shows: whether the gateway answers, the account
     it is logged in to, its cash, the positions and the latest orders. IBKR is
     asked at most once a minute."""
     box = dict(state.get("ibkr") or {})
     error = None
-    if configured() and now_ms() - (box.get("accountAt") or 0) >= ACCOUNT_EVERY_MS and _lock.acquire(blocking=False):
+    due = configured() and now_ms() - (box.get("accountAt") or 0) >= ACCOUNT_EVERY_MS
+    if due and not _take("checking the account"):
+        # Another IBKR job is running; only if it has run for minutes is something wrong.
+        since = _busy.get("since")
+        if since and now_ms() - since >= STUCK_MS:
+            error = f"the server has been {_busy.get('what') or 'busy'} with IB Gateway for {(now_ms() - since) // 60_000} min without an answer"
+        due = False
+    if due:
         gw = None
         try:
-            gw = make()
+            gw = (make or Gateway)()
             b = {"orders": [dict(o) for o in box.get("orders", [])], "positions": {k: dict(v) for k, v in (box.get("positions") or {}).items()}}
             refresh_account(b, gw, now_ms())
             settled = settle_working(b, gw)
@@ -348,11 +403,11 @@ def summary(state: dict, update_state: Callable, make: Callable = Gateway) -> di
                     s["orders"], s["positions"] = b["orders"], b["positions"]
             update_state(save)
         except Exception as e:  # noqa: BLE001
-            error = str(e)[:200]
+            error = error_text(e)
         finally:
             if gw is not None:
                 gw.close()
-            _lock.release()
+            _give()
     cfg = settings_of(state.get("profile"))
     return {
         "configured": configured(),
