@@ -3,7 +3,7 @@ Stock orders on Interactive Brokers that follow the paper account.
 
 When the paper account buys or sells a stock, the same trade is placed on
 IBKR through IB Gateway (a second container on the VM that stays logged in),
-sized from your budget in US dollars, in whole shares. For now only a paper
+sized from your budget in US dollars, in fractional shares. For now only a paper
 IBKR account is traded: "Paper" in the app's Settings refuses to send orders
 if the gateway is logged in to a live account (live accounts start with U,
 paper ones with D). Stops and targets stay with the app's paper account: when
@@ -40,6 +40,7 @@ ORDER_CLIENT_ID = CLIENT_ID + 1   # orders never wait on Settings' check closing
 CONNECT_TRIES = 3
 CONNECT_RETRY_S = 5       # the gateway can hang up on a connection (it did once at the market open)
 MIN_ORDER_USD = 10
+QTY_DECIMALS = 4          # IBKR fractional shares go to 4 decimal places
 FILL_WAIT_S = 20          # a market order outside market hours waits for the open ("working")
 ACCOUNT_EVERY_MS = 60_000
 KEEP_ORDERS = 100
@@ -106,7 +107,7 @@ class Gateway:
                 out[p.contract.symbol.replace(" ", ".")] = float(p.position)
         return out
 
-    def order(self, symbol: str, side: str, qty: int) -> dict:
+    def order(self, symbol: str, side: str, qty: float) -> dict:
         from ib_async import MarketOrder, Stock
         contract = Stock(ib_symbol(symbol), "SMART", "USD")
         if not self.ib.qualifyContracts(contract):
@@ -227,16 +228,10 @@ def handle(ev: dict, cfg: dict, box: dict, gw, equity: Optional[float], tz: Zone
         acct = box.get("account") or {}
         cash = acct.get("available") if acct.get("currency") == "USD" else None
         usd = size_buy(ev, cfg, box, equity, cash)
-        qty = math.floor(usd / price) if price > 0 else 0
-        # Under one share: buy one, if it fits the per-trade limit, what is left of the budget and the cash.
-        room = min(cfg["maxTrade"], cfg["budget"] - sum(p.get("usd") or 0 for p in box.get("positions", {}).values()),
-                   cash if cash is not None else math.inf)
-        if qty < 1 and 0 < price <= room:
-            qty, usd = 1, round(price, 2)
-        if qty < 1 or qty * price < MIN_ORDER_USD:
-            why = ("under the $10 minimum" if qty >= 1 else f"one share (${price:,.2f}) costs more than the ${cfg['maxTrade']:,.0f} per-trade limit"
-                   if price > cfg["maxTrade"] else f"one share (${price:,.2f}) costs more than what is left of the budget or cash (${max(0, room):,.2f})")
-            return {**base, "side": "buy", "status": "skipped", "usd": usd, "error": why}
+        # Fractional shares: rounded down so the order never costs more than the budget allows.
+        qty = math.floor(usd / price * 10 ** QTY_DECIMALS) / 10 ** QTY_DECIMALS if price > 0 else 0
+        if usd < MIN_ORDER_USD or qty <= 0:
+            return {**base, "side": "buy", "status": "skipped", "usd": usd, "error": "under the $10 minimum, or the budget is used up"}
         r = gw.order(symbol, "buy", qty)
         if r["status"] == "failed":
             return {**base, "side": "buy", "status": "failed", "qty": qty, "error": r.get("error"), "id": r.get("id")}
@@ -252,8 +247,8 @@ def handle(ev: dict, cfg: dict, box: dict, gw, equity: Optional[float], tz: Zone
     if not pos:
         return None
     held = gw.positions().get(symbol) or 0
-    qty = int(min(pos["qty"], held))
-    if qty < 1:
+    qty = round(min(pos["qty"], held), QTY_DECIMALS)
+    if qty <= 0:
         # Never sell what isn't held: on a margin account that would open a short.
         box["positions"].pop(key, None)
         return {**base, "mode": pos.get("mode"), "side": "sell", "status": "skipped", "error": "IBKR holds none of it (the buy may not have filled)"}

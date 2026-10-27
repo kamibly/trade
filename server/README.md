@@ -262,11 +262,11 @@ outside the VM. The app's Settings then shows **Stock trading on IBKR**: Off or
 Paper.
 
 - Every stock buy and sell of the paper account is copied to your IBKR paper
-  account in US dollars, in whole shares. A buy gets the paper trade's share of
-  the paper account, applied to your budget, within the per-trade limit and
-  what is left of the budget. If that comes to less than one share, one share is
-  bought when it fits the per-trade limit, the budget left and the cash;
-  otherwise the buy is skipped.
+  account in US dollars, in fractional shares (to 4 decimals). A buy gets the
+  paper trade's share of the paper account, applied to your budget, within the
+  per-trade limit and what is left of the budget. Under $10 it's skipped, since
+  the fee would outweigh it. Fractional trading has to be allowed on the IBKR
+  account (in IBKR's account settings, under trading permissions).
 - If the gateway doesn't answer or hangs up, the server tries twice more, 5
   seconds apart. Orders connect as client 18 and the Settings check as client 17
   (IBKR_CLIENT_ID and the next number), so neither waits on the other.

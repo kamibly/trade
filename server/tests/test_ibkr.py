@@ -104,21 +104,29 @@ def test_paper_buys_whole_shares_from_the_budget_and_sells_them():
     assert service.load_state()["ibkr"]["positions"] == {}
 
 
-def test_a_share_dearer_than_the_trade_is_skipped():
+def test_a_share_dearer_than_the_trade_buys_a_fraction():
     setup_state("paper", max_trade=50)
     service.update_state(lambda st: service.save_paper(st, {"paperEvents": [BUY]}))
     fake = FakeGateway()
     [rec] = run(fake)
-    assert rec["status"] == "skipped" and "one share" in rec["error"] and fake.sent == []
+    # $50 at most per trade, $100 a share: half a share.
+    assert fake.sent == [("MSFT", "buy", 0.5)] and rec["status"] == "filled"
 
 
-def test_a_trade_under_one_share_buys_one_when_it_fits_the_limit():
+def test_fractions_round_down_to_four_decimals():
     setup_state("paper")
-    # $12 of the paper account is $12 of the budget: under one $100 share, so one share is bought.
-    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [{**BUY, "cost": 12}]}))
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [{**BUY, "cost": 12.13, "price": 342.33}]}))
+    fake = FakeGateway()
+    run(fake)
+    assert fake.sent == [("MSFT", "buy", 0.0354)]  # $12.13 ÷ $342.33 = 0.03543…
+
+
+def test_under_ten_dollars_is_skipped():
+    setup_state("paper")
+    service.update_state(lambda st: service.save_paper(st, {"paperEvents": [{**BUY, "cost": 5}]}))
     fake = FakeGateway()
     [rec] = run(fake)
-    assert fake.sent == [("MSFT", "buy", 1)] and rec["status"] == "filled" and rec["qty"] == 1
+    assert rec["status"] == "skipped" and fake.sent == []
 
 
 def test_a_dropped_connection_is_tried_again():
