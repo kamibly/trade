@@ -74,11 +74,10 @@ services:
       IBEAM_PASSWORD: ""
       IBEAM_USE_PAPER_ACCOUNT: "true"
       IBEAM_START_ACTIVE: "false"
-      # Each login asks you to approve it in IBKR Mobile (IB Key). IBeam waits a
-      # minute for IBKR's page after each notification, up to 4 times.
-      IBEAM_TWO_FA_HANDLER: "NOTIFICATION_RESEND"
-      IBEAM_NOTIFICATION_RESEND_INTERVAL: "60"
-      IBEAM_NOTIFICATION_RESEND_RETRIES: "4"
+      # Each login asks you to approve it in IBKR Mobile (IB Key): one
+      # notification, then up to 3 minutes to approve it
+      # (ibeam-inputs/custom_two_fa_handler.py).
+      IBEAM_TWO_FA_HANDLER: "CUSTOM_HANDLER"
       # With more than one login method (such as a passkey and IB Key), IBKR's
       # page shows a "Select Second Factor Device" list: IBeam picks IB Key.
       IBEAM_TWO_FA_SELECT_EL_ID: "ID@@xyz-field-multipleselect"
@@ -86,6 +85,6 @@ services:
       # Stops after 3 failed logins in a row; IBKR locks the account for a day after 10.
       IBEAM_MAX_FAILED_AUTH: "3"
     volumes:
-      # Lets the trade service reach the gateway (conf.yaml)
+      # Lets the trade service reach the gateway (conf.yaml) and handles IB Key
       - ./trade_folder/ibeam-inputs:/srv/inputs
     mem_limit: 1200m

@@ -278,7 +278,8 @@ browser.
   ends without you asking, the trade service puts IBeam back to idle within 15
   seconds, before it tries to log in by itself, so a session that ends at
   night doesn't keep sending notifications (rarely, one may still arrive).
-  A login you don't approve within about 5 minutes stops. After 3 failed
+  IBKR Mobile gets one notification per login; one you don't approve within 3
+  minutes stops. After 3 failed
   logins in a row IBeam stops, well before IBKR's lock-out at 10.
 - Every stock buy and sell of the paper account is copied to your IBKR paper
   account in US dollars. A buy gets the paper trade's share of the paper
