@@ -61,7 +61,7 @@ services:
   # in fractional shares (see ibkr.py). It needs about 1 GB of memory. Its API is
   # only reachable from containers on this Docker network: no ports are opened
   # on the VM. It starts idle and logs in only when you tap "Log in to IBKR" in
-  # the app's Settings, which then asks for your 6-digit code. Then run:
+  # the app's Settings; you approve the login in IBKR Mobile. Then run:
   #   docker compose up -d ibeam
   ibeam:
     image: voyz/ibeam:0.5.13
@@ -74,16 +74,11 @@ services:
       IBEAM_PASSWORD: ""
       IBEAM_USE_PAPER_ACCOUNT: "true"
       IBEAM_START_ACTIVE: "false"
-      # The 6-digit login code comes from the app: IBeam asks the trade service,
-      # which waits for you to type it in Settings. The key is TRADE_API_KEY.
-      IBEAM_TWO_FA_HANDLER: "EXTERNAL_REQUEST"
-      IBEAM_EXTERNAL_REQUEST_METHOD: "POST"
-      IBEAM_EXTERNAL_REQUEST_URL: "http://trade-service:8004/ibkr/2fa"
-      IBEAM_EXTERNAL_REQUEST_TIMEOUT: "200"
-      IBEAM_EXTERNAL_REQUEST_HEADERS: '{"X-API-Key": "SAME_AS_TRADE_API_KEY"}'
-      # With more than one login method, IBKR's page asks which to use: the
-      # option's name exactly as the page shows it.
-      IBEAM_TWO_FA_SELECT_TARGET: "Mobile Authenticator App"
+      # Each login asks you to approve it in IBKR Mobile (IB Key). IBeam resends
+      # the notification for about 5 minutes.
+      IBEAM_TWO_FA_HANDLER: "NOTIFICATION_RESEND"
+      # With more than one login method, IBKR's page asks which to use.
+      IBEAM_TWO_FA_SELECT_TARGET: "IB Key"
       # Stops after 3 failed logins in a row; IBKR locks the account for a day after 10.
       IBEAM_MAX_FAILED_AUTH: "3"
     volumes:

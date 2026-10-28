@@ -11,12 +11,12 @@ a live account (live accounts start with U, paper ones with D). Stops and
 targets stay with the app's paper account: when it sells, the shares are sold
 at market.
 
-Logging in: IBKR asks for a 6-digit code at each login, about once a day.
-IBeam starts idle. "Log in to IBKR" in Settings wakes it (ask_login); when the
-IBKR page asks for the code, IBeam asks this service (wait_code), which waits
-for you to type it in Settings (give_code). A login nobody asked for (the
-session ran out) is not attempted: IBeam is put back to idle and you get an
-alert to log in.
+Logging in: IBKR asks you to approve each login in IBKR Mobile (IB Key),
+about once a day. IBeam starts idle. "Log in to IBKR" in Settings wakes it
+(ask_login); it logs in and IBKR Mobile asks for your fingerprint. Once logged
+in, keep_alive puts IBeam back to idle and keeps the session open itself, so a
+login nobody asked for is never attempted: when the session runs out you get
+an alert to log in again.
 
 Environment variables for this service (the IBKR username and password go to
 the ibeam container, not here; see docker-compose.snippet.yml):
@@ -55,8 +55,7 @@ FILL_WAIT_S = 20          # a market order outside market hours waits for the op
 ACCOUNT_EVERY_MS = 60_000
 KEEP_ORDERS = 100
 MODES = ("off", "paper")
-LOGIN_WINDOW_MS = 10 * 60_000   # a code request this long after "Log in" is not yours
-CODE_WAIT_S = 180               # how long IBeam's request waits for the code (IBKR's page waits about as long)
+LOGIN_WINDOW_MS = 6 * 60_000    # IBeam resends the IB Key notification for about 5 minutes
 OPEN_STATUSES = ("Submitted", "PreSubmitted", "PendingSubmit", "ApiPending")
 # The gateway in the ibeam container has its own self-signed certificate; it is
 # only reached inside the VM's Docker network.
@@ -219,8 +218,7 @@ class Gateway:
 
 
 # The daily login. The state is in memory: a restart simply asks you to log in again.
-_login = {"asked": None, "waiting": None, "code": None, "outAt": None, "alerted": False}
-_code_ready = threading.Event()
+_login = {"asked": None, "alerted": False, "checkedAt": 0}
 
 
 def _ibeam(path: str) -> bool:
@@ -235,53 +233,54 @@ def _ibeam(path: str) -> bool:
 
 
 def ask_login() -> dict:
-    """"Log in to IBKR" in Settings: wakes IBeam, which logs in within a minute."""
+    """"Log in to IBKR" in Settings: wakes IBeam, which logs in within a minute
+    and sends the IB Key notification to IBKR Mobile."""
     if not IBEAM_URL:
         return {"ok": False, "error": "IBeam is not set up on the server (IBKR_IBEAM_URL)"}
-    _login.update(asked=now_ms(), code=None, alerted=False)
+    _login.update(asked=now_ms(), alerted=False)
     ok = _ibeam("/activate")
     return {"ok": ok, "error": None if ok else "IBeam didn't answer"}
 
 
-def give_code(code: str) -> dict:
-    code = str(code or "").strip()
-    if not (code.isdigit() and len(code) == 6):
-        return {"ok": False, "error": "The code is 6 digits."}
-    if not _login["waiting"]:
-        return {"ok": False, "error": "IBKR isn't asking for a code right now. Tap Log in first."}
-    _login["code"] = code
-    _code_ready.set()
-    return {"ok": True, "error": None}
-
-
-def wait_code(alert: Callable[[str, str], None]) -> Optional[str]:
-    """IBeam's request for the code. Waits for you to type it in Settings,
-    unless nobody asked to log in; then IBeam goes back to idle."""
+def keep_alive(alert: Callable[[str, str], None], every_ms: int = 60_000) -> None:
+    """Run by the scheduler. A logged-in session is kept open with IBKR's
+    tickle, and IBeam is put back to idle: it logs in only when you ask, so a
+    session that runs out at night doesn't send IB Key notifications over and
+    over. A logged-out session gets one alert."""
+    now = now_ms()
+    if not configured() or now - _login["checkedAt"] < every_ms:
+        return
+    _login["checkedAt"] = now
+    try:
+        authed = bool((http("GET", WEB_URL + "/v1/api/iserver/auth/status") or {}).get("authenticated"))
+    except LoggedOut:
+        authed = False
+    except Exception as e:  # noqa: BLE001 - the gateway is down: nothing to keep alive
+        logger.info("IBKR's Web API didn't answer the check: %s", error_text(e))
+        return
     asked = _login["asked"]
-    if not asked or now_ms() - asked > LOGIN_WINDOW_MS:
-        _logged_out(alert)
-        return None
-    _code_ready.clear()
-    _login.update(waiting=now_ms(), code=None)
-    alert("IBKR login code", "Type the 6-digit code from your authenticator app in Settings.")
-    got = _code_ready.wait(CODE_WAIT_S)
-    code = _login["code"] if got else None
-    _login.update(waiting=None, code=None, asked=None)
-    if not code:
-        _logged_out(alert)
-    return code
-
-
-def _logged_out(alert: Callable[[str, str], None]) -> None:
-    _ibeam("/deactivate")
-    _login.update(asked=None, outAt=now_ms())
+    if authed:
+        if asked:
+            _ibeam("/deactivate")
+            _login.update(asked=None, alerted=False)
+        try:
+            http("POST", WEB_URL + "/v1/api/tickle", {})
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    if asked and now - asked < LOGIN_WINDOW_MS:
+        return   # IBeam is still logging in, or waiting for you to approve
+    if asked:
+        _ibeam("/deactivate")
+        _login["asked"] = None
     if not _login["alerted"]:
         _login["alerted"] = True
-        alert("IBKR logged out", "Stock orders wait until you log in again from Settings.")
+        alert("IBKR logged out", "Stock orders wait until you log in again from the app's Settings.")
 
 
 def login_info() -> dict:
-    return {"waitingCode": bool(_login["waiting"]), "asked": _login["asked"], "outAt": _login["outAt"], "canLogIn": bool(IBEAM_URL)}
+    asked = _login["asked"]
+    return {"loggingIn": bool(asked and now_ms() - asked < LOGIN_WINDOW_MS), "canLogIn": bool(IBEAM_URL)}
 
 
 def error_text(e: Exception) -> str:

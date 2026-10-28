@@ -1279,6 +1279,10 @@ def run_ibkr() -> List[dict]:
     return ibkr.process(load_state, update_state, tz())
 
 
+def ibkr_alert(title: str, body: str) -> None:
+    send_to_all({"title": title, "body": body, "tag": "ibkr-login", "hash": "settings"})
+
+
 def run_ndax() -> List[dict]:
     """Real NDAX orders for the paper account's latest crypto buys and sells."""
     return ndax.process(load_state, update_state, tz())
@@ -1318,6 +1322,7 @@ def start_scheduler() -> None:
                     _spawn(run_whatif)
                 if state.get("ibkrQueue"):
                     _spawn(run_ibkr)
+                _spawn(lambda: ibkr.keep_alive(ibkr_alert))
                 if state.get("ndaxQueue"):
                     _spawn(run_ndax)
                 if ndax.coins_due(state, now):

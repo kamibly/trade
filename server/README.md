@@ -259,27 +259,25 @@ buys fractional shares. (IB Gateway's API refuses fractional stock orders.)
 The Web API runs in IBeam, a container that logs in to IBKR with a headless
 browser.
 
-1. In IBKR's Client Portal, under Settings, Secure Login System, add a
-   **Mobile Authenticator App** (a third-party app such as Google
-   Authenticator, not IB Key) as a second way to log in. A passkey can't be
-   used: it only works on IBKR's own website. Keep the passkey for that.
+1. Make sure IBKR Mobile is set up for IB Key (the fingerprint login). A
+   passkey alone can't be used: it only works on IBKR's own website.
 2. Allow fractions: Settings, Trading Permissions, Stocks, **Global (Trade in
    Fractions)**, on the paper account (and later the live one).
 3. Add the `ibeam` service from `docker-compose.snippet.yml` with your IBKR
-   username and password, and your `TRADE_API_KEY` in its
-   `IBEAM_EXTERNAL_REQUEST_HEADERS`. Copy this folder's `ibeam-inputs` with
-   the rest of `trade_folder`. Set `IBKR_WEB_URL` and `IBKR_IBEAM_URL` on the
-   trade service. Remove the old `ib-gateway` service: IBKR allows one session
-   per username, so the two would log each other out.
+   username and password. Copy this folder's `ibeam-inputs` with the rest of
+   `trade_folder`. Set `IBKR_WEB_URL` and `IBKR_IBEAM_URL` on the trade
+   service. Remove the old `ib-gateway` service: IBKR allows one session per
+   username, so the two would log each other out.
 4. In the app, Settings, **Stock trading on IBKR**: tap **Log in to IBKR**, then
-   type the 6-digit code from the authenticator app when asked (you also get
-   an alert). IBKR keeps the login for about a day; when it ends you get an
-   alert, and stock orders fail until you log in again.
+   approve the notification in IBKR Mobile. IBKR keeps the login for about a
+   day; when it ends you get an alert, and stock orders fail until you log in
+   again.
 
-- IBeam starts idle and logs in only after you tap Log in, so a login it can't
-  finish (no code typed within 3 minutes) puts it back to idle instead of
-  trying again every minute. After 3 failed logins in a row it stops, well
-  before IBKR's lock-out at 10.
+- IBeam starts idle and logs in only after you tap Log in. Once logged in, the
+  trade service puts it back to idle and keeps the session open itself, so a
+  session that ends at night never sends you notifications. A login you don't
+  approve within about 5 minutes stops. After 3 failed logins in a row IBeam
+  stops, well before IBKR's lock-out at 10.
 - Every stock buy and sell of the paper account is copied to your IBKR paper
   account in US dollars. A buy gets the paper trade's share of the paper
   account, applied to your budget, within the per-trade limit and what is left

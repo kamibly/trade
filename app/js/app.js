@@ -21,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.24.0 (IBKR Web API login)';
+export const APP_VERSION = '0.24.0 (IBKR Web API, IB Key login)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2202,7 +2202,7 @@ function renderSettingsSummaries() {
     : !ib ? [`Checking… · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, '']
     : ib.fetchError ? [/404|Not Found/.test(ib.fetchError) ? 'Update your server' : 'Can\'t reach your server', 'bad']
     : !ib.configured ? ['Gateway not set up', '']
-    : ib.login && ib.login.waitingCode ? ['Waiting for your login code', 'warn']
+    : ib.loggedOut && ib.login && ib.login.loggingIn ? ['Approve the login in IBKR Mobile', 'warn']
     : ib.loggedOut ? [`Logged out of IBKR · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, 'warn']
     : ib.error || !acct ? [`Gateway not answering${acct && ib.accountAt ? ` · last reached ${timeAgo(ib.accountAt)}` : ''}`, 'bad']
     // The account is the last reading the server saved: older than 10 minutes, it may no longer be true.
@@ -2270,45 +2270,33 @@ async function renderNdax() {
   ].filter(Boolean));
 }
 
-// The daily IBKR login: "Log in" wakes IBeam on the server, then IBKR asks for
-// the 6-digit code, typed here. Settings checks again every 5 seconds meanwhile.
+// The daily IBKR login: "Log in" wakes IBeam on the server, then IBKR Mobile
+// asks you to approve it. Settings checks again every 5 seconds meanwhile.
 let ibkrPoll = null;
 function pollIbkr(until) {
   clearTimeout(ibkrPoll);
-  let left = 36;
+  let left = 72;
   const tick = async () => {
     await renderIbkr();
-    if (--left > 0 && !until(state.ibkr || {}) && location.hash === '#settings') ibkrPoll = setTimeout(tick, 5000);
+    ibkrPoll = --left > 0 && !until(state.ibkr || {}) && location.hash === '#settings' ? setTimeout(tick, 5000) : null;
   };
   ibkrPoll = setTimeout(tick, 5000);
 }
 
 function ibkrLogin(r) {
-  if (!r.configured || !(r.loggedOut || (r.login && r.login.waitingCode))) return null;
+  if (!r.configured || !r.loggedOut) return null;
   const status = el('p', { class: 'small', role: 'status' });
-  if (r.login && r.login.waitingCode) {
-    const code = el('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6', placeholder: '123456', 'aria-label': 'IBKR login code' });
-    const send = async () => {
-      if (!/^\d{6}$/.test(code.value.trim())) { status.textContent = 'The code is 6 digits.'; return; }
-      status.textContent = 'Sending…';
-      try {
-        const res = await srv.serverFetch(state.settings, '/ibkr/code', { method: 'POST', body: { code: code.value.trim() } });
-        if (!res.ok) { status.textContent = res.error; return; }
-        status.textContent = 'Code sent. Checking the login…';
-        pollIbkr(ib => !ib.loggedOut && ib.account && !(ib.login && ib.login.waitingCode));
-      } catch (e) { status.textContent = e.message; }
-    };
-    return el('div', {},
-      el('p', { class: 'small', text: 'Type the 6-digit code from your authenticator app. IBKR waits about 3 minutes.' }),
-      el('div', { class: 'row' }, code, el('button', { type: 'button', class: 'primary', text: 'Send code', onclick: send })),
-      status);
+  const done = ib => !ib.loggedOut || !(ib.login && ib.login.loggingIn);
+  if (r.login && r.login.loggingIn) {
+    if (!ibkrPoll) pollIbkr(done);
+    return el('p', { class: 'small', text: 'Logging in. Approve the notification in IBKR Mobile when it comes; IBKR sends it for about 5 minutes.' });
   }
   const login = async () => {
-    status.textContent = 'Logging in… IBKR asks for your code in about a minute.';
+    status.textContent = 'Logging in. IBKR Mobile asks you to approve in about a minute.';
     try {
       const res = await srv.serverFetch(state.settings, '/ibkr/login', { method: 'POST' });
       if (!res.ok) { status.textContent = res.error; return; }
-      pollIbkr(ib => (ib.login && ib.login.waitingCode) || (!ib.loggedOut && ib.account));
+      pollIbkr(done);
     } catch (e) { status.textContent = e.message; }
   };
   return el('div', {},

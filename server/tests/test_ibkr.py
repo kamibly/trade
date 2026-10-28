@@ -240,56 +240,57 @@ def test_a_logged_out_ibkr_fails_orders_without_retrying_and_shows_in_settings()
 
 @pytest.fixture
 def ibeam(monkeypatch):
-    calls, alerts = [], []
+    calls, alerts, authed = [], [], {"now": False}
     monkeypatch.setattr(ibkr, "IBEAM_URL", "http://ibeam:5001")
     monkeypatch.setattr(ibkr, "_ibeam", lambda path: calls.append(path) or True)
-    monkeypatch.setattr(ibkr, "CODE_WAIT_S", 2)
-    ibkr._login.update(asked=None, waiting=None, code=None, outAt=None, alerted=False)
-    yield calls, lambda title, body: alerts.append(title), alerts
+
+    def fake_http(method, url, body=None, timeout=None):
+        calls.append(url.split("/v1/api")[-1])
+        return {"authenticated": authed["now"]}
+    monkeypatch.setattr(ibkr, "http", fake_http)
+    ibkr._login.update(asked=None, alerted=False, checkedAt=0)
+    yield calls, lambda title, body: alerts.append(title), alerts, authed
 
 
-def test_a_login_nobody_asked_for_puts_ibeam_back_to_sleep(ibeam):
-    calls, alert, alerts = ibeam
-    assert ibkr.wait_code(alert) is None
-    assert ibkr.wait_code(alert) is None
-    assert calls == ["/deactivate", "/deactivate"] and alerts == ["IBKR logged out"]  # one alert, not one a minute
+def check(alert):
+    ibkr._login["checkedAt"] = 0
+    ibkr.keep_alive(alert)
 
 
-def test_the_typed_code_goes_to_ibeam(ibeam):
-    import threading
-    calls, alert, alerts = ibeam
-    assert ibkr.ask_login()["ok"] and calls == ["/activate"]
-    assert ibkr.give_code("123456")["ok"] is False   # IBKR hasn't asked yet
-    got = []
-    t = threading.Thread(target=lambda: got.append(ibkr.wait_code(alert)))
-    t.start()
-    for _ in range(100):
-        if ibkr.login_info()["waitingCode"]:
-            break
-        time.sleep(0.01)
-    assert ibkr.give_code("12ab56")["ok"] is False
-    assert ibkr.give_code(" 123456 ")["ok"] is True
-    t.join(3)
-    assert got == ["123456"] and alerts == ["IBKR login code"] and not ibkr.login_info()["waitingCode"]
+def test_a_session_nobody_logged_in_gets_one_alert_and_no_login(ibeam):
+    calls, alert, alerts, authed = ibeam
+    check(alert)
+    check(alert)
+    assert alerts == ["IBKR logged out"] and "/activate" not in calls   # one alert, not one a minute
 
 
-def test_no_code_in_time_goes_back_to_sleep(ibeam):
-    calls, alert, alerts = ibeam
+def test_log_in_wakes_ibeam_then_it_goes_back_to_idle_and_the_session_is_kept(ibeam):
+    calls, alert, alerts, authed = ibeam
+    assert ibkr.ask_login()["ok"] and calls == ["/activate"] and ibkr.login_info()["loggingIn"]
+    check(alert)   # waiting for you to approve in IBKR Mobile: no alert
+    assert alerts == [] and "/deactivate" not in calls
+    authed["now"] = True
+    check(alert)
+    assert calls[-2:] == ["/deactivate", "/tickle"] and not ibkr.login_info()["loggingIn"]
+    check(alert)
+    assert calls[-1] == "/tickle" and calls.count("/deactivate") == 1
+
+
+def test_an_unapproved_login_stops_after_a_few_minutes(ibeam):
+    calls, alert, alerts, authed = ibeam
     ibkr.ask_login()
-    assert ibkr.wait_code(alert) is None
-    assert calls == ["/activate", "/deactivate"] and alerts == ["IBKR login code", "IBKR logged out"]
+    ibkr._login["asked"] -= ibkr.LOGIN_WINDOW_MS
+    check(alert)
+    assert calls[-1] == "/deactivate" and alerts == ["IBKR logged out"]
 
 
-def test_ibeam_gets_the_code_as_plain_text(ibeam, monkeypatch):
+def test_the_app_asks_to_log_in(ibeam, monkeypatch):
     import main
     from fastapi.testclient import TestClient
+    calls = ibeam[0]
     monkeypatch.setattr(main, "API_KEY", "secret")
-    monkeypatch.setattr(service.ibkr, "wait_code", lambda alert: "654321")
-    r = TestClient(main.app).post("/ibkr/2fa", headers={"X-API-Key": "secret"})
-    assert r.status_code == 200 and r.text == "654321"
-    monkeypatch.setattr(service.ibkr, "wait_code", lambda alert: None)
-    assert TestClient(main.app).post("/ibkr/2fa", headers={"X-API-Key": "secret"}).status_code == 503
-    assert TestClient(main.app).post("/ibkr/2fa").status_code == 401
+    r = TestClient(main.app).post("/ibkr/login", headers={"X-API-Key": "secret"}).json()
+    assert r == {"ok": True, "error": None} and calls == ["/activate"]
 
 
 class FakeWebApi:
