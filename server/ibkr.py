@@ -118,7 +118,10 @@ def http(method: str, url: str, body=None, timeout: float = REQUEST_TIMEOUT_S):
         if isinstance(e.reason, ConnectionRefusedError) and url.startswith(WEB_URL or "-"):
             raise LoggedOut("IBKR is not logged in") from None
         raise
-    return json.loads(text) if text.strip() else None
+    try:
+        return json.loads(text) if text.strip() else None
+    except ValueError:
+        return text   # IBeam's own control port answers plain "OK"
 
 
 def _num(v) -> Optional[float]:

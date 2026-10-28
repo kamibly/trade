@@ -388,3 +388,25 @@ def test_the_web_api_client_knows_a_logged_out_session(monkeypatch):
             ibkr.Gateway()
     finally:
         api.stop()
+
+
+def test_ibeams_plain_ok_counts_as_an_answer(monkeypatch):
+    import http.server
+    import threading
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"OK")
+    server = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(ibkr, "IBEAM_URL", f"http://127.0.0.1:{server.server_port}")
+    try:
+        assert ibkr.ask_login() == {"ok": True, "error": None}
+    finally:
+        server.shutdown()
