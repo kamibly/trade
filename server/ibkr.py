@@ -2,44 +2,52 @@
 Stock orders on Interactive Brokers that follow the paper account.
 
 When the paper account buys or sells a stock, the same trade is placed on
-IBKR through IB Gateway (a second container on the VM that stays logged in),
-sized from your budget in US dollars, in fractional shares. For now only a paper
-IBKR account is traded: "Paper" in the app's Settings refuses to send orders
-if the gateway is logged in to a live account (live accounts start with U,
-paper ones with D). Stops and targets stay with the app's paper account: when
-it sells, the shares are sold at market.
+IBKR through IBKR's Web API, sized from your budget in US dollars. Buys are
+sent as a dollar amount, so IBKR buys fractional shares; sales sell the
+fraction held. The Web API runs in IBeam, a second container on the VM that
+logs in to IBKR with a headless browser. For now only a paper IBKR account is
+traded: "Paper" in the app's Settings refuses to send orders if the login is
+a live account (live accounts start with U, paper ones with D). Stops and
+targets stay with the app's paper account: when it sells, the shares are sold
+at market.
+
+Logging in: IBKR asks for a 6-digit code at each login, about once a day.
+IBeam starts idle. "Log in to IBKR" in Settings wakes it (ask_login); when the
+IBKR page asks for the code, IBeam asks this service (wait_code), which waits
+for you to type it in Settings (give_code). A login nobody asked for (the
+session ran out) is not attempted: IBeam is put back to idle and you get an
+alert to log in.
 
 Environment variables for this service (the IBKR username and password go to
-the gateway container, not here; see docker-compose.snippet.yml):
-    IBKR_HOST      - the gateway's name on the Docker network, e.g. ib-gateway (unset: IBKR off)
-    IBKR_PORT      - its API port: 4004 for paper (4003 for live)
-    IBKR_CLIENT_ID - any number no other program uses on the gateway (default 17);
-                     Settings' check uses it and orders use the next number
+the ibeam container, not here; see docker-compose.snippet.yml):
+    IBKR_WEB_URL   - the Web API gateway in the ibeam container, e.g. https://ibeam:5000 (unset: IBKR off)
+    IBKR_IBEAM_URL - IBeam's own control port, e.g. http://ibeam:5001
 
 Saved state, under state["ibkr"]:
     positions - key -> what was really bought: { symbol, qty, usd, at, mode, id, status }
     orders    - the latest orders, newest first: { at, key, symbol, side, mode, status, usd, qty, price, fee, pnl, error, id }
     account   - { id, paper, currency, available, net } at the last check
 """
-import asyncio
+import json
 import logging
-import math
 import os
+import ssl
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 logger = logging.getLogger("trade-service")
 
-HOST = os.environ.get("IBKR_HOST", "")
-PORT = int(os.environ.get("IBKR_PORT", "4004") or 4004)
-CLIENT_ID = int(os.environ.get("IBKR_CLIENT_ID", "17") or 17)
-ORDER_CLIENT_ID = CLIENT_ID + 1   # orders never wait on Settings' check closing its connection
+WEB_URL = os.environ.get("IBKR_WEB_URL", "").rstrip("/")
+IBEAM_URL = os.environ.get("IBKR_IBEAM_URL", "").rstrip("/")
 CONNECT_TRIES = 3
-CONNECT_RETRY_S = 5       # the gateway can hang up on a connection (it did once at the market open)
-REQUEST_TIMEOUT_S = 30    # ib_async waits forever for an answer by default; a silent gateway then held _lock for good
+CONNECT_RETRY_S = 5       # the gateway can drop a request (it did once at the market open)
+REQUEST_TIMEOUT_S = 30    # an unanswered request gives up; one once held _lock for 14 hours
 STUCK_MS = 5 * 60_000     # the IBKR lock held longer than this is reported as stuck
 MIN_ORDER_USD = 10
 QTY_DECIMALS = 4          # IBKR fractional shares go to 4 decimal places
@@ -47,6 +55,12 @@ FILL_WAIT_S = 20          # a market order outside market hours waits for the op
 ACCOUNT_EVERY_MS = 60_000
 KEEP_ORDERS = 100
 MODES = ("off", "paper")
+LOGIN_WINDOW_MS = 10 * 60_000   # a code request this long after "Log in" is not yours
+CODE_WAIT_S = 180               # how long IBeam's request waits for the code (IBKR's page waits about as long)
+OPEN_STATUSES = ("Submitted", "PreSubmitted", "PendingSubmit", "ApiPending")
+# The gateway in the ibeam container has its own self-signed certificate; it is
+# only reached inside the VM's Docker network.
+_SSL = ssl._create_unverified_context()
 
 _lock = threading.Lock()
 _busy = {"since": None, "what": None}   # who holds _lock, for Settings when it seems stuck
@@ -65,7 +79,7 @@ def _give() -> None:
 
 
 def configured() -> bool:
-    return bool(HOST)
+    return bool(WEB_URL)
 
 
 def ib_symbol(symbol: str) -> str:
@@ -79,73 +93,195 @@ def fee_estimate(qty: float, price: float) -> float:
     return round(min(max(0.005 * qty, 1.0), 0.01 * value), 2) if value > 0 else 0.0
 
 
-class Gateway:
-    """The few IB Gateway calls the app needs, through ib_async. Tests use a
-    fake with the same methods."""
+class LoggedOut(Exception):
+    """IBKR's Web API answers but nobody is logged in."""
 
-    def __init__(self, client_id: int = CLIENT_ID):
-        from ib_async import IB
-        # ib_async runs on asyncio; each connection gets its own loop, closed with it.
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.ib = IB()
-        self.ib.RequestTimeout = REQUEST_TIMEOUT_S
+
+def http(method: str, url: str, body=None, timeout: float = REQUEST_TIMEOUT_S):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json", "User-Agent": "trade-service"})
+    try:
+        with urllib.request.urlopen(req, context=_SSL if url.startswith("https") else None, timeout=timeout) as r:
+            text = r.read().decode()
+    except urllib.error.HTTPError as e:
+        text = e.read().decode(errors="replace")
+        if e.code == 401:
+            raise LoggedOut("IBKR is not logged in") from None
         try:
-            self.ib.connect(HOST, PORT, clientId=client_id, timeout=15)
-            accounts = self.ib.managedAccounts()
-            if not accounts:
-                raise RuntimeError("IB Gateway is not logged in to an account")
-        except Exception:
-            self.close()
-            raise
-        self.account = accounts[0]
+            err = json.loads(text).get("error")
+        except (ValueError, AttributeError):
+            err = None
+        raise RuntimeError(f"IBKR: {err}" if err else f"IBKR answered {e.code}: {text[:120]}") from None
+    return json.loads(text) if text.strip() else None
+
+
+def _num(v) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+class Gateway:
+    """The few Web API calls the app needs. Tests use a fake with the same methods."""
+
+    def __init__(self):
+        status = self.get("/iserver/auth/status") or {}
+        if not status.get("authenticated"):
+            raise LoggedOut("IBKR is not logged in")
+        accts = self.get("/iserver/accounts") or {}   # IBKR wants this before any order
+        self.account = accts.get("selectedAccount") or (accts.get("accounts") or [None])[0]
+        if not self.account:
+            raise RuntimeError("IBKR's login has no account")
+        self.get("/portfolio/accounts")               # and this before the portfolio calls
+        self._conids: Dict[str, int] = {}
+
+    def get(self, path: str):
+        return http("GET", WEB_URL + "/v1/api" + path)
+
+    def post(self, path: str, body=None):
+        return http("POST", WEB_URL + "/v1/api" + path, body if body is not None else {})
 
     def close(self) -> None:
-        try:
-            self.ib.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            self.loop.close()
-        except Exception:  # noqa: BLE001
-            pass
+        pass   # IBeam keeps the session; nothing to close
 
     def funds(self) -> dict:
-        values = {v.tag: v for v in self.ib.accountSummary(self.account)}
-        avail, net = values.get("AvailableFunds"), values.get("NetLiquidation")
-        num = lambda v: float(v.value) if v is not None and v.value not in ("", None) else None  # noqa: E731
-        return {"currency": (avail or net).currency if (avail or net) else None, "available": num(avail), "net": num(net)}
+        s = self.get(f"/portfolio/{self.account}/summary") or {}
+        avail, net = s.get("availablefunds") or {}, s.get("netliquidation") or {}
+        return {"currency": avail.get("currency") or net.get("currency"), "available": _num(avail.get("amount")), "net": _num(net.get("amount"))}
 
     def positions(self) -> Dict[str, float]:
+        try:
+            self.post(f"/portfolio/{self.account}/positions/invalidate")   # IBKR caches positions; ask for fresh ones
+        except Exception:  # noqa: BLE001
+            pass
         out: Dict[str, float] = {}
-        for p in self.ib.positions(self.account):
-            if p.contract.secType == "STK" and p.position:
-                out[p.contract.symbol.replace(" ", ".")] = float(p.position)
+        for p in self.get(f"/portfolio/{self.account}/positions/0") or []:
+            name = p.get("ticker") or p.get("contractDesc") or ""
+            if p.get("assetClass") == "STK" and _num(p.get("position")):
+                out[name.replace(" ", ".")] = float(p["position"])
         return out
 
-    def order(self, symbol: str, side: str, qty: float) -> dict:
-        from ib_async import MarketOrder, Stock
-        contract = Stock(ib_symbol(symbol), "SMART", "USD")
-        if not self.ib.qualifyContracts(contract):
-            raise RuntimeError(f"IBKR doesn't know {symbol}")
-        trade = self.ib.placeOrder(contract, MarketOrder(side.upper(), qty))
+    def conid(self, symbol: str) -> int:
+        if symbol not in self._conids:
+            name = ib_symbol(symbol)
+            found = (self.get(f"/trsrv/stocks?symbols={urllib.parse.quote(name)}") or {}).get(name) or []
+            ids = [c["conid"] for s in found for c in s.get("contracts", []) if c.get("isUS")]
+            if not ids:
+                raise RuntimeError(f"IBKR doesn't know {symbol}")
+            self._conids[symbol] = ids[0]
+        return self._conids[symbol]
+
+    def order(self, symbol: str, side: str, qty: Optional[float] = None, usd: Optional[float] = None) -> dict:
+        """A market order, for a number of shares or (buys) a dollar amount."""
+        order = {"conid": self.conid(symbol), "orderType": "MKT", "side": side.upper(), "tif": "DAY"}
+        order.update(cashQty=usd) if usd is not None else order.update(quantity=qty)
+        r = self.post(f"/iserver/account/{self.account}/orders", {"orders": [order]})
+        for _ in range(5):   # IBKR asks "are you sure?" (fractional order, market closed...): yes
+            if isinstance(r, list) and r and r[0].get("id") and r[0].get("message"):
+                r = self.post(f"/iserver/reply/{r[0]['id']}", {"confirmed": True})
+            else:
+                break
+        first = r[0] if isinstance(r, list) and r else (r or {})
+        if first.get("error") or not first.get("order_id"):
+            return {"status": "failed", "error": f"IBKR: {first.get('error') or first}"[:200]}
+        oid = str(first["order_id"])
+        st = {}
         waited = 0.0
-        while not trade.isDone() and waited < FILL_WAIT_S:
-            self.ib.sleep(0.5)
-            waited += 0.5
-        st = trade.orderStatus
-        fee = sum((f.commissionReport.commission or 0) for f in trade.fills if f.commissionReport) or None
-        oid = trade.order.permId or trade.order.orderId
-        if st.status == "Filled":
-            return {"status": "filled", "filled": float(st.filled), "price": float(st.avgFillPrice), "fee": fee, "id": oid}
-        if trade.isDone():
-            why = next((e.message for e in reversed(trade.log) if e.message), st.status)
-            return {"status": "failed", "error": f"IBKR: {why}"[:200], "id": oid}
-        # Market closed: the order waits for the open.
-        return {"status": "working", "filled": float(st.filled or 0), "price": float(st.avgFillPrice or 0), "id": oid}
+        while waited < FILL_WAIT_S:
+            st = self.get(f"/iserver/account/order/status/{oid}") or {}
+            if st.get("order_status") not in OPEN_STATUSES:
+                break
+            time.sleep(1)
+            waited += 1
+        status = st.get("order_status")
+        filled, price = _num(st.get("cum_fill")) or 0.0, _num(st.get("average_price")) or 0.0
+        if status == "Filled":
+            return {"status": "filled", "filled": filled, "price": price, "fee": self.fee(oid), "id": oid}
+        if status in OPEN_STATUSES:
+            # Market closed: the order waits for the open.
+            return {"status": "working", "filled": filled, "price": price, "id": oid}
+        return {"status": "failed", "error": f"IBKR: order {str(status or 'not confirmed').lower()}", "id": oid}
+
+    def fee(self, oid: str) -> Optional[float]:
+        try:
+            fees = [_num(t.get("commission")) for t in self.get("/iserver/account/trades") or [] if str(t.get("order_id")) == oid]
+        except Exception:  # noqa: BLE001
+            return None
+        return sum(f for f in fees if f) or None
 
     def working(self) -> set:
-        return {t.order.permId or t.order.orderId for t in self.ib.openTrades()}
+        self.get("/iserver/account/orders")   # the first call only starts IBKR's order list
+        time.sleep(1)
+        orders = (self.get("/iserver/account/orders") or {}).get("orders") or []
+        return {str(o.get("orderId")) for o in orders if o.get("status") in OPEN_STATUSES}
+
+
+# The daily login. The state is in memory: a restart simply asks you to log in again.
+_login = {"asked": None, "waiting": None, "code": None, "outAt": None, "alerted": False}
+_code_ready = threading.Event()
+
+
+def _ibeam(path: str) -> bool:
+    if not IBEAM_URL:
+        return False
+    try:
+        http("GET", IBEAM_URL + path, timeout=10)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("IBeam %s failed: %s", path, error_text(e))
+        return False
+
+
+def ask_login() -> dict:
+    """"Log in to IBKR" in Settings: wakes IBeam, which logs in within a minute."""
+    if not IBEAM_URL:
+        return {"ok": False, "error": "IBeam is not set up on the server (IBKR_IBEAM_URL)"}
+    _login.update(asked=now_ms(), code=None, alerted=False)
+    ok = _ibeam("/activate")
+    return {"ok": ok, "error": None if ok else "IBeam didn't answer"}
+
+
+def give_code(code: str) -> dict:
+    code = str(code or "").strip()
+    if not (code.isdigit() and len(code) == 6):
+        return {"ok": False, "error": "The code is 6 digits."}
+    if not _login["waiting"]:
+        return {"ok": False, "error": "IBKR isn't asking for a code right now. Tap Log in first."}
+    _login["code"] = code
+    _code_ready.set()
+    return {"ok": True, "error": None}
+
+
+def wait_code(alert: Callable[[str, str], None]) -> Optional[str]:
+    """IBeam's request for the code. Waits for you to type it in Settings,
+    unless nobody asked to log in; then IBeam goes back to idle."""
+    asked = _login["asked"]
+    if not asked or now_ms() - asked > LOGIN_WINDOW_MS:
+        _logged_out(alert)
+        return None
+    _code_ready.clear()
+    _login.update(waiting=now_ms(), code=None)
+    alert("IBKR login code", "Type the 6-digit code from your authenticator app in Settings.")
+    got = _code_ready.wait(CODE_WAIT_S)
+    code = _login["code"] if got else None
+    _login.update(waiting=None, code=None, asked=None)
+    if not code:
+        _logged_out(alert)
+    return code
+
+
+def _logged_out(alert: Callable[[str, str], None]) -> None:
+    _ibeam("/deactivate")
+    _login.update(asked=None, outAt=now_ms())
+    if not _login["alerted"]:
+        _login["alerted"] = True
+        alert("IBKR logged out", "Stock orders wait until you log in again from Settings.")
+
+
+def login_info() -> dict:
+    return {"waitingCode": bool(_login["waiting"]), "asked": _login["asked"], "outAt": _login["outAt"], "canLogIn": bool(IBEAM_URL)}
 
 
 def error_text(e: Exception) -> str:
@@ -162,7 +298,9 @@ def connect(make: Callable):
         except Exception as e:  # noqa: BLE001
             if attempt == CONNECT_TRIES - 1:
                 raise
-            logger.info("IB Gateway didn't connect (%s); trying again", error_text(e))
+            if isinstance(e, LoggedOut):
+                raise
+            logger.info("IBKR's Web API didn't answer (%s); trying again", error_text(e))
             time.sleep(CONNECT_RETRY_S)
 
 
@@ -244,19 +382,19 @@ def handle(ev: dict, cfg: dict, box: dict, gw, equity: Optional[float], tz: Zone
         acct = box.get("account") or {}
         cash = acct.get("available") if acct.get("currency") == "USD" else None
         usd = size_buy(ev, cfg, box, equity, cash)
-        # Fractional shares: rounded down so the order never costs more than the budget allows.
-        qty = math.floor(usd / price * 10 ** QTY_DECIMALS) / 10 ** QTY_DECIMALS if price > 0 else 0
-        if usd < MIN_ORDER_USD or qty <= 0:
+        if usd < MIN_ORDER_USD or price <= 0:
             return {**base, "side": "buy", "status": "skipped", "usd": usd, "error": "under the $10 minimum, or the budget is used up"}
-        r = gw.order(symbol, "buy", qty)
+        # Sent as a dollar amount: IBKR buys the fraction of a share it pays for.
+        r = gw.order(symbol, "buy", usd=usd)
         if r["status"] == "failed":
-            return {**base, "side": "buy", "status": "failed", "qty": qty, "error": r.get("error"), "id": r.get("id")}
+            return {**base, "side": "buy", "status": "failed", "usd": usd, "error": r.get("error"), "id": r.get("id")}
         fill = r.get("price") or price
-        got = r.get("filled") or qty
+        # Until a waiting order fills, the shares are the paper price's estimate; settle_working corrects them.
+        got = r.get("filled") if r["status"] == "filled" and r.get("filled") else round(usd / fill, QTY_DECIMALS)
         fee = r.get("fee") if r.get("fee") is not None else fee_estimate(got, fill)
-        box["positions"][key] = {"symbol": symbol, "qty": got if r["status"] == "filled" else qty, "usd": round(got * fill + fee, 2),
+        box["positions"][key] = {"symbol": symbol, "qty": got, "usd": round(got * fill + fee, 2),
                                  "at": now, "mode": cfg["mode"], "id": r.get("id"), "status": r["status"]}
-        return {**base, "side": "buy", "status": r["status"], "usd": round(qty * fill, 2), "qty": got if r["status"] == "filled" else qty,
+        return {**base, "side": "buy", "status": r["status"], "usd": round(got * fill, 2), "qty": got,
                 "price": fill, "fee": round(fee, 2), "id": r.get("id")}
     # A paper sale sells what was really bought for it.
     pos = box["positions"].get(key)
@@ -268,7 +406,7 @@ def handle(ev: dict, cfg: dict, box: dict, gw, equity: Optional[float], tz: Zone
         # Never sell what isn't held: on a margin account that would open a short.
         box["positions"].pop(key, None)
         return {**base, "mode": pos.get("mode"), "side": "sell", "status": "skipped", "error": "IBKR holds none of it (the buy may not have filled)"}
-    r = gw.order(symbol, "sell", qty)
+    r = gw.order(symbol, "sell", qty=qty)
     if r["status"] == "failed":
         return {**base, "mode": pos.get("mode"), "side": "sell", "status": "failed", "qty": qty, "error": r.get("error"), "id": r.get("id")}
     fill = r.get("price") or ev.get("price") or 0
@@ -305,19 +443,22 @@ def process(load_state: Callable[[], dict], update_state: Callable, tz: ZoneInfo
         records: List[dict] = []
         gw = None
         if not configured():
-            records = [_failed(e, cfg["mode"], "IB Gateway is not set up on the server (IBKR_HOST)") for e in taken]
+            records = [_failed(e, cfg["mode"], "IBKR's Web API is not set up on the server (IBKR_WEB_URL)") for e in taken]
         else:
             try:
-                gw = connect(make or (lambda: Gateway(ORDER_CLIENT_ID)))
+                gw = connect(make or Gateway)
                 refresh_account(box, gw, now_ms())
-            except Exception as e:  # noqa: BLE001 - gateway down or logged out: each order is recorded as failed
-                logger.warning("IB Gateway unreachable: %s", error_text(e))
+            except LoggedOut:
+                gw = None
+                records = [_failed(ev, cfg["mode"], "IBKR was logged out; log in from Settings") for ev in taken]
+            except Exception as e:  # noqa: BLE001 - gateway down: each order is recorded as failed
+                logger.warning("IBKR's Web API unreachable: %s", error_text(e))
                 if gw is not None:
                     gw.close()
                 gw = None
-                records = [_failed(ev, cfg["mode"], f"IB Gateway unreachable after {CONNECT_TRIES} tries: {error_text(e)}") for ev in taken]
+                records = [_failed(ev, cfg["mode"], f"IBKR's Web API unreachable after {CONNECT_TRIES} tries: {error_text(e)}") for ev in taken]
         if gw is not None and not box["account"]["paper"]:
-            records = [_failed(ev, cfg["mode"], f"the gateway is logged in to live account {box['account']['id']}; only a paper account is traded for now") for ev in taken]
+            records = [_failed(ev, cfg["mode"], f"IBKR is logged in to live account {box['account']['id']}; only a paper account is traded for now") for ev in taken]
             gw.close()
             gw = None
         if gw is not None:
@@ -370,6 +511,8 @@ def settle_working(box: dict, gw) -> bool:
         pos = box.get("positions", {}).get(o["key"])
         if pos and pos.get("id") == o.get("id"):
             pos["status"] = o["status"]
+            if o["side"] == "buy" and o["status"] == "filled":
+                pos["qty"] = o["qty"] = round(held[o["symbol"]], QTY_DECIMALS)   # what the dollar amount really bought
         changed = True
     return changed
 
@@ -385,7 +528,7 @@ def summary(state: dict, update_state: Callable, make: Optional[Callable] = None
         # Another IBKR job is running; only if it has run for minutes is something wrong.
         since = _busy.get("since")
         if since and now_ms() - since >= STUCK_MS:
-            error = f"the server has been {_busy.get('what') or 'busy'} with IB Gateway for {(now_ms() - since) // 60_000} min without an answer"
+            error = f"the server has been {_busy.get('what') or 'busy'} with IBKR for {(now_ms() - since) // 60_000} min without an answer"
         due = False
     if due:
         gw = None
@@ -394,14 +537,17 @@ def summary(state: dict, update_state: Callable, make: Optional[Callable] = None
             b = {"orders": [dict(o) for o in box.get("orders", [])], "positions": {k: dict(v) for k, v in (box.get("positions") or {}).items()}}
             refresh_account(b, gw, now_ms())
             settled = settle_working(b, gw)
-            box.update(b)
+            box.update(b, loggedOut=False)
 
             def save(st):
                 s = _box(st)
-                s["account"], s["accountAt"] = b["account"], b["accountAt"]
+                s["account"], s["accountAt"], s["loggedOut"] = b["account"], b["accountAt"], False
                 if settled:
                     s["orders"], s["positions"] = b["orders"], b["positions"]
             update_state(save)
+        except LoggedOut:
+            box["loggedOut"] = True
+            update_state(lambda st: _box(st).update(loggedOut=True))
         except Exception as e:  # noqa: BLE001
             error = error_text(e)
         finally:
@@ -415,6 +561,8 @@ def summary(state: dict, update_state: Callable, make: Optional[Callable] = None
         "account": box.get("account"),
         "accountAt": box.get("accountAt"),
         "error": error,
+        "loggedOut": bool(box.get("loggedOut")),
+        "login": login_info(),
         "positions": box.get("positions") or {},
         "orders": (box.get("orders") or [])[:30],
         "lossToday": round(loss_today(box, ZoneInfo(os.environ.get("TRADE_TZ", "America/Toronto")), now_ms()), 2),

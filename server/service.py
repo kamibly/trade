@@ -18,7 +18,7 @@ Environment variables:
     SEC_CONTACT        - your email, which the SEC asks for in its requests; insider buying
                          and earnings dates load only once it is set (see events.py)
     NDAX_API_KEY, NDAX_API_SECRET, NDAX_USER_ID - real crypto orders on NDAX (see ndax.py)
-    IBKR_HOST, IBKR_PORT - IB Gateway, for stock orders on Interactive Brokers (see ibkr.py)
+    IBKR_WEB_URL, IBKR_IBEAM_URL - IBKR's Web API in the ibeam container, for stock orders on Interactive Brokers (see ibkr.py)
 """
 import json
 import logging

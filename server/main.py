@@ -17,12 +17,13 @@ from typing import Optional
 
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 
 import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.16.3"
+VERSION = "1.17.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -117,10 +118,39 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
 
 @app.get("/ibkr")
 def get_ibkr(x_api_key: Optional[str] = Header(default=None)):
-    """Stock orders on Interactive Brokers: whether IB Gateway answers, the
-    account it is logged in to, its cash, what is held and the latest orders."""
+    """Stock orders on Interactive Brokers: whether the login is active, the
+    account, its cash, what is held and the latest orders."""
     check_api_key(x_api_key)
     return service.ibkr.summary(service.load_state(), service.update_state)
+
+
+def _ibkr_alert(title: str, body: str) -> None:
+    service.send_to_all({"title": title, "body": body, "tag": "ibkr-login", "hash": "settings"})
+
+
+@app.post("/ibkr/login")
+def post_ibkr_login(x_api_key: Optional[str] = Header(default=None)):
+    """"Log in to IBKR" in Settings: IBeam logs in and IBKR asks for the code."""
+    check_api_key(x_api_key)
+    return service.ibkr.ask_login()
+
+
+@app.post("/ibkr/code")
+def post_ibkr_code(x_api_key: Optional[str] = Header(default=None), payload: dict = Body(default={})):
+    """The 6-digit login code you typed in Settings."""
+    check_api_key(x_api_key)
+    return service.ibkr.give_code(payload.get("code"))
+
+
+@app.post("/ibkr/2fa")
+def post_ibkr_2fa(x_api_key: Optional[str] = Header(default=None)):
+    """Called by IBeam when IBKR's login page asks for the code: answers with
+    the code once you type it, or 503 when there is none."""
+    check_api_key(x_api_key)
+    code = service.ibkr.wait_code(_ibkr_alert)
+    if not code:
+        raise HTTPException(status_code=503, detail="No login code")
+    return PlainTextResponse(code)
 
 
 @app.get("/ndax")

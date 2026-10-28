@@ -1,0 +1,32 @@
+# IBKR's Web API gateway settings, used by the ibeam container (mounted at
+# /srv/inputs). The same as IBKR's own file, except that any container on the
+# VM's Docker networks (172.*) may call it; nothing outside the VM can reach it.
+ip2loc: "US"
+proxyRemoteSsl: true
+proxyRemoteHost: "https://api.ibkr.com"
+listenPort: 5000
+listenSsl: true
+ccp: false
+svcEnvironment: "v1"
+sslCert: "vertx.jks"
+sslPwd: "mywebapi"
+authDelay: 3000
+portalBaseURL: ""
+serverOptions:
+  blockedThreadCheckInterval: 1000000
+  eventLoopPoolSize: 20
+  workerPoolSize: 20
+  maxWorkerExecuteTime: 100
+  internalBlockingPoolSize: 20
+cors:
+  origin.allowed: "*"
+  allowCredentials: false
+webApps:
+  - name: "demo"
+    index: "index.html"
+ips:
+  allow:
+    - 172.*
+    - 127.0.0.1
+  deny:
+    - 0.0.0.0/0
