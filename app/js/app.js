@@ -2289,7 +2289,7 @@ function ibkrLogin(r) {
   const done = ib => !ib.loggedOut || !(ib.login && ib.login.loggingIn);
   if (r.login && r.login.loggingIn) {
     if (!ibkrPoll) pollIbkr(done);
-    return el('p', { class: 'small', text: 'Logging in. Approve the notification in IBKR Mobile when it comes; It can take a few minutes.' });
+    return el('p', { class: 'small', text: 'Logging in. Approve the notification in IBKR Mobile when it comes. It can take a few minutes.' });
   }
   const login = async () => {
     status.textContent = 'Logging in. IBKR Mobile asks you to approve in about a minute.';
