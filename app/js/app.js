@@ -21,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.24.0 (IBKR Web API, IB Key login)';
+export const APP_VERSION = '0.24.1 (IBKR Web API, IB Key login)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2275,7 +2275,7 @@ async function renderNdax() {
 let ibkrPoll = null;
 function pollIbkr(until) {
   clearTimeout(ibkrPoll);
-  let left = 72;
+  let left = 150;
   const tick = async () => {
     await renderIbkr();
     ibkrPoll = --left > 0 && !until(state.ibkr || {}) && location.hash === '#settings' ? setTimeout(tick, 5000) : null;
@@ -2289,7 +2289,7 @@ function ibkrLogin(r) {
   const done = ib => !ib.loggedOut || !(ib.login && ib.login.loggingIn);
   if (r.login && r.login.loggingIn) {
     if (!ibkrPoll) pollIbkr(done);
-    return el('p', { class: 'small', text: 'Logging in. Approve the notification in IBKR Mobile when it comes; IBKR sends it for about 5 minutes.' });
+    return el('p', { class: 'small', text: 'Logging in. Approve the notification in IBKR Mobile when it comes; It can take a few minutes.' });
   }
   const login = async () => {
     status.textContent = 'Logging in. IBKR Mobile asks you to approve in about a minute.';
