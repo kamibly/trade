@@ -324,6 +324,36 @@ export function scoreVotes(votes, weights = {}) {
   return (100 * means.reduce((a, b) => a + b, 0)) / means.length;
 }
 
+// A Buy's or Sell's score, kept with a paper trade so you can see later why it
+// bought or sold: { score, rule, time, votes: [[id, name, group, vote, weight]] }.
+export function breakdown(sig, weights = {}) {
+  const r2 = x => Math.round(x * 100) / 100;
+  return {
+    score: Math.round(sig.score * 10) / 10,
+    rule: sig.rule,
+    time: sig.time,
+    votes: sig.votes.map(v => [v.id, v.name, v.group, r2(v.vote), r2(weights[v.id] ?? 1)]),
+  };
+}
+
+// How a score adds up, the same way scoreVotes() does it: each group's
+// weighted average vote, and the points it adds (groups count equally; a group
+// whose methods all have weight 0 drops out). votes: [{ id, name, group, vote, weight }]
+export function scoreParts(votes) {
+  const groups = {};
+  for (const v of votes) {
+    const g = (groups[v.group] ||= { group: v.group, sum: 0, weight: 0, votes: [] });
+    g.votes.push(v);
+    if (v.weight > 0) { g.sum += v.weight * v.vote; g.weight += v.weight; }
+  }
+  const counted = Object.values(groups).filter(g => g.weight > 0);
+  const parts = Object.values(groups).map(g => {
+    const vote = g.weight > 0 ? g.sum / g.weight : NaN;
+    return { group: g.group, votes: g.votes, vote, adds: g.weight > 0 ? (100 * vote) / counted.length : 0 };
+  });
+  return { parts, groups: counted.length, score: parts.reduce((t, p) => t + p.adds, 0) };
+}
+
 export function scoreAt(S, i, weights) {
   return scoreVotes(votesAt(S, i), weights);
 }

@@ -136,6 +136,8 @@ async function score(item, tf, settings, weightsCache, deps, models, { onS, mood
   return { ...summarize(item, sig, tf, w), at: deps.now(), ...(source ? { source } : {}), ...(filter ? { filter } : {}) };
 }
 
+const noWhy = ({ why, ...rest }) => rest;
+
 // Runs `fn` over `items` with a few at a time, so big scans finish without hammering a source.
 async function pool(items, size, fn) {
   let next = 0;
@@ -413,8 +415,9 @@ export async function runMarket(job, deps = defaultDeps) {
     tf,
     scanned: results.length,
     total: items.length,
-    buys: buys.slice(0, 100),
-    sells: sells.slice(0, 100),
+    // The lists the app shows leave out each idea's score breakdown (only the paper trades keep it).
+    buys: buys.slice(0, 100).map(noWhy),
+    sells: sells.slice(0, 100).map(noWhy),
     newBuys: newBuys.map(r => r.key),
     newSells: newSells.map(r => r.key),
     actions,
@@ -425,10 +428,10 @@ export async function runMarket(job, deps = defaultDeps) {
     // began, strongest first (each bought once per idea), and every Sell.
     scanBuys: buys.map(r => ({
       id: `scan:${r.key}:${buyStarts[r.key].at}`, setup: 'scan', key: r.key, symbol: r.symbol, type: r.type, entry: r.entry, stop: r.stop, take: r.take, ev: r.score / 100,
-      ranAway: r.entry > buyStarts[r.key].entry + (r.atr || 0), ...(r.filter ? { filter: r.filter } : {}),
+      ranAway: r.entry > buyStarts[r.key].entry + (r.atr || 0), ...(r.filter ? { filter: r.filter } : {}), ...(r.why ? { why: r.why } : {}),
     })),
     buyStarts,
-    scanSells: sells.map(r => ({ key: r.key, entry: r.entry })),
+    scanSells: sells.map(r => ({ key: r.key, entry: r.entry, ...(r.why ? { why: r.why } : {}) })),
     // Where each symbol stood, for the every-minute fast-move watch.
     levels: Object.fromEntries(results.filter(r => r.type === 'crypto').map(r => [r.key, { entry: r.entry, atr: r.atr }])),
     scope,

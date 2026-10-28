@@ -28,6 +28,7 @@ const ASSETS = [
   './js/ml.js',
   './js/signals.js',
   './js/storage.js',
+  './js/explain.js',
   './vendor/lightweight-charts.standalone.production.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
