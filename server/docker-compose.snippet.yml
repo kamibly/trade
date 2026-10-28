@@ -79,8 +79,7 @@ services:
       IBEAM_TWO_FA_HANDLER: "NOTIFICATION_RESEND"
       # With more than one login method (such as a passkey and IB Key), IBKR's
       # page shows a "Select Second Factor Device" list: IBeam picks IB Key.
-      # IBKR has given that list two different ids over time; this finds either.
-      IBEAM_TWO_FA_SELECT_EL_ID: "CSS_SELECTOR@@#sf_select, select#xyz-field-bronze-response"
+      IBEAM_TWO_FA_SELECT_EL_ID: "ID@@xyz-field-multipleselect"
       IBEAM_TWO_FA_SELECT_TARGET: "IB Key"
       # Stops after 3 failed logins in a row; IBKR locks the account for a day after 10.
       IBEAM_MAX_FAILED_AUTH: "3"
