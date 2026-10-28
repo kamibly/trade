@@ -56,7 +56,7 @@ FILL_WAIT_S = 20          # a market order outside market hours waits for the op
 ACCOUNT_EVERY_MS = 60_000
 KEEP_ORDERS = 100
 MODES = ("off", "paper")
-LOGIN_WINDOW_MS = 6 * 60_000    # IBeam resends the IB Key notification for about 5 minutes
+LOGIN_WINDOW_MS = 12 * 60_000   # IBeam starts the gateway, then resends the IB Key notification for a few minutes
 OPEN_STATUSES = ("Submitted", "PreSubmitted", "PendingSubmit", "ApiPending")
 # The gateway in the ibeam container has its own self-signed certificate; it is
 # only reached inside the VM's Docker network.
@@ -271,6 +271,11 @@ def keep_alive(alert: Callable[[str, str], None], every_ms: int = 15_000) -> Non
     asked = _login["asked"]
     if authed:
         _login.update(asked=None, alerted=False)
+        _ibeam("/activate")   # IBeam keeps the session going (a no-op when it already does)
+        try:
+            http("POST", WEB_URL + "/v1/api/tickle", {})
+        except Exception:  # noqa: BLE001
+            pass
         return
     if asked and now - asked < LOGIN_WINDOW_MS:
         return   # IBeam is logging in, or waiting for you to approve

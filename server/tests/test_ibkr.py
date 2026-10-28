@@ -269,10 +269,13 @@ def test_log_in_wakes_ibeam_and_it_stays_awake_while_logged_in(ibeam):
     assert ibkr.ask_login()["ok"] and calls == ["/activate"] and ibkr.login_info()["loggingIn"]
     check(alert)   # waiting for you to approve in IBKR Mobile: no alert
     assert alerts == [] and "/deactivate" not in calls
+    ibkr._login["asked"] -= 7 * 60_000   # starting the gateway and approving can take several minutes
+    check(alert)
+    assert "/deactivate" not in calls
     authed["now"] = True
     check(alert)
     check(alert)
-    assert "/deactivate" not in calls and not ibkr.login_info()["loggingIn"]
+    assert "/deactivate" not in calls and not ibkr.login_info()["loggingIn"] and calls[-2:] == ["/activate", "/tickle"]
     # The session ends at night: IBeam goes back to idle before it logs in by itself.
     authed["now"] = False
     check(alert)
