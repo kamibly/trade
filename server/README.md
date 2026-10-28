@@ -273,11 +273,13 @@ browser.
    day; when it ends you get an alert, and stock orders fail until you log in
    again.
 
-- IBeam starts idle and logs in only after you tap Log in. Once logged in, the
-  trade service puts it back to idle and keeps the session open itself, so a
-  session that ends at night never sends you notifications. A login you don't
-  approve within about 5 minutes stops. After 3 failed logins in a row IBeam
-  stops, well before IBKR's lock-out at 10.
+- IBeam starts idle, with IBKR's gateway stopped, and logs in only after you
+  tap Log in. While logged in it keeps the session going. When the session
+  ends without you asking, the trade service puts IBeam back to idle within 15
+  seconds, before it tries to log in by itself, so a session that ends at
+  night doesn't keep sending notifications (rarely, one may still arrive).
+  A login you don't approve within about 5 minutes stops. After 3 failed
+  logins in a row IBeam stops, well before IBKR's lock-out at 10.
 - Every stock buy and sell of the paper account is copied to your IBKR paper
   account in US dollars. A buy gets the paper trade's share of the paper
   account, applied to your budget, within the per-trade limit and what is left

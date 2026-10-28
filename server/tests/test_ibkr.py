@@ -261,19 +261,23 @@ def test_a_session_nobody_logged_in_gets_one_alert_and_no_login(ibeam):
     calls, alert, alerts, authed = ibeam
     check(alert)
     check(alert)
-    assert alerts == ["IBKR logged out"] and "/activate" not in calls   # one alert, not one a minute
+    assert alerts == ["IBKR logged out"] and "/activate" not in calls and calls.count("/deactivate") == 1
 
 
-def test_log_in_wakes_ibeam_then_it_goes_back_to_idle_and_the_session_is_kept(ibeam):
+def test_log_in_wakes_ibeam_and_it_stays_awake_while_logged_in(ibeam):
     calls, alert, alerts, authed = ibeam
     assert ibkr.ask_login()["ok"] and calls == ["/activate"] and ibkr.login_info()["loggingIn"]
     check(alert)   # waiting for you to approve in IBKR Mobile: no alert
     assert alerts == [] and "/deactivate" not in calls
     authed["now"] = True
     check(alert)
-    assert calls[-2:] == ["/deactivate", "/tickle"] and not ibkr.login_info()["loggingIn"]
     check(alert)
-    assert calls[-1] == "/tickle" and calls.count("/deactivate") == 1
+    assert "/deactivate" not in calls and not ibkr.login_info()["loggingIn"]
+    # The session ends at night: IBeam goes back to idle before it logs in by itself.
+    authed["now"] = False
+    check(alert)
+    check(alert)
+    assert calls.count("/deactivate") == 1 and alerts == ["IBKR logged out"]
 
 
 def test_an_unapproved_login_stops_after_a_few_minutes(ibeam):
@@ -282,6 +286,17 @@ def test_an_unapproved_login_stops_after_a_few_minutes(ibeam):
     ibkr._login["asked"] -= ibkr.LOGIN_WINDOW_MS
     check(alert)
     assert calls[-1] == "/deactivate" and alerts == ["IBKR logged out"]
+
+
+def test_a_stopped_gateway_counts_as_logged_out(monkeypatch):
+    import socket
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()   # nothing listens there
+    monkeypatch.setattr(ibkr, "WEB_URL", f"http://127.0.0.1:{port}")
+    with pytest.raises(ibkr.LoggedOut):
+        ibkr.Gateway()
 
 
 def test_the_app_asks_to_log_in(ibeam, monkeypatch):

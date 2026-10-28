@@ -12,11 +12,12 @@ targets stay with the app's paper account: when it sells, the shares are sold
 at market.
 
 Logging in: IBKR asks you to approve each login in IBKR Mobile (IB Key),
-about once a day. IBeam starts idle. "Log in to IBKR" in Settings wakes it
-(ask_login); it logs in and IBKR Mobile asks for your fingerprint. Once logged
-in, keep_alive puts IBeam back to idle and keeps the session open itself, so a
-login nobody asked for is never attempted: when the session runs out you get
-an alert to log in again.
+about once a day. IBeam starts idle, with IBKR's gateway stopped. "Log in to
+IBKR" in Settings wakes it (ask_login); it starts the gateway, logs in, and
+IBKR Mobile asks for your fingerprint. While logged in, IBeam keeps the
+session going. When the session ends without you asking, keep_alive puts
+IBeam back to idle before it can log in by itself, and you get an alert to log
+in again.
 
 Environment variables for this service (the IBKR username and password go to
 the ibeam container, not here; see docker-compose.snippet.yml):
@@ -112,6 +113,11 @@ def http(method: str, url: str, body=None, timeout: float = REQUEST_TIMEOUT_S):
         except (ValueError, AttributeError):
             err = None
         raise RuntimeError(f"IBKR: {err}" if err else f"IBKR answered {e.code}: {text[:120]}") from None
+    except urllib.error.URLError as e:
+        # IBeam runs IBKR's gateway only while it is logged in or logging in.
+        if isinstance(e.reason, ConnectionRefusedError) and url.startswith(WEB_URL or "-"):
+            raise LoggedOut("IBKR is not logged in") from None
+        raise
     return json.loads(text) if text.strip() else None
 
 
@@ -242,11 +248,12 @@ def ask_login() -> dict:
     return {"ok": ok, "error": None if ok else "IBeam didn't answer"}
 
 
-def keep_alive(alert: Callable[[str, str], None], every_ms: int = 60_000) -> None:
-    """Run by the scheduler. A logged-in session is kept open with IBKR's
-    tickle, and IBeam is put back to idle: it logs in only when you ask, so a
-    session that runs out at night doesn't send IB Key notifications over and
-    over. A logged-out session gets one alert."""
+def keep_alive(alert: Callable[[str, str], None], every_ms: int = 15_000) -> None:
+    """Run by the scheduler. While logged in, IBeam keeps the session going.
+    When the session ends without you asking to log in, IBeam is put back to
+    idle before it tries to log in by itself, so a session that runs out at
+    night doesn't send IB Key notifications over and over; you get one alert.
+    A login you don't approve in time is stopped the same way."""
     now = now_ms()
     if not configured() or now - _login["checkedAt"] < every_ms:
         return
@@ -255,26 +262,19 @@ def keep_alive(alert: Callable[[str, str], None], every_ms: int = 60_000) -> Non
         authed = bool((http("GET", WEB_URL + "/v1/api/iserver/auth/status") or {}).get("authenticated"))
     except LoggedOut:
         authed = False
-    except Exception as e:  # noqa: BLE001 - the gateway is down: nothing to keep alive
+    except Exception as e:  # noqa: BLE001 - the gateway doesn't answer: try again next time
         logger.info("IBKR's Web API didn't answer the check: %s", error_text(e))
         return
     asked = _login["asked"]
     if authed:
-        if asked:
-            _ibeam("/deactivate")
-            _login.update(asked=None, alerted=False)
-        try:
-            http("POST", WEB_URL + "/v1/api/tickle", {})
-        except Exception:  # noqa: BLE001
-            pass
+        _login.update(asked=None, alerted=False)
         return
     if asked and now - asked < LOGIN_WINDOW_MS:
-        return   # IBeam is still logging in, or waiting for you to approve
-    if asked:
-        _ibeam("/deactivate")
-        _login["asked"] = None
+        return   # IBeam is logging in, or waiting for you to approve
+    _login["asked"] = None
     if not _login["alerted"]:
         _login["alerted"] = True
+        _ibeam("/deactivate")
         alert("IBKR logged out", "Stock orders wait until you log in again from the app's Settings.")
 
 
