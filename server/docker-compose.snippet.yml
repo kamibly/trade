@@ -84,6 +84,10 @@ services:
       IBEAM_TWO_FA_SELECT_TARGET: "IB Key"
       # Stops after 3 failed logins in a row; IBKR locks the account for a day after 10.
       IBEAM_MAX_FAILED_AUTH: "3"
+      # Strategy A waits a few seconds after the approval before checking
+      # the session. The default (B) checks at once, finds no session yet,
+      # and kills the gateway, which sends another approval request.
+      IBEAM_AUTHENTICATION_STRATEGY: "A"
     volumes:
       # Lets the trade service reach the gateway (conf.yaml) and handles IB Key
       - ./trade_folder/ibeam-inputs:/srv/inputs
