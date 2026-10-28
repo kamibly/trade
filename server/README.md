@@ -166,7 +166,7 @@ With server alerts on, the app stops showing its own system notifications
 | `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
 | `SEC_CONTACT` | Your email, which the SEC asks every program to send with its requests. Insider buying and earnings dates load only once it is set; it is sent only to the SEC | none |
 | `NDAX_API_KEY`, `NDAX_API_SECRET`, `NDAX_USER_ID` | Real crypto orders on NDAX that follow the paper account's crypto trades. Create the key in NDAX under Settings, API Key, with trading permission only and no withdrawals; the user ID is under Personal User Info. Orders go out only in the app's Live mode | none |
-| `IBKR_HOST`, `IBKR_PORT` | IB Gateway for stock orders on Interactive Brokers: the gateway's name on the Docker network (`ib-gateway`) and its paper API port (`4004`). Orders go out only in the app's Paper mode | none |
+| `IBKR_WEB_URL`, `IBKR_IBEAM_URL` | IBKR's Web API for stock orders on Interactive Brokers, in the `ibeam` container: the gateway (`https://ibeam:5000`) and IBeam's own control port (`http://ibeam:5001`). Orders go out only in the app's Paper mode | none |
 
 The opportunity setups' outside data refreshes every hour (Fear & Greed,
 Kraken funding, new SEC Form 4 filings) and once a day (each company's earnings
@@ -254,25 +254,44 @@ and a **Real trading on NDAX** choice: Off, Dry run or Live.
 
 ## Stock trading on Interactive Brokers (paper for now)
 
-Add the `ib-gateway` service from `docker-compose.snippet.yml` with your IBKR
-username and password, and set `IBKR_HOST` and `IBKR_PORT` on the trade
-service. IB Gateway stays logged in to IBKR in paper mode and restarts each
-night by itself. Its API is reachable only from the trade service, not from
-outside the VM. The app's Settings then shows **Stock trading on IBKR**: Off or
-Paper.
+Orders go through IBKR's Web API, which accepts a buy as a dollar amount and so
+buys fractional shares. (IB Gateway's API refuses fractional stock orders.)
+The Web API runs in IBeam, a container that logs in to IBKR with a headless
+browser.
 
+1. Make sure IBKR Mobile is set up for IB Key (the fingerprint login). A
+   passkey alone can't be used: it only works on IBKR's own website.
+2. Allow fractions: Settings, Trading Permissions, Stocks, **Global (Trade in
+   Fractions)**, on the paper account (and later the live one).
+3. Add the `ibeam` service from `docker-compose.snippet.yml` with your IBKR
+   username and password. Copy this folder's `ibeam-inputs` with the rest of
+   `trade_folder`. Set `IBKR_WEB_URL` and `IBKR_IBEAM_URL` on the trade
+   service. Remove the old `ib-gateway` service: IBKR allows one session per
+   username, so the two would log each other out.
+4. In the app, Settings, **Stock trading on IBKR**: tap **Log in to IBKR**, then
+   approve the notification in IBKR Mobile. IBKR keeps the login for about a
+   day; when it ends you get an alert, and stock orders fail until you log in
+   again.
+
+- IBeam starts idle, with IBKR's gateway stopped, and logs in only after you
+  tap Log in. While logged in it keeps the session going. When the session
+  ends without you asking, the trade service puts IBeam back to idle within 15
+  seconds, before it tries to log in by itself, so a session that ends at
+  night doesn't keep sending notifications (rarely, one may still arrive).
+  IBKR Mobile gets one notification per login; one you don't approve within 3
+  minutes stops. After 3 failed
+  logins in a row IBeam stops, well before IBKR's lock-out at 10.
 - Every stock buy and sell of the paper account is copied to your IBKR paper
-  account in US dollars, in fractional shares (to 4 decimals). A buy gets the
-  paper trade's share of the paper account, applied to your budget, within the
-  per-trade limit and what is left of the budget. Under $10 it's skipped, since
-  the fee would outweigh it. Fractional trading has to be allowed on the IBKR
-  account (in IBKR's account settings, under trading permissions).
-- If the gateway doesn't answer or hangs up, the server tries twice more, 5
-  seconds apart. Orders connect as client 18 and the Settings check as client 17
-  (IBKR_CLIENT_ID and the next number), so neither waits on the other.
+  account in US dollars. A buy gets the paper trade's share of the paper
+  account, applied to your budget, within the per-trade limit and what is left
+  of the budget, and IBKR buys that dollar amount in fractional shares. Under
+  $10 it's skipped, since the fee would outweigh it. A sale sells the fraction
+  held.
+- Every request to IBKR gives up after 30 seconds. If the Web API doesn't
+  answer, the server tries twice more, 5 seconds apart.
 - Orders are market orders. Outside market hours IBKR holds them until the
   open, and the app shows them as waiting until they fill.
 - The paper account decides when to sell. A sale never sells more than IBKR
   actually holds, so it can't open a short.
-- Paper mode refuses to send anything if the gateway is logged in to a live
+- Paper mode refuses to send anything if IBKR is logged in to a live
   account (live accounts start with U, paper ones with D).

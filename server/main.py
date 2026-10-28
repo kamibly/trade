@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.16.3"
+VERSION = "1.17.3"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -117,10 +117,17 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
 
 @app.get("/ibkr")
 def get_ibkr(x_api_key: Optional[str] = Header(default=None)):
-    """Stock orders on Interactive Brokers: whether IB Gateway answers, the
-    account it is logged in to, its cash, what is held and the latest orders."""
+    """Stock orders on Interactive Brokers: whether the login is active, the
+    account, its cash, what is held and the latest orders."""
     check_api_key(x_api_key)
     return service.ibkr.summary(service.load_state(), service.update_state)
+
+
+@app.post("/ibkr/login")
+def post_ibkr_login(x_api_key: Optional[str] = Header(default=None)):
+    """"Log in to IBKR" in Settings: IBeam logs in and IBKR Mobile asks you to approve."""
+    check_api_key(x_api_key)
+    return service.ibkr.ask_login()
 
 
 @app.get("/ndax")

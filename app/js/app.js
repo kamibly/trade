@@ -21,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.23.2 (IBKR fractional shares)';
+export const APP_VERSION = '0.24.1 (IBKR Web API, IB Key login)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -2202,6 +2202,8 @@ function renderSettingsSummaries() {
     : !ib ? [`Checking… · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, '']
     : ib.fetchError ? [/404|Not Found/.test(ib.fetchError) ? 'Update your server' : 'Can\'t reach your server', 'bad']
     : !ib.configured ? ['Gateway not set up', '']
+    : ib.loggedOut && ib.login && ib.login.loggingIn ? ['Approve the login in IBKR Mobile', 'warn']
+    : ib.loggedOut ? [`Logged out of IBKR · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, 'warn']
     : ib.error || !acct ? [`Gateway not answering${acct && ib.accountAt ? ` · last reached ${timeAgo(ib.accountAt)}` : ''}`, 'bad']
     // The account is the last reading the server saved: older than 10 minutes, it may no longer be true.
     : ib.accountAt && Date.now() - ib.accountAt > 10 * 60_000 ? [`Not checked since ${timeAgo(ib.accountAt)} · ${acct.id}`, 'warn']
@@ -2268,7 +2270,43 @@ async function renderNdax() {
   ].filter(Boolean));
 }
 
-// IBKR: the account IB Gateway is logged in to, what is held and the latest orders.
+// The daily IBKR login: "Log in" wakes IBeam on the server, then IBKR Mobile
+// asks you to approve it. Settings checks again every 5 seconds meanwhile.
+let ibkrPoll = null;
+function pollIbkr(until) {
+  clearTimeout(ibkrPoll);
+  let left = 150;
+  const tick = async () => {
+    await renderIbkr();
+    ibkrPoll = --left > 0 && !until(state.ibkr || {}) && location.hash === '#settings' ? setTimeout(tick, 5000) : null;
+  };
+  ibkrPoll = setTimeout(tick, 5000);
+}
+
+function ibkrLogin(r) {
+  if (!r.configured || !r.loggedOut) return null;
+  const status = el('p', { class: 'small', role: 'status' });
+  const done = ib => !ib.loggedOut || !(ib.login && ib.login.loggingIn);
+  if (r.login && r.login.loggingIn) {
+    if (!ibkrPoll) pollIbkr(done);
+    return el('p', { class: 'small', text: 'Logging in. Approve the notification in IBKR Mobile when it comes. It can take a few minutes.' });
+  }
+  const login = async () => {
+    status.textContent = 'Logging in. IBKR Mobile asks you to approve in about a minute.';
+    try {
+      const res = await srv.serverFetch(state.settings, '/ibkr/login', { method: 'POST' });
+      if (!res.ok) { status.textContent = res.error; return; }
+      pollIbkr(done);
+    } catch (e) { status.textContent = e.message; }
+  };
+  return el('div', {},
+    el('p', { class: 'small', text: 'IBKR needs you to log in about once a day. Stock orders fail until you do.' }),
+    r.login && r.login.canLogIn ? el('button', { type: 'button', class: 'ghost', text: 'Log in to IBKR', onclick: login })
+      : el('p', { class: 'muted small', text: 'Set IBKR_IBEAM_URL on your server to log in from here (see the server README).' }),
+    status);
+}
+
+// IBKR: the account the Web API is logged in to, what is held and the latest orders.
 async function renderIbkr() {
   const box = $('ibkr-body');
   if (!serverOn()) {
@@ -2297,9 +2335,10 @@ async function renderIbkr() {
   const word = { filled: 'Filled', working: 'Waiting for the open', failed: 'Failed', skipped: 'Skipped' };
   const acct = r.account;
   box.replaceChildren(...[
-    !r.configured ? el('p', { class: 'small', text: 'IB Gateway is not set up on your server yet (the ib-gateway service and IBKR_HOST; see the server README).' })
-      : r.error ? el('p', { class: 'small', text: `IB Gateway didn't answer: ${r.error}` })
-      : acct && !acct.paper ? el('p', { class: 'small warn', text: `The gateway is logged in to live account ${acct.id}. Paper mode sends nothing to it.` }) : null,
+    !r.configured ? el('p', { class: 'small', text: 'IBKR is not set up on your server yet (the ibeam service and IBKR_WEB_URL; see the server README).' })
+      : ibkrLogin(r)
+      || (r.error ? el('p', { class: 'small', text: `IBKR didn't answer: ${r.error}` }) : null)
+      || (acct && !acct.paper ? el('p', { class: 'small warn', text: `IBKR is logged in to live account ${acct.id}. Paper mode sends nothing to it.` }) : null),
     r.lossToday ? el('p', { class: 'muted small', text: `Losses today: ${formatMoney(r.lossToday)}.` }) : null,
     unlisted.length ? el('div', { class: 'sub', text: `Also held: ${unlisted.map(([, p]) => `${p.symbol} ${p.qty} shares`).join(', ')}` }) : null,
     orders.length ? el('ul', { class: 'list' }, ...orders.map((o, i) => foldCard('holding', `ibkr:${o.at}:${i}`, [
