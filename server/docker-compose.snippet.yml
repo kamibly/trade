@@ -46,36 +46,8 @@ services:
       NDAX_API_KEY: ""
       NDAX_API_SECRET: ""
       NDAX_USER_ID: ""
-      # Optional: stock orders on Interactive Brokers through the ib-gateway
-      # service below. Nothing is sent until you pick Paper in the app.
-      IBKR_HOST: "ib-gateway"
-      IBKR_PORT: "4004"
     # Training briefly needs about 1 GB; this keeps it from starving jobspy-service.
     mem_limit: 1500m
     volumes:
       # Keeps devices, synced holdings, scan results and models across restarts
       - ./trade_folder/trade-data:/data
-
-  # Optional: IB Gateway, which stays logged in to Interactive Brokers so the
-  # trade service can place stock orders (see ibkr.py). It needs about 1 GB of
-  # memory. Its API is only reachable from containers on this Docker network:
-  # no ports are opened on the VM. Then run:
-  #   docker compose up -d ib-gateway
-  ib-gateway:
-    image: ghcr.io/gnzsnz/ib-gateway:stable
-    container_name: ib-gateway
-    restart: unless-stopped
-    environment:
-      # Your IBKR username and password. For now, your own login in paper mode;
-      # before live trading, the second username (no withdrawals).
-      TWS_USERID: ""
-      TWS_PASSWORD: ""
-      TRADING_MODE: "paper"
-      READ_ONLY_API: "no"
-      # Restarts each night without asking you to approve the login again.
-      AUTO_RESTART_TIME: "11:59 PM"
-      TWOFA_TIMEOUT_ACTION: "restart"
-      RELOGIN_AFTER_TWOFA_TIMEOUT: "yes"
-      TIME_ZONE: "America/Toronto"
-      JAVA_HEAP_SIZE: "768"
-    mem_limit: 1200m

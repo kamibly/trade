@@ -166,7 +166,6 @@ With server alerts on, the app stops showing its own system notifications
 | `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
 | `SEC_CONTACT` | Your email, which the SEC asks every program to send with its requests. Insider buying and earnings dates load only once it is set; it is sent only to the SEC | none |
 | `NDAX_API_KEY`, `NDAX_API_SECRET`, `NDAX_USER_ID` | Real crypto orders on NDAX that follow the paper account's crypto trades. Create the key in NDAX under Settings, API Key, with trading permission only and no withdrawals; the user ID is under Personal User Info. Orders go out only in the app's Live mode | none |
-| `IBKR_HOST`, `IBKR_PORT` | IB Gateway for stock orders on Interactive Brokers: the gateway's name on the Docker network (`ib-gateway`) and its paper API port (`4004`). Orders go out only in the app's Paper mode | none |
 
 The opportunity setups' outside data refreshes every hour (Fear & Greed,
 Kraken funding, new SEC Form 4 filings) and once a day (each company's earnings
@@ -251,23 +250,3 @@ and a **Real trading on NDAX** choice: Off, Dry run or Live.
   paper account sells them.
 - NDAX's list of coins (those sold for CAD) loads once a day without the key;
   crypto paper trades buy only those coins.
-
-## Stock trading on Interactive Brokers (paper for now)
-
-Add the `ib-gateway` service from `docker-compose.snippet.yml` with your IBKR
-username and password, and set `IBKR_HOST` and `IBKR_PORT` on the trade
-service. IB Gateway stays logged in to IBKR in paper mode and restarts each
-night by itself. Its API is reachable only from the trade service, not from
-outside the VM. The app's Settings then shows **Stock trading on IBKR**: Off or
-Paper.
-
-- Every stock buy and sell of the paper account is copied to your IBKR paper
-  account in US dollars, in whole shares. A buy gets the paper trade's share of
-  the paper account, applied to your budget, within the per-trade limit and
-  what is left of the budget. If one share costs more than that, it's skipped.
-- Orders are market orders. Outside market hours IBKR holds them until the
-  open, and the app shows them as waiting until they fill.
-- The paper account decides when to sell. A sale never sells more than IBKR
-  actually holds, so it can't open a short.
-- Paper mode refuses to send anything if the gateway is logged in to a live
-  account (live accounts start with U, paper ones with D).

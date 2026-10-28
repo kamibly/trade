@@ -18,7 +18,6 @@ Environment variables:
     SEC_CONTACT        - your email, which the SEC asks for in its requests; insider buying
                          and earnings dates load only once it is set (see events.py)
     NDAX_API_KEY, NDAX_API_SECRET, NDAX_USER_ID - real crypto orders on NDAX (see ndax.py)
-    IBKR_HOST, IBKR_PORT - IB Gateway, for stock orders on Interactive Brokers (see ibkr.py)
 """
 import json
 import logging
@@ -31,7 +30,6 @@ from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-import ibkr
 import ndax
 
 logger = logging.getLogger("trade-service")
@@ -232,10 +230,6 @@ def clean_profile(raw: dict) -> dict:
             "ndaxBudget": round(_num(s.get("ndaxBudget"), 100, 0, 1_000_000), 2),
             "ndaxMaxTrade": round(_num(s.get("ndaxMaxTrade"), 25, 0, 1_000_000), 2),
             "ndaxDailyLoss": round(_num(s.get("ndaxDailyLoss"), 20, 0, 1_000_000), 2),
-            "ibkrMode": s.get("ibkrMode") if s.get("ibkrMode") in ibkr.MODES else "off",
-            "ibkrBudget": round(_num(s.get("ibkrBudget"), 1000, 0, 10_000_000), 2),
-            "ibkrMaxTrade": round(_num(s.get("ibkrMaxTrade"), 250, 0, 10_000_000), 2),
-            "ibkrDailyLoss": round(_num(s.get("ibkrDailyLoss"), 50, 0, 10_000_000), 2),
             "setups": {k: bool((s.get("setups") or {}).get(k, True)) if isinstance(s.get("setups"), dict) else True for k in SETUP_IDS},
         },
         "updatedAt": int(_num(raw.get("updatedAt"), now_ms(), 0, 1e15)),
@@ -532,7 +526,6 @@ def save_paper(st: dict, result: dict) -> None:
     if result.get("paperEvents"):
         st["paperEvents"] = (list(reversed(result["paperEvents"])) + st.get("paperEvents", []))[:50]
         ndax.queue_events(st, result["paperEvents"])
-        ibkr.queue_events(st, result["paperEvents"])
     st["filterTrial"] = filter_trial(st)
     st["paperBudgets"] = follow_results(st)
 
@@ -1274,11 +1267,6 @@ def run_whatif(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dic
         lock.release()
 
 
-def run_ibkr() -> List[dict]:
-    """IBKR orders for the paper account's latest stock buys and sells."""
-    return ibkr.process(load_state, update_state, tz())
-
-
 def run_ndax() -> List[dict]:
     """Real NDAX orders for the paper account's latest crypto buys and sells."""
     return ndax.process(load_state, update_state, tz())
@@ -1316,8 +1304,6 @@ def start_scheduler() -> None:
                     _spawn(run_events)
                 if whatif_due(state, now):
                     _spawn(run_whatif)
-                if state.get("ibkrQueue"):
-                    _spawn(run_ibkr)
                 if state.get("ndaxQueue"):
                     _spawn(run_ndax)
                 if ndax.coins_due(state, now):

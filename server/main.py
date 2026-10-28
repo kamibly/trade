@@ -22,7 +22,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.15.0"
+VERSION = "1.18.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -113,14 +113,6 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
     return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {}),
             "shadow": state.get("paperShadow"), "filterTrial": state.get("filterTrial"), "budgets": state.get("paperBudgets"),
             "skips": (state.get("paper") or {}).get("skips", {}), "whatIf": (state.get("whatIf") or {}).get("results", {})}
-
-
-@app.get("/ibkr")
-def get_ibkr(x_api_key: Optional[str] = Header(default=None)):
-    """Stock orders on Interactive Brokers: whether IB Gateway answers, the
-    account it is logged in to, its cash, what is held and the latest orders."""
-    check_api_key(x_api_key)
-    return service.ibkr.summary(service.load_state(), service.update_state)
 
 
 @app.get("/ndax")
