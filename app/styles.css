@@ -461,3 +461,18 @@ details.why-fold[open] > summary::before { content: '▾ '; }
 .why-votes li, .why-steps li { display: block; border: 0; background: none; border-radius: 0; box-shadow: none; }
 .why-votes li { padding: 4px 0; margin: 0; }
 .why-votes li > div:first-child > span:last-child { white-space: nowrap; }
+
+/* Scoreboard tab */
+.sb-tools { display: flex; gap: 8px; margin: 8px 0; }
+.sb-tools .seg { flex: 1; display: flex; }
+.sb-tools .seg button { flex: 1; padding: 6px 4px; }
+.sb-table { padding: 0; overflow: hidden; margin-bottom: 8px; }
+.sb-row { display: grid; grid-template-columns: 1.7fr .7fr .8fr .8fr .6fr; gap: 4px; padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.sb-row:last-child { border-bottom: 0; }
+.sb-row > span:not(:first-child) { text-align: right; }
+.sb-row.head { cursor: default; padding-top: 7px; padding-bottom: 7px; }
+.sb-row.sub .sb-name { padding-left: 14px; color: var(--muted); }
+.sb-row.open { background: var(--panel-2); }
+.sb-calls { margin: 0; padding: 6px 12px 8px; list-style: none; border-bottom: 1px solid var(--line); background: var(--bg); }
+.sb-calls li { display: grid; grid-template-columns: 1.4fr 1.2fr .8fr; gap: 4px; padding: 3px 0; }
+.sb-calls li > span:last-child { text-align: right; }

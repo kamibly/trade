@@ -21,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.25.0 (no IBKR, score breakdown)';
+export const APP_VERSION = '0.26.0 (scoreboard)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -779,10 +779,11 @@ function shortList(rows, card) {
   return [ul, more].filter(Boolean);
 }
 
-// Watchlist, Opportunities and Market: one at a time, the last one remembered.
-const SIGNAL_TABS = [['watchlist', 'Watchlist', 'signals-body'], ['opps', 'Opportunities', 'opps-body'], ['market', 'Market', 'market-body']];
+// Watchlist, Opportunities, Market and Scoreboard: one at a time, the last one remembered.
+const SIGNAL_TABS = [['watchlist', 'Watchlist', 'signals-body'], ['opps', 'Opportunities', 'opps-body'], ['market', 'Market', 'market-body'], ['score', 'Scoreboard', 'score-body']];
+const SERVER_TABS = ['opps', 'score'];
 function renderSignalTabs() {
-  const tabs = serverOn() ? SIGNAL_TABS : SIGNAL_TABS.filter(([id]) => id !== 'opps');
+  const tabs = serverOn() ? SIGNAL_TABS : SIGNAL_TABS.filter(([id]) => !SERVER_TABS.includes(id));
   const on = tabs.some(([id]) => id === state.settings.signalsTab) ? state.settings.signalsTab : 'watchlist';
   const m = state.market || {};
   const tf = state.settings.alertTf;
@@ -797,6 +798,116 @@ function renderSignalTabs() {
     onclick: () => { state.settings = store.saveSettings({ signalsTab: id }); renderSignalTabs(); },
   })));
   for (const [id, , body] of SIGNAL_TABS) $(body).hidden = id !== on;
+  if (on === 'score') renderScoreboard();
+}
+
+// The Scoreboard tab: the server grades every live call 10 candles later
+// (server/scoreboard.py). Calls first, then each voter, then the trade filter.
+const SB_KINDS = [['all', 'All'], ['stock', 'Stocks'], ['crypto', 'Crypto']];
+const SB_DAYS = [[30, '30d'], [90, '90d'], [0, 'All']];
+const sbState = { kind: 'all', days: 30, data: null, key: null, loading: false, error: null, calls: {} };
+
+async function loadScoreboard() {
+  const key = `${sbState.kind}:${sbState.days}`;
+  sbState.loading = true;
+  sbState.error = null;
+  renderScoreboard();
+  try {
+    sbState.data = await srv.serverFetch(state.settings, `/scoreboard?kind=${sbState.kind}&days=${sbState.days}`);
+    sbState.key = key;
+    sbState.at = Date.now();
+  } catch (e) {
+    sbState.error = e.message;
+  }
+  sbState.loading = false;
+  renderScoreboard();
+}
+
+async function loadSourceCalls(id) {
+  const k = `${id}:${sbState.kind}`;
+  sbState.calls[k] = { loading: true };
+  try {
+    const r = await srv.serverFetch(state.settings, `/scoreboard/calls?source=${encodeURIComponent(id)}&kind=${sbState.kind}`);
+    sbState.calls[k] = { list: r.calls };
+  } catch (e) {
+    sbState.calls[k] = { error: e.message };
+  }
+  renderScoreboard();
+}
+
+function sbCalls(id) {
+  const c = sbState.calls[`${id}:${sbState.kind}`];
+  if (!c) { loadSourceCalls(id); return el('p', { class: 'muted small sb-calls', text: 'Loading…' }); }
+  if (c.loading) return el('p', { class: 'muted small sb-calls', text: 'Loading…' });
+  if (c.error) return el('p', { class: 'muted small sb-calls', text: `Couldn't load: ${c.error}` });
+  if (!c.list.length) return el('p', { class: 'muted small sb-calls', text: 'No graded calls yet.' });
+  const day = t => new Date(t * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return el('ul', { class: 'sb-calls small' }, ...c.list.map(x => el('li', {},
+    el('span', { text: `${x.key.split(':')[1]} · ${day(x.t)}${x.tf !== '1D' ? ` · ${x.tf}` : ''}` }),
+    el('span', { class: 'muted', text: `${x.dir > 0 ? 'Up' : 'Down'} · price ${fmtPct(x.ret)}` }),
+    el('span', { class: upDown(x.r), text: x.right ? '✓ right' : '✗ wrong' }))));
+}
+
+function sbRow(r, { min, sub = false, open = null } = {}) {
+  const scored = Number.isFinite(r.right);
+  const id = `sb:${r.id}`;
+  const shown = open !== null ? open : state.openCards.has(id);
+  const row = el('div', {
+    class: `sb-row${sub ? ' sub' : ''}${shown ? ' open' : ''}`, role: 'button', tabindex: '0',
+    onclick: () => { if (state.openCards.has(id)) state.openCards.delete(id); else state.openCards.add(id); renderScoreboard(); },
+  },
+  el('span', { class: 'sb-name', text: r.label }),
+  el('span', { class: scored ? '' : 'muted', text: scored ? `${Math.round(r.right * 100)}%` : '–' }),
+  el('span', { class: scored ? upDown(r.avg) : 'muted', text: scored ? fmtPct(r.avg) : '–' }),
+  el('span', { class: scored ? upDown(r.edge) : 'muted', text: scored ? fmtPct(r.edge) : '–' }),
+  el('span', { class: scored ? '' : 'muted', text: scored ? String(r.n) : `${r.n}/${min}` }));
+  return [row, shown ? (r.methods ? null : sbCalls(r.id)) : null];
+}
+
+function sbTable(head, rows, min) {
+  return el('div', { class: 'card sb-table' },
+    el('div', { class: 'sb-row head muted small' }, ...[head, 'Right', 'Avg', 'vs hold', 'Calls'].map(t => el('span', { text: t }))),
+    ...rows.flatMap(r => {
+      if (!r.methods) return sbRow(r, { min });
+      const open = state.openCards.has(`sb:${r.id}`);
+      return [...sbRow(r, { min, open }), ...(open ? r.methods.flatMap(m => sbRow(m, { min, sub: true })) : [])];
+    }));
+}
+
+function renderScoreboard() {
+  const box = $('score-body');
+  if (!serverOn()) { box.replaceChildren(); return; }
+  const key = `${sbState.kind}:${sbState.days}`;
+  const stale = sbState.key !== key || Date.now() - sbState.at > 10 * 60_000;
+  if (stale && !sbState.loading && !sbState.error) { loadScoreboard(); return; }
+  const seg = (list, cur, set) => el('div', { class: 'seg', role: 'group' }, ...list.map(([v, label]) => el('button', {
+    type: 'button', class: v === cur ? 'on' : '', text: label,
+    onclick: () => { set(v); sbState.key = null; sbState.error = null; renderScoreboard(); },
+  })));
+  const tools = el('div', { class: 'sb-tools' },
+    seg(SB_KINDS, sbState.kind, v => { sbState.kind = v; }),
+    seg(SB_DAYS, sbState.days, v => { sbState.days = v; }));
+  const d = sbState.data;
+  if (!d || sbState.key !== key) {
+    box.replaceChildren(tools, el('p', { class: 'muted small', text: sbState.error ? `Couldn't load the scoreboard: ${sbState.error}` : 'Loading…' }));
+    return;
+  }
+  const min = d.minCalls;
+  const note = text => el('p', { class: 'muted small', text });
+  const started = d.since ? `Recording since ${new Date(d.since).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : 'Not recording yet: it starts with the next scan';
+  box.replaceChildren(tools,
+    note(`${started} · ${d.pending} call${d.pending === 1 ? '' : 's'} waiting for ${d.horizon} more candles. Tap a row for its calls.`),
+    el('h2', { class: 'section', text: "1. The app's calls" }),
+    note(`The score's Buys and Sells, graded ${d.horizon} candles later after fees. A Sell is right when the price then fell. Bars to beat: 50% right, and 0% vs hold (the average move of every chart of the same kind).`),
+    sbTable('Call', d.calls, min),
+    el('h2', { class: 'section', text: '2. The voters' }),
+    note('Each voter graded on its own firm votes, whether or not the score acted on them. Tap a group for its methods.'),
+    sbTable('Voter', d.groups, min),
+    d.ml.length ? sbTable('Machine learning', d.ml, min) : null,
+    el('h2', { class: 'section', text: '3. The trade filter' }),
+    note(`How the Buys it kept at full size or bigger, made smaller or blocked did over the next ${d.horizon} candles.`),
+    sbTable('Buys', d.filter, min),
+    note(`Rows under ${min} calls show their count and no score yet.`));
 }
 
 // "Tuned: Buy +25, Sell -30, dip mode · test +8% vs +3% standard"

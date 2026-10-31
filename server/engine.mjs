@@ -133,10 +133,40 @@ async function score(item, tf, settings, weightsCache, deps, models, { onS, mood
   const filter = sig.action === 'buy' && models && models.filter
     ? judge(models.filter, S, last, baseVotesAt(S, last), { type: item.type, market: tf === '1D' && mood ? mood[item.type] : NaN }, settings)
     : null;
-  return { ...summarize(item, sig, tf, w), at: deps.now(), ...(source ? { source } : {}), ...(filter ? { filter } : {}) };
+  return { ...summarize(item, sig, tf, w), at: deps.now(), ...(source ? { source } : {}), ...(filter ? { filter } : {}), obs: observe(item, tf, sig, filter) };
 }
 
-const noWhy = ({ why, ...rest }) => rest;
+// The scoreboard's record of one scored candle (see scoreboard.py): the call,
+// the price, and which voters leaned firmly up or down. Each method and ML
+// model is a voter, and so is each method group (its methods' average vote).
+const FIRM = 0.3;
+function observe(item, tf, sig, filter) {
+  const voters = {};
+  const up = [];
+  const down = [];
+  const groups = {};
+  const lean = (id, vote) => { if (vote >= FIRM) up.push(id); else if (vote <= -FIRM) down.push(id); };
+  for (const v of sig.votes) {
+    voters[v.id] = [v.name, v.group];
+    lean(v.id, v.vote);
+    if (v.group !== 'ml') (groups[v.group] ||= []).push(v.vote);
+  }
+  for (const [g, list] of Object.entries(groups)) lean(`g:${g}`, list.reduce((a, b) => a + b, 0) / list.length);
+  return {
+    key: key(item), type: item.type, tf, t: sig.time, p: sig.entry, a: sig.action, up, down, voters,
+    ...(filter ? { f: filter.size } : {}),
+  };
+}
+
+// The scoreboard's records of a run, with the voters' names sent once.
+function observations(rows) {
+  const voters = {};
+  const list = rows.filter(r => r.obs).map(({ obs: { voters: v, ...o } }) => (Object.assign(voters, v), o));
+  return { observations: list, voters };
+}
+
+const noObs = ({ obs, ...rest }) => rest;
+const noWhy = ({ why, obs, ...rest }) => rest;
 
 // Runs `fn` over `items` with a few at a time, so big scans finish without hammering a source.
 async function pool(items, size, fn) {
@@ -177,6 +207,8 @@ export async function runWatch(job, deps = defaultDeps) {
       errors[key(item)] = e.message;
     }
   });
+  const seen = observations(Object.values(signals));
+  for (const k of Object.keys(signals)) signals[k] = noObs(signals[k]);
   const held = new Set((job.holdings || []).map(h => h.key));
   const changes = {};
   for (const [k, s] of Object.entries(signals)) {
@@ -220,7 +252,7 @@ export async function runWatch(job, deps = defaultDeps) {
   // The paper account trades the same signals: buys a Buy it doesn't hold yet
   // (within 1 ATR of where it began), sells on a Sell, the stop-loss or the target.
   const paperEvents = bothAccounts(job, (acc, useFilter) => paper.step(acc, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsWith(job.budgets), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null }), deps);
-  return { signals, alerts, changes, holdingsAlerted, weights, errors, paper: job.paper || null, paperEvents, shadow: job.shadow || null };
+  return { signals, alerts, changes, holdingsAlerted, weights, errors, paper: job.paper || null, paperEvents, shadow: job.shadow || null, ...seen };
 }
 
 // Runs a paper step on the account (with the trade filter, unless switched
@@ -436,6 +468,7 @@ export async function runMarket(job, deps = defaultDeps) {
     levels: Object.fromEntries(results.filter(r => r.type === 'crypto').map(r => [r.key, { entry: r.entry, atr: r.atr }])),
     scope,
     mood,
+    ...observations(results),
     ...setups,
   };
 }
