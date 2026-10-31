@@ -7,8 +7,9 @@ import {
 import { PriceChart } from './chart.js';
 import * as F from './forecast.js';
 import {
-  analyze, signalAt, scoreVotes, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
+  analyze, signalAt, scoreVotes, scoreParts, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
 } from './signals.js';
+import { METHOD_INFO, SCORE_STEPS } from './explain.js';
 import { scanItem, alertFor, manualRule, autoTune, learnKey, backtestOptions, learnedFrom, ruleOf, tradeRecordLine } from './scanner.js';
 import { SETUPS, recordLine, proven as setupProven, MIN_PROVEN } from './setups.js';
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
@@ -20,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.22.1 (stocks / crypto filter)';
+export const APP_VERSION = '0.25.0 (no IBKR, score breakdown)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -468,6 +469,54 @@ function pickChartSymbol() {
 // ---- Analysis under the chart ----------------------------------------------
 
 const fmtScore = v => `${v > 0 ? '+' : ''}${Math.round(v)}`;
+const fmtVote = v => (v === 0 ? '0.00' : `${v > 0 ? '+' : '−'}${Math.abs(v).toFixed(2)}`);
+const fmtPts = v => (Math.abs(v) < 0.05 ? '0.0' : `${v > 0 ? '+' : '−'}${Math.abs(v).toFixed(1)}`);
+
+// A folded section that remembers whether it was open (by `id`).
+function fold(id, summary, ...body) {
+  // Taps inside stay here: they don't fold the card it sits in.
+  return el('details', { class: 'why-fold', open: state.openCards.has(id), onclick: e => e.stopPropagation(), ontoggle: e => { if (e.currentTarget.open) state.openCards.add(id); else state.openCards.delete(id); } },
+    el('summary', {}, ...[].concat(summary)), ...body);
+}
+
+// How a score added up, group by group, with each method's vote × weight.
+// votes: [{ id, name, group, vote, weight, note?, hit? }]. `id` keeps what is open.
+function scoreTable(votes, id) {
+  const { parts, groups } = scoreParts(votes);
+  const order = Object.keys(GROUPS);
+  parts.sort((a, b) => order.indexOf(a.group) - order.indexOf(b.group));
+  return el('div', {}, el('div', { class: 'why-table' },
+    el('div', { class: 'why-row why-head muted small' }, el('span', { text: 'Group' }), el('span', { text: 'Vote' }), el('span', { text: 'Adds' })),
+    ...parts.map(g => fold(`${id}:${g.group}`, [
+      el('span', { text: GROUPS[g.group] || g.group }),
+      el('span', { class: upDown(g.vote), text: Number.isFinite(g.vote) ? fmtVote(g.vote) : '–' }),
+      el('span', { class: upDown(g.adds), text: Number.isFinite(g.vote) ? fmtPts(g.adds) : 'not counted' }),
+    ], el('ul', { class: 'why-votes' }, ...g.votes.map(v => el('li', {},
+      el('div', {}, el('span', { text: v.name }), el('span', { class: `small ${upDown(v.vote)}`, text: `${fmtVote(v.vote)} × ${v.weight.toFixed(2)}${v.weight > 0 ? '' : ' (no vote)'}` })),
+      v.note ? el('div', { class: 'muted small', text: `Now: ${v.note}${Number.isFinite(v.hit) ? ` · right ${Math.round(v.hit * 100)}% in the backtest` : ''}` }) : null,
+      METHOD_INFO[v.id] ? el('div', { class: 'muted small', text: METHOD_INFO[v.id] }) : null))),
+      Number.isFinite(g.vote) ? el('div', { class: 'muted small', text: `Group vote ${fmtVote(g.vote)} = Σ(vote × weight) ÷ Σ weight; adds 100 × ${fmtVote(g.vote)} ÷ ${groups} groups = ${fmtPts(g.adds)}` }) : el('div', { class: 'muted small', text: 'Every method here has weight 0, so this group is left out.' })))),
+    fold(`${id}:how`, el('span', { text: 'How the score is worked out' }),
+      el('ol', { class: 'small why-steps' }, ...SCORE_STEPS.map(t => el('li', { text: t })))));
+}
+
+const snapVotes = snap => snap.votes.map(([id, name, group, vote, weight]) => ({ id, name, group, vote, weight }));
+const lineText = (rule, side) => (rule ? `${side === 'sell' ? 'Sell' : 'Buy'} line ${fmtScore(side === 'sell' ? rule.sell : rule.buy)}${rule.mode === 'dip' && side !== 'sell' ? ' (buy the dip)' : ''}` : '');
+
+// A paper trade's saved score: "Why it bought" or "Why it sold".
+function whyFold(snap, id, side, filter = null) {
+  if (!snap || !Array.isArray(snap.votes)) return null;
+  const when = Number.isFinite(snap.time) ? new Date(snap.time * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
+  const parts = scoreParts(snapVotes(snap)).parts;
+  const pulls = side === 'sell' ? parts.filter(g => g.adds < -0.05).sort((a, b) => a.adds - b.adds).slice(0, 3) : [];
+  return fold(id, [el('span', { text: side === 'sell' ? 'Why it sold' : 'Why it bought' }), el('span', { class: 'muted small', text: ` score ${fmtScore(snap.score)}${when ? ` · candle of ${when}` : ''}` })],
+    el('div', { class: 'why-top small' },
+      el('span', {}, 'Score ', el('strong', { class: upDown(snap.score), text: fmtPts(snap.score) })),
+      el('span', { class: 'muted', text: lineText(snap.rule, side) })),
+    pulls.length ? el('div', { class: 'muted small', text: `Pulled down most by ${pulls.map(g => `${GROUPS[g.group] || g.group} ${fmtPts(g.adds)}`).join(' · ')}` }) : null,
+    scoreTable(snapVotes(snap), id),
+    filter ? el('div', { class: 'why-filter small', text: filterText(filter) }) : null);
+}
 
 function scoreMeter(score) {
   // A bar from the middle: right and green for buy, left and red for sell.
@@ -589,6 +638,10 @@ function renderAnalysis() {
       rule.mode === 'dip' ? el('p', { class: 'muted small', text: dipLine(sig.ctx) }) : null,
       el('p', { class: 'small', text: levelsLine(sig) }),
       el('p', { class: 'muted small', text: `Stop is ${state.settings.stopAtr} × ATR and target ${state.settings.takeAtr} × ATR from the entry. ${bt ? 'Methods are weighted by how often they were right in the backtest below.' : 'Methods count equally until there is enough history to backtest.'} Not financial advice: these methods are often wrong.` })),
+    el('div', { class: 'card why-card' },
+      el('h3', { text: 'How this score was worked out' }),
+      el('p', { class: 'muted small', text: `Each group's votes are averaged using their weights, then the groups count equally. ${lineText(rule, 'buy')}, ${lineText(rule, 'sell')}.` }),
+      scoreTable(sig.votes.map(v => ({ ...v, weight: (weights || {})[v.id] ?? 1, hit: bt && bt.stats[v.id] ? bt.stats[v.id].hit : NaN })), 'why:chart')),
     bt ? backtestCard(bt) : el('p', { class: 'muted small', text: 'The backtest needs about 180 candles; this chart has fewer.' }),
     ...Object.entries(GROUPS).filter(([g]) => byGroup[g]).map(([g, title]) => el('div', { class: 'card votes' },
       el('h3', { text: title }),
@@ -1753,7 +1806,8 @@ function renderPaper({ force = false } = {}) {
         ? `Trailing stop at ${formatMoney(p.stop)}${p.stop > p.entry ? ' (above what it cost)' : ''}, highest ${formatMoney(p.high || p.entry)}; no target`
         : `Sells at the stop ${formatMoney(p.stop)}${p.lock && p.stop > p.entry ? ' (profit locked)' : ''} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}${p.lock ? `; the stop keeps part of the best gain (highest ${formatMoney(p.high || p.entry)})` : ''}` }),
       outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
-      p.filter ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
+      p.filter && !p.why ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
+      whyFold(p.why, `why:${p.key}:${p.openedAt}`, 'buy', p.filter),
       el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
       whatIfRow(p, pnl, paper.exitOf(p), true),
       paperControls(p, price),
@@ -1786,6 +1840,8 @@ function renderPaper({ force = false } = {}) {
       el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
       el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)}` }),
       el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }),
+      whyFold(t.why, `why:${t.key}:${t.openedAt}`, 'buy', t.filter),
+      whyFold(t.whySold, `whysold:${t.key}:${t.closedAt}`, 'sell'),
       whatIfRow(t, t.pnl, t.sellsAt, false),
     ], () => { const item = findItem(t.key); if (item) openChart(item, true); });
     return [
@@ -2139,18 +2195,6 @@ function renderSettingsSummaries() {
   $('sum-ndax').textContent = ndText;
   $('sum-ndax').className = `set-sum ${ndTone}`;
   for (const b of document.querySelectorAll('#ndax-mode-btns button')) b.classList.toggle('on', b.dataset.mode === mode);
-  const ibMode = s.ibkrMode === 'paper' ? 'paper' : 'off';
-  const ib = state.ibkr;
-  const acct = ib && ib.account;
-  const [ibText, ibTone] = !serverOn() ? ['Needs your server', '']
-    : !ib ? [`Checking… · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, '']
-    : ib.fetchError ? [/404|Not Found/.test(ib.fetchError) ? 'Update your server' : 'Can\'t reach your server', 'bad']
-    : !ib.configured ? ['Gateway not set up', '']
-    : ib.error || !acct ? ['Gateway not answering', 'bad']
-    : [`Connected · ${acct.paper ? 'paper' : 'live'} ${acct.id}${Number.isFinite(acct.available) ? ` · ${formatMoney(acct.available)} ${acct.currency || ''}` : ''} · ${ibMode === 'paper' ? 'Paper' : 'Off'}`, acct.paper ? 'good' : 'warn'];
-  $('sum-ibkr').textContent = ibText;
-  $('sum-ibkr').className = `set-sum ${ibTone}`;
-  for (const b of document.querySelectorAll('#ibkr-mode-btns button')) b.classList.toggle('on', b.dataset.mode === ibMode);
   $('sum-display').textContent = `Charts open on ${tfName(s.timeframe || '1D')}${s.showCad ? ' · CAD shown' : ''}`;
   $('sum-data').textContent = `${s.twelveKey ? 'Stock key saved' : 'No stock key'} · backup`;
 }
@@ -2210,58 +2254,6 @@ async function renderNdax() {
   ].filter(Boolean));
 }
 
-// IBKR: the account IB Gateway is logged in to, what is held and the latest orders.
-async function renderIbkr() {
-  const box = $('ibkr-body');
-  if (!serverOn()) {
-    box.replaceChildren(el('p', { class: 'muted small', text: 'Connect your server first; it places the orders.' }));
-    return;
-  }
-  let r;
-  try {
-    r = await srv.serverFetch(state.settings, '/ibkr');
-    state.ibkr = r;
-  } catch (e) {
-    state.ibkr = { fetchError: e.message };
-    renderSettingsSummaries();
-    box.replaceChildren(el('p', { class: 'muted small', text: /404|Not Found/.test(e.message) ? 'Update your server to use IBKR.' : `Couldn't reach your server: ${e.message}` }));
-    return;
-  }
-  renderSettingsSummaries();
-  const orders = r.orders || [];
-  const held = Object.entries(r.positions || {});
-  const heldBuy = new Map();
-  for (const [key, p] of held) {
-    const i = orders.findIndex(o => o.side === 'buy' && o.key === key && ['filled', 'working'].includes(o.status) && (!p.at || o.at <= p.at + 60_000));
-    if (i >= 0) heldBuy.set(i, p);
-  }
-  const unlisted = held.filter(([, p]) => ![...heldBuy.values()].includes(p));
-  const word = { filled: 'Filled', working: 'Waiting for the open', failed: 'Failed', skipped: 'Skipped' };
-  const acct = r.account;
-  box.replaceChildren(...[
-    !r.configured ? el('p', { class: 'small', text: 'IB Gateway is not set up on your server yet (the ib-gateway service and IBKR_HOST; see the server README).' })
-      : r.error ? el('p', { class: 'small', text: `IB Gateway didn't answer: ${r.error}` })
-      : acct && !acct.paper ? el('p', { class: 'small warn', text: `The gateway is logged in to live account ${acct.id}. Paper mode sends nothing to it.` }) : null,
-    r.lossToday ? el('p', { class: 'muted small', text: `Losses today: ${formatMoney(r.lossToday)}.` }) : null,
-    unlisted.length ? el('div', { class: 'sub', text: `Also held: ${unlisted.map(([, p]) => `${p.symbol} ${p.qty} shares`).join(', ')}` }) : null,
-    orders.length ? el('ul', { class: 'list' }, ...orders.map((o, i) => foldCard('holding', `ibkr:${o.at}:${i}`, [
-      el('div', {},
-        el('div', { class: 'sym' }, el('span', { class: `latest-kind ${o.side === 'buy' ? 'good' : 'bad'}`, text: o.side === 'buy' ? 'Buy' : 'Sell' }), o.symbol,
-          el('span', { class: 'badge', text: word[o.status] || o.status }),
-          heldBuy.has(i) ? el('span', { class: 'badge held', text: 'Held' }) : null),
-        el('div', { class: 'sub', text: new Date(o.at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) })),
-      el('div', { class: `paper-gain ${o.side === 'sell' ? upDown(o.pnl) : ''}`, text: o.side === 'sell' && Number.isFinite(o.pnl) ? signed(o.pnl) : Number.isFinite(o.usd) ? formatMoney(o.usd) : '–' }),
-    ], [
-      Number.isFinite(o.qty) ? el('dl', { class: 'money-row' },
-        stat('Shares', String(o.qty)),
-        stat('Price', o.price > 0 ? formatMoney(o.price) : '–'),
-        stat('Fee', Number.isFinite(o.fee) ? formatMoney(o.fee) : '–')) : null,
-      el('div', { class: 'sub', text: `Sent to IBKR (${o.mode})${o.reason ? ` · ${o.reason}` : ''}${o.id ? ` · order ${o.id}` : ''}` }),
-      o.error ? el('div', { class: 'sub', text: o.error }) : null,
-    ], () => { const item = findItem(o.key); if (item) openChart(item, true); }))) : el('p', { class: 'muted small', text: 'No IBKR orders yet.' }),
-  ].filter(Boolean));
-}
-
 function renderSettings() {
   $('key-input').value = state.settings.twelveKey;
   $('tf-default').value = state.settings.timeframe;
@@ -2291,10 +2283,6 @@ function renderSettings() {
   $('ndax-max').value = state.settings.ndaxMaxTrade;
   $('ndax-loss').value = state.settings.ndaxDailyLoss;
   renderNdax();
-  $('ibkr-budget').value = state.settings.ibkrBudget;
-  $('ibkr-max').value = state.settings.ibkrMaxTrade;
-  $('ibkr-loss').value = state.settings.ibkrDailyLoss;
-  renderIbkr();
   $('server-url').value = state.settings.serverUrl;
   $('server-key').value = state.settings.serverKey;
   renderNotifyStatus();
@@ -2520,24 +2508,6 @@ function bind() {
     state.settings = store.saveSettings({ ndaxBudget: budget, ndaxMaxTrade: max, ndaxDailyLoss: loss });
     markChanged();
     $('ndax-status').textContent = 'Saved. New real orders use these limits.';
-  });
-  for (const b of document.querySelectorAll('#ibkr-mode-btns button')) b.addEventListener('click', () => {
-    const mode = b.dataset.mode === 'paper' ? 'paper' : 'off';
-    state.settings = store.saveSettings({ ibkrMode: mode });
-    markChanged();
-    renderSettingsSummaries();
-    $('ibkr-status').textContent = mode === 'off' ? 'Off. No new IBKR buys; shares already bought are still sold with the paper trade.'
-      : 'Paper. The next stock paper trades are sent to your IBKR paper account.';
-  });
-  $('ibkr-save').addEventListener('click', () => {
-    const budget = Number($('ibkr-budget').value), max = Number($('ibkr-max').value), loss = Number($('ibkr-loss').value);
-    if (![budget, max, loss].every(v => Number.isFinite(v) && v >= 0)) {
-      $('ibkr-status').textContent = 'Enter amounts of 0 or more.';
-      return;
-    }
-    state.settings = store.saveSettings({ ibkrBudget: budget, ibkrMaxTrade: max, ibkrDailyLoss: loss });
-    markChanged();
-    $('ibkr-status').textContent = 'Saved. New IBKR orders use these limits.';
   });
   $('server-save').addEventListener('click', saveServer);
   $('server-push').addEventListener('change', toggleServerPush);

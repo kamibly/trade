@@ -49,10 +49,6 @@ export const DEFAULT_SETTINGS = {
   ndaxBudget: 100, // CAD the real crypto trades may use in all
   ndaxMaxTrade: 25, // CAD at most in one real trade
   ndaxDailyLoss: 20, // CAD of live losses in a day that stops new buys until tomorrow
-  ibkrMode: 'off', // stock orders on IBKR: 'off' or 'paper' (an IBKR paper account, through IB Gateway)
-  ibkrBudget: 1000, // USD the IBKR trades may use in all
-  ibkrMaxTrade: 250, // USD at most in one IBKR trade
-  ibkrDailyLoss: 50, // USD of losses in a day that stops new buys until tomorrow
   serverUrl: '',
   serverKey: '',
   serverPush: false,
