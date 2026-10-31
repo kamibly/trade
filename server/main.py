@@ -18,11 +18,12 @@ from typing import Optional
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+import scoreboard
 import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.18.0"
+VERSION = "1.19.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -113,6 +114,23 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
     return {"paper": state.get("paper"), "events": state.get("paperEvents", []), "prices": (state.get("prices") or {}).get("values", {}),
             "shadow": state.get("paperShadow"), "filterTrial": state.get("filterTrial"), "budgets": state.get("paperBudgets"),
             "skips": (state.get("paper") or {}).get("skips", {}), "whatIf": (state.get("whatIf") or {}).get("results", {})}
+
+
+@app.get("/scoreboard")
+def get_scoreboard(kind: str = "all", days: int = 30, x_api_key: Optional[str] = Header(default=None)):
+    """Live calls graded 10 candles later: the app's Buys and Sells, each voter
+    and the trade filter, for stocks, crypto or all, over `days` days (0: all)."""
+    check_api_key(x_api_key)
+    if kind not in ("all", "stock", "crypto"):
+        raise HTTPException(status_code=400, detail="kind is all, stock or crypto")
+    return scoreboard.summary(kind, days if days > 0 else None)
+
+
+@app.get("/scoreboard/calls")
+def get_scoreboard_calls(source: str, kind: str = "all", x_api_key: Optional[str] = Header(default=None)):
+    """One source's latest graded calls, newest first."""
+    check_api_key(x_api_key)
+    return {"source": source, "calls": scoreboard.recent(source, kind)}
 
 
 @app.get("/ndax")
