@@ -23,7 +23,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.19.0"
+VERSION = "1.19.1"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -118,7 +118,7 @@ def get_paper(x_api_key: Optional[str] = Header(default=None)):
 
 @app.get("/scoreboard")
 def get_scoreboard(kind: str = "all", days: int = 30, x_api_key: Optional[str] = Header(default=None)):
-    """Live calls graded 10 candles later: the app's Buys and Sells, each voter
+    """Live calls graded by their stop or target: the app's Buys and Sells, each voter
     and the trade filter, for stocks, crypto or all, over `days` days (0: all)."""
     check_api_key(x_api_key)
     if kind not in ("all", "stock", "crypto"):

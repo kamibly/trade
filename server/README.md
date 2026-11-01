@@ -188,7 +188,7 @@ never delays the minute checks.
 Everything the service remembers (phones, synced holdings, last signals, scan
 results) is in `trade_folder/trade-data/trade.json` on the VM, and the models
 are in `trade_folder/trade-data/models/`. The scoreboard (every live call,
-graded 10 candles later; see `scoreboard.py`) is in
+graded by its stop or target; see `scoreboard.py`) is in
 `trade_folder/trade-data/scoreboard.json`.
 
 ## Updating later

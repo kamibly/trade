@@ -21,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.26.0 (scoreboard)';
+export const APP_VERSION = '0.26.1 (scoreboard: stop or target)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -801,10 +801,11 @@ function renderSignalTabs() {
   if (on === 'score') renderScoreboard();
 }
 
-// The Scoreboard tab: the server grades every live call 10 candles later
+// The Scoreboard tab: the server grades every live call by its stop or target
 // (server/scoreboard.py). Calls first, then each voter, then the trade filter.
 const SB_KINDS = [['all', 'All'], ['stock', 'Stocks'], ['crypto', 'Crypto']];
 const SB_DAYS = [[30, '30d'], [90, '90d'], [0, 'All']];
+const SB_HOW = { target: 'target', stop: 'stop', cap: 'no level' };
 const sbState = { kind: 'all', days: 30, data: null, key: null, loading: false, error: null, calls: {} };
 
 async function loadScoreboard() {
@@ -844,7 +845,7 @@ function sbCalls(id) {
   const day = t => new Date(t * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
   return el('ul', { class: 'sb-calls small' }, ...c.list.map(x => el('li', {},
     el('span', { text: `${x.key.split(':')[1]} · ${day(x.t)}${x.tf !== '1D' ? ` · ${x.tf}` : ''}` }),
-    el('span', { class: 'muted', text: `${x.dir > 0 ? 'Up' : 'Down'} · price ${fmtPct(x.ret)}` }),
+    el('span', { class: 'muted', text: `${x.dir > 0 ? 'Up' : 'Down'} · ${SB_HOW[x.how] || 'exit'} ${fmtPct(x.ret)} in ${x.candles}` }),
     el('span', { class: upDown(x.r), text: x.right ? '✓ right' : '✗ wrong' }))));
 }
 
@@ -896,16 +897,16 @@ function renderScoreboard() {
   const note = text => el('p', { class: 'muted small', text });
   const started = d.since ? `Recording since ${new Date(d.since).toLocaleDateString([], { month: 'short', day: 'numeric' })}` : 'Not recording yet: it starts with the next scan';
   box.replaceChildren(tools,
-    note(`${started} · ${d.pending} call${d.pending === 1 ? '' : 's'} waiting for ${d.horizon} more candles. Tap a row for its calls.`),
+    note(`${started} · ${d.pending} call${d.pending === 1 ? '' : 's'} waiting for their target or stop. Tap a row for its calls.`),
     el('h2', { class: 'section', text: "1. The app's calls" }),
-    note(`The score's Buys and Sells, graded ${d.horizon} candles later after fees. A Sell is right when the price then fell. Bars to beat: 50% right, and 0% vs hold (the average move of every chart of the same kind).`),
+    note(`Each Buy and Sell graded like the trade it opens: right when its target comes before its stop, or by the move after ${d.cap} candles if neither comes. Returns are after fees. Bars to beat: 50% right, and 0% vs hold (the average move of every chart of the same kind over the same candles).`),
     sbTable('Call', d.calls, min),
     el('h2', { class: 'section', text: '2. The voters' }),
     note('Each voter graded on its own firm votes, whether or not the score acted on them. Tap a group for its methods.'),
     sbTable('Voter', d.groups, min),
     d.ml.length ? sbTable('Machine learning', d.ml, min) : null,
     el('h2', { class: 'section', text: '3. The trade filter' }),
-    note(`How the Buys it kept at full size or bigger, made smaller or blocked did over the next ${d.horizon} candles.`),
+    note('How the Buys it kept at full size or bigger, made smaller or blocked turned out, graded the same way.'),
     sbTable('Buys', d.filter, min),
     note(`Rows under ${min} calls show their count and no score yet.`));
 }

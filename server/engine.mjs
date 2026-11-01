@@ -133,14 +133,15 @@ async function score(item, tf, settings, weightsCache, deps, models, { onS, mood
   const filter = sig.action === 'buy' && models && models.filter
     ? judge(models.filter, S, last, baseVotesAt(S, last), { type: item.type, market: tf === '1D' && mood ? mood[item.type] : NaN }, settings)
     : null;
-  return { ...summarize(item, sig, tf, w), at: deps.now(), ...(source ? { source } : {}), ...(filter ? { filter } : {}), obs: observe(item, tf, sig, filter) };
+  return { ...summarize(item, sig, tf, w), at: deps.now(), ...(source ? { source } : {}), ...(filter ? { filter } : {}), obs: observe(item, tf, sig, filter, candles[last], settings) };
 }
 
 // The scoreboard's record of one scored candle (see scoreboard.py): the call,
-// the price, and which voters leaned firmly up or down. Each method and ML
-// model is a voter, and so is each method group (its methods' average vote).
+// the candle's close, high and low, the stop and target distances, and which
+// voters leaned firmly up or down. Each method and ML model is a voter, and
+// so is each method group (its methods' average vote).
 const FIRM = 0.3;
-function observe(item, tf, sig, filter) {
+function observe(item, tf, sig, filter, candle, settings) {
   const voters = {};
   const up = [];
   const down = [];
@@ -153,7 +154,8 @@ function observe(item, tf, sig, filter) {
   }
   for (const [g, list] of Object.entries(groups)) lean(`g:${g}`, list.reduce((a, b) => a + b, 0) / list.length);
   return {
-    key: key(item), type: item.type, tf, t: sig.time, p: sig.entry, a: sig.action, up, down, voters,
+    key: key(item), type: item.type, tf, t: sig.time, p: sig.entry, h: candle.high, l: candle.low,
+    atr: sig.atr, sa: settings.stopAtr || 2, ta: settings.takeAtr || 3, a: sig.action, up, down, voters,
     ...(filter ? { f: filter.size } : {}),
   };
 }

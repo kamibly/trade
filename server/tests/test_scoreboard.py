@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 
@@ -27,8 +28,9 @@ def data_dir(tmp_path, monkeypatch):
     yield
 
 
-def obs(key, i, price, a="hold", up=(), down=(), f=None, kind="stock"):
-    o = {"key": key, "type": kind, "tf": "1D", "t": T0 + i * DAY, "p": price, "a": a, "up": list(up), "down": list(down)}
+def obs(key, i, price, a="hold", up=(), down=(), f=None, kind="stock", high=None, low=None, atr=1.0):
+    o = {"key": key, "type": kind, "tf": "1D", "t": T0 + i * DAY, "p": price, "h": price if high is None else high,
+         "l": price if low is None else low, "atr": atr, "sa": 2, "ta": 3, "a": a, "up": list(up), "down": list(down)}
     if f is not None:
         o["f"] = f
     return o
@@ -42,36 +44,49 @@ def run_days(days, now=NOW):
     return graded
 
 
-def test_a_call_is_graded_after_ten_more_candles_have_closed():
-    # AAA rises 1% a day, BBB stays flat: the market's average move is half AAA's.
-    days = [[obs("stock:AAA", i, 100 * 1.01 ** i, a="buy" if i == 0 else "hold", up=["rsi"] if i == 0 else [], f=1.2 if i == 0 else None),
-             obs("stock:BBB", i, 50, a="sell" if i == 0 else "hold", down=["macd", "g:momentum"] if i == 0 else [])]
-            for i in range(11)]
-    assert run_days(days) == 0, "the 10th candle after the call is still forming"
-    assert run_days([[obs("stock:AAA", 11, 200), obs("stock:BBB", 11, 50)]]) == 2
+@pytest.fixture
+def short_cap(monkeypatch):
+    monkeypatch.setattr(scoreboard, "CAP", 5)
 
-    s = scoreboard.summary("all", None, now=NOW)
-    buy, sell = s["calls"]
-    assert buy["n"] == 1 and sell["n"] == 1
-    assert "right" not in buy, "under 30 calls there is a count but no score"
+
+def test_a_buy_is_right_when_its_target_comes_before_its_stop():
+    # Day 0: Buy at 100, ATR 1: stop 98, target 103. AAA climbs 1 a day and
+    # touches 103 on day 3; BBB stays flat.
+    days = [[obs("stock:AAA", i, 100 + i, a="buy" if i == 0 else "hold", up=["rsi"] if i == 0 else [], f=1.2 if i == 0 else None),
+             obs("stock:BBB", i, 50)] for i in range(4)]
+    assert run_days(days) == 0, "day 3 touched the target but is still forming"
+    assert run_days([[obs("stock:AAA", 4, 104), obs("stock:BBB", 4, 50)]]) == 1
 
     board = scoreboard.load()
-    ret = 1.01 ** 10 - 1
     b = board["recent"]["buy"][0]
-    assert b["right"] and abs(b["r"] - (ret - 0.002)) < 1e-4
-    # The Sell on a flat chart avoided nothing: not right.
-    assert board["recent"]["sell"][0]["right"] is False
+    assert (b["how"], b["candles"], b["right"]) == ("target", 3, True)
+    assert b["r"] == pytest.approx(0.03 - 0.002)
     day = board["days"][scoreboard._day(T0)]["stock"]
-    assert abs(day["buy"][3] - ret / 2) < 1e-4, "vs hold: AAA's move against the average of AAA and BBB"
-    assert day["sell"][3] == pytest.approx(ret / 2, abs=1e-4), "BBB fell behind the market by as much"
-    assert day["v:rsi"][0] == 1 and day["v:macd"][0] == 1 and day["v:g:momentum"][0] == 1
-    assert day["f:bigger"][0] == 1
+    assert day["buy"][3] == pytest.approx(0.03 - 0.015), "vs hold: the 3% exit against the average of AAA (+3%) and BBB (0%)"
+    assert day["v:rsi"][0] == 1 and day["f:bigger"][0] == 1
     assert board["pending"] == {}
+
+
+def test_the_stop_and_the_cap(short_cap):
+    days = [[obs("stock:DOWN", i, 100 - i, a="buy" if i == 0 else "hold", low=100 - i - 0.5),
+             obs("stock:FLAT", i, 50, a="sell" if i == 0 else "hold", down=["macd", "g:momentum"] if i == 0 else []),
+             obs("stock:BOTH", i, 100, a="buy" if i == 0 else "hold", high=104 if i == 1 else 100, low=97 if i == 1 else 100)]
+            for i in range(7)]
+    run_days(days)
+    board = scoreboard.load()
+    down = next(r for r in board["recent"]["buy"] if r["key"] == "stock:DOWN")
+    assert (down["how"], down["candles"], down["right"]) == ("stop", 2, False)
+    assert down["ret"] == pytest.approx(-0.02), "sold at the stop, 2 ATR down"
+    both = next(r for r in board["recent"]["buy"] if r["key"] == "stock:BOTH")
+    assert (both["how"], both["right"]) == ("stop", False), "a candle touching both counts as the stop"
+    flat = board["recent"]["sell"][0]
+    assert (flat["how"], flat["candles"], flat["right"]) == ("cap", 5, False), "neither level in 5 candles: the flat move decides"
+    assert board["days"][scoreboard._day(T0)]["stock"]["v:g:momentum"][0] == 1
 
 
 def test_scores_show_from_thirty_calls_and_split_by_kind():
     days = []
-    for i in range(12):
+    for i in range(5):
         row = []
         for n in range(30):
             row.append(obs(f"stock:S{n}", i, 100 + i, a="buy" if i == 0 else "hold", up=["lgbm"] if i == 0 else []))
@@ -80,9 +95,10 @@ def test_scores_show_from_thirty_calls_and_split_by_kind():
     run_days(days)
     stocks = scoreboard.summary("stock", None, now=NOW)
     assert stocks["calls"][0]["n"] == 30 and stocks["calls"][0]["right"] == 1
-    assert stocks["ml"] == [{"id": "v:lgbm", "label": "LightGBM", "n": 30, "right": 1.0, "avg": pytest.approx(0.098, abs=1e-3), "edge": 0.0}]
+    assert stocks["ml"] == [{"id": "v:lgbm", "label": "LightGBM", "n": 30, "right": 1.0, "avg": pytest.approx(0.028), "edge": 0.0}]
     momentum = next(g for g in stocks["groups"] if g["id"] == "v:g:momentum")
     assert [m["label"] for m in momentum["methods"]] == ["MACD", "RSI"]
+    assert "right" not in scoreboard.summary("crypto", None, now=NOW)["calls"][0], "under 30 calls: a count, no score"
     crypto = scoreboard.summary("crypto", None, now=NOW)
     assert crypto["calls"][0]["n"] == 1
     assert crypto["filter"][2]["n"] == 1, "the Buy the filter blocked"
@@ -90,7 +106,7 @@ def test_scores_show_from_thirty_calls_and_split_by_kind():
 
 
 def test_old_days_drop_out_of_the_window():
-    days = [[obs("stock:AAA", i, 100 + i, a="buy" if i == 0 else "hold")] for i in range(12)]
+    days = [[obs("stock:AAA", i, 100 + i, a="buy" if i == 0 else "hold")] for i in range(5)]
     run_days(days)
     later = (T0 + 60 * DAY) * 1000
     assert scoreboard.summary("all", 30, now=later)["calls"][0]["n"] == 0
@@ -101,7 +117,7 @@ def test_a_forming_candle_keeps_its_latest_read():
     scoreboard.record([obs("stock:AAA", 0, 100, a="buy")], VOTERS, now=NOW)
     scoreboard.record([obs("stock:AAA", 0, 101, a="hold")], VOTERS, now=NOW)
     board = scoreboard.load()
-    assert board["prices"]["stock:AAA:1D"] == [[T0, 101]]
+    assert board["prices"]["stock:AAA:1D"] == [[T0, 101, 101, 101]]
     assert board["pending"] == {}, "the Buy was dropped before the candle closed, and a hold with no firm votes is not graded"
 
 
@@ -126,3 +142,11 @@ def test_the_docker_image_gets_every_server_module():
         copied = " ".join(line for line in f if line.startswith("COPY "))
     modules = [n for n in os.listdir(here) if n.endswith((".py", ".mjs"))]
     assert [n for n in modules if n not in copied.split()] == []
+
+
+def test_calls_recorded_by_the_first_version_are_dropped():
+    with open(scoreboard.path(), "w", encoding="utf-8") as f:
+        json.dump({"prices": {"stock:AAA:1D": [[T0, 100]]}, "pending": {"stock:AAA:1D:1": {"key": "stock:AAA", "tf": "1D", "t": T0, "a": "buy", "up": [], "down": []}}}, f)
+    scoreboard.record([obs("stock:AAA", 1, 101)], VOTERS, now=NOW)
+    board = scoreboard.load()
+    assert board["pending"] == {} and board["prices"]["stock:AAA:1D"][-1] == [T0 + DAY, 101, 101, 101]
