@@ -118,3 +118,11 @@ def test_runs_hand_their_observations_to_the_scoreboard_and_not_to_the_app():
     service.keep_score(result)
     assert "observations" not in result and "voters" not in result
     assert scoreboard.load()["pending"]
+
+
+def test_the_docker_image_gets_every_server_module():
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "Dockerfile"), encoding="utf-8") as f:
+        copied = " ".join(line for line in f if line.startswith("COPY "))
+    modules = [n for n in os.listdir(here) if n.endswith((".py", ".mjs"))]
+    assert [n for n in modules if n not in copied.split()] == []
