@@ -31,6 +31,7 @@ from typing import Callable, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import ndax
+import scoreboard
 
 logger = logging.getLogger("trade-service")
 
@@ -469,6 +470,7 @@ def run_watch(reason: str = "schedule", engine: Callable[[dict, int], dict] = ru
             update_state(failed)
             return None
         sent = deliver(result["alerts"], profile["settings"]["quietHours"], muted=muted_setups(state))
+        keep_score(result)
 
         def apply(st):
             st["signals"].update(result["signals"])
@@ -711,6 +713,16 @@ def _scope_part(d: dict, scope: str) -> dict:
     return {k: v for k, v in (d or {}).items() if k.startswith(SCOPE_PREFIX[scope])}
 
 
+def keep_score(result: dict) -> None:
+    """Hands a run's scored candles to the scoreboard (and out of the result,
+    which is saved for the app)."""
+    obs, voters = result.pop("observations", None), result.pop("voters", None)
+    try:
+        scoreboard.record(obs, voters)
+    except Exception:  # the scoreboard never stops a run
+        logger.exception("Scoreboard update failed")
+
+
 def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = run_engine, scope: str = "stocks",
                only: Optional[List[str]] = None) -> Optional[dict]:
     """The S&P 500 scan (scope "stocks") or the crypto scan (scope "crypto").
@@ -751,6 +763,7 @@ def run_market(reason: str = "schedule", engine: Callable[[dict, int], dict] = r
                 st["market"] = merged_market(scans)
             update_state(failed)
             return None
+        keep_score(result)
         announced = set(state.get("announced", []))
         warnings = [w for w in result.get("warnings", []) if w["id"] not in announced]
         push = [a for a in [result.get("alert"), result.get("digest")] + warnings if a]

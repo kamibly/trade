@@ -61,6 +61,15 @@ test('watch run: signals, a change alert, holding stop alert and errors', async 
   assert.equal(stop.urgent, true);
   assert.deepEqual(r.holdingsAlerted.h1, { stop: true });
   assert.ok(r.weights['stock:UP:1D'].weights);
+  // The scoreboard gets each scored candle; the saved signals don't carry it.
+  const seen = r.observations.find(o => o.key === 'stock:UP');
+  assert.equal(seen.a, 'buy');
+  assert.equal(seen.p, last);
+  assert.equal(seen.t, up.at(-1).time);
+  assert.ok(seen.up.length > 0 && seen.up.every(id => typeof id === 'string'));
+  assert.ok(seen.up.some(id => id.startsWith('g:')), 'method groups vote too');
+  assert.ok(r.voters[seen.up.find(id => !id.startsWith('g:'))][0]);
+  assert.equal(r.signals['stock:UP'].obs, undefined);
 
   // Same state again: nothing new to say.
   const again = await runWatch({ tf: '1D', settings, items, holdings: [{ ...holdings[0], alerted: r.holdingsAlerted.h1 }], prev: r.signals, weights: r.weights }, deps(map));
@@ -93,6 +102,8 @@ test('market scan uses the saved S&P list offline and only announces new ideas',
   });
   const first = await runMarket({ settings, prev: {}, weights: {} }, d);
   assert.match(first.errors.sp500, /saved with the server/);
+  assert.equal(first.observations.length, first.scanned);
+  assert.ok([...first.buys, ...first.sells].every(r => r.obs === undefined));
   assert.ok(first.total > 400);
   assert.equal(first.scanned, first.total);
   assert.ok(first.buys.some(b => b.key === 'stock:MMM'));
