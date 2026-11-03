@@ -418,11 +418,11 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .srv-rows dd { margin: 0; }
 .srv-problems summary { cursor: pointer; }
 .srv-problems ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
-.srv-models { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; margin: 6px 0 12px; table-layout: fixed; }
-.srv-models th, .srv-models td { text-align: left; padding: 5px 6px; border-top: 1px solid var(--border, rgba(255,255,255,.08)); vertical-align: top; }
-.srv-models thead th { border-top: 0; font-weight: 600; }
-.srv-models thead th:first-child { font-size: 14px; }
-.srv-models thead th + th { color: var(--muted); font-weight: 500; }
+.srv-tf { border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 10px 10px 4px; margin: 12px 0; background: rgba(127,127,127,.06); }
+.srv-tf h4 { margin: 0 0 6px; font-size: 15px; }
+.srv-models { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; table-layout: fixed; }
+.srv-models th, .srv-models td { text-align: left; padding: 6px 4px; border-top: 1px solid rgba(127,127,127,.25); vertical-align: top; }
+.srv-models thead th { border-top: 0; color: var(--muted); font-weight: 500; font-size: 12px; }
 .srv-models tbody th { font-weight: 400; width: 40%; }
 .srv-hit { font-weight: 600; }
 .srv-chance { font-size: 11px; color: var(--muted); }

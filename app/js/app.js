@@ -21,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.28.1 (models table by timeframe)';
+export const APP_VERSION = '0.28.2 (models table by timeframe)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1302,9 +1302,12 @@ function renderServer() {
   };
   const modelTable = ([tf, m]) => {
     const sets = m.kinds ? m.kinds.filter(k => m[k]).map(k => [`${k === 'crypto' ? 'Crypto' : 'Stocks'}${m[k].old ? ' (old)' : ''}`, m[k]]) : [['Stocks and crypto', m]];
-    return el('table', { class: 'srv-models' },
-      el('thead', {}, el('tr', {}, el('th', { text: TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf }), ...sets.map(([name]) => el('th', { text: name })))),
-      el('tbody', {}, ...MODEL_ROWS.map(([id, name]) => el('tr', {}, el('th', { text: name }), ...sets.map(([, set]) => cell(set[id]))))));
+    const TF_NAMES = { '15m': '15-minute chart', '1h': '1-hour chart', '1D': 'Daily chart', '1W': 'Weekly chart' };
+    return el('section', { class: 'srv-tf' },
+      el('h4', { text: TF_NAMES[tf] || tf }),
+      el('table', { class: 'srv-models' },
+        el('thead', {}, el('tr', {}, el('th', { text: 'Model' }), ...sets.map(([name]) => el('th', { text: name })))),
+        el('tbody', {}, ...MODEL_ROWS.map(([id, name]) => el('tr', {}, el('th', { text: name }), ...sets.map(([, set]) => cell(set[id])))))));
   };
   const training = trainingNow(st) ? `Training now, started ${timeAgo(st.training.runningSince)}`
     : st.training && st.training.nextAt ? `Next training ${when(st.training.nextAt)}` : '';
