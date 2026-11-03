@@ -139,3 +139,15 @@ test('an open trade can switch to the profit lock, and back to its target', () =
   paper.setLevels(acc, 'stock:AAA', { stop: 112.5, take: 130, trail: false, lock: false });
   assert.ok(!p.trail && !p.lock);
 });
+
+test('switched-off kinds hand their sources\' shares to the others and are not bought', () => {
+  const used = paper.sharesInUse({ opportunities: 0.4, stockIdeas: 0.2, cryptoIdeas: 0.2, alerts: 0.2 }, { stock: false, crypto: true });
+  assert.deepEqual(Object.fromEntries(Object.entries(used).map(([k, v]) => [k, Math.round(v * 100)])), { opportunities: 50, stockIdeas: 0, cryptoIdeas: 25, alerts: 25 });
+  assert.ok(Object.values(paper.sharesInUse(null, { stock: false, crypto: false })).every(v => v === 0));
+  assert.equal(paper.sharesInUse(null, null).opportunities, 0.4);
+  const acc = paper.newAccount(10000);
+  const sig = (type, symbol) => ({ symbol, type, action: 'buy', entry: 100, stop: 90, take: 130, atr: 5, score: 50 });
+  const ev = paper.step(acc, { signals: { 'stock:AAPL': sig('stock', 'AAPL'), 'crypto:BTC': sig('crypto', 'BTC') }, now: 1, budgets: paper.budgetsFor(null, { stock: false, crypto: true }), kinds: { stock: false, crypto: true } });
+  assert.deepEqual(ev.map(e => e.symbol), ['BTC']);
+  assert.equal(acc.skips['stock:AAPL'], 'stocks are switched off in Settings');
+});

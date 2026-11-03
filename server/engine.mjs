@@ -14,7 +14,7 @@ import { proxiedFetch, fallbackFetch } from './proxy.mjs';
 import { analyze, signalAt, baseVotesAt, scoreVotes, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
 import { filterNames, filterVector, tradeOutcome, marketTrend, trendAt, judge, MIN_SCORE as FILTER_MIN_SCORE } from './js/filter.js';
 import { feeRate } from './js/fees.js';
-import { featureNames, featureVector, sequence, label, turnLabels } from './js/ml.js';
+import { featureNames, featureVector, sequence, label, turnLabels, modelsFor } from './js/ml.js';
 import { summarize, alertFor, learn, learnKey, ruleOf, tradeRecordLine, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
 import * as paper from './js/paper.js';
@@ -116,7 +116,7 @@ async function candlesFor(item, tf, settings, deps) {
 async function score(item, tf, settings, weightsCache, deps, models, { onS, mood } = {}) {
   const { candles, source } = await candlesFor(item, tf, settings, deps);
   if (candles.length < MIN_CANDLES) throw new Error(`Only ${candles.length} candles, ${MIN_CANDLES} needed`);
-  const S = analyze(candles, { models });
+  const S = analyze(candles, { models: modelsFor(models, item.type) });
   const wKey = `${key(item)}:${tf}`;
   const modelsAt = (models && models.trainedAt) || null;
   let w = weightsCache[wKey];
@@ -193,7 +193,7 @@ const paperLine = ev => (ev.kind === 'open'
 // Watchlist and holdings on the alert timeframe, plus the paper account.
 // job: { tf, settings, items, holdings, prev: { key: signal }, weights: { "key:tf": {at, weights} },
 //        models, mood: { stock, crypto } market trends, paper: account | null, riskPct,
-//        shadow: the unfiltered account | null, useFilter, budgets: { source: share }, trail }
+//        shadow: the unfiltered account | null, useFilter, budgets: { source: share }, kinds: { stock, crypto }, trail }
 // result: { signals, alerts, changes, holdingsAlerted, weights, errors, paper, paperEvents, shadow }
 export async function runWatch(job, deps = defaultDeps) {
   const { tf, settings } = job;
@@ -253,7 +253,7 @@ export async function runWatch(job, deps = defaultDeps) {
   }
   // The paper account trades the same signals: buys a Buy it doesn't hold yet
   // (within 1 ATR of where it began), sells on a Sell, the stop-loss or the target.
-  const paperEvents = bothAccounts(job, (acc, useFilter) => paper.step(acc, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsWith(job.budgets), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null }), deps);
+  const paperEvents = bothAccounts(job, (acc, useFilter) => paper.step(acc, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsFor(job.budgets, job.kinds), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null, kinds: job.kinds || null }), deps);
   return { signals, alerts, changes, holdingsAlerted, weights, errors, paper: job.paper || null, paperEvents, shadow: job.shadow || null, ...seen };
 }
 
@@ -509,11 +509,11 @@ async function opportunitiesFor(job, rows, deps, errors) {
 
 // The paper account (and its unfiltered shadow) takes the market scan's
 // opportunities and buy ideas, and sells scan trades that turned Sell.
-// job: { paper, shadow, opportunities, scanBuys, scanSells, riskPct, useFilter, budgets, trail, lock, tradable }
+// job: { paper, shadow, opportunities, scanBuys, scanSells, riskPct, useFilter, budgets, kinds, trail, lock, tradable }
 // result: { paper, paperEvents, shadow }
 export async function runPaper(job, deps = defaultDeps) {
   const paperEvents = bothAccounts(job, (acc, useFilter) => {
-    const opts = { riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsWith(job.budgets), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null };
+    const opts = { riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsFor(job.budgets, job.kinds), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null, kinds: job.kinds || null };
     const held = new Set(acc.positions.filter(p => p.setup === 'scan').map(p => p.key));
     return [
       ...paper.closeOnSells(acc, (job.scanSells || []).filter(s => held.has(s.key)), 'scan', opts),
@@ -566,33 +566,47 @@ export async function runWhatIf(job, deps = defaultDeps) {
 }
 
 // Your symbols plus a spread of S&P 500 stocks and top cryptos, so the models
-// learn from more than a handful of charts. `total` caps the list.
+// learn from more than a handful of charts. `total` caps the list. With
+// `kind`, only that kind: your stocks and an S&P 500 sample, or your coins and
+// the top `total` coins (all of them, on top of yours).
 async function trainingItems(job, deps) {
   const out = [];
   const seen = new Set();
+  const kind = job.kind || null;
+  const cap = kind === 'crypto' ? job.total + (job.items || []).filter(i => i.type === 'crypto').length : job.total;
   const add = item => {
-    if (out.length < job.total && !seen.has(key(item))) {
+    if (out.length < cap && !seen.has(key(item)) && (!kind || item.type === kind)) {
       seen.add(key(item));
       out.push(item);
     }
   };
   (job.items || []).forEach(add);
-  const room = job.total - out.length;
-  if (room > 0) {
+  const room = cap - out.length;
+  if (room > 0 && kind !== 'stock') {
     let crypto = [];
-    try {
-      crypto = await deps.fetchCryptoTop(20);
-    } catch { /* stocks alone are enough */ }
-    crypto.slice(0, Math.ceil(room / 5)).forEach(add);
+    // CoinGecko's free list is often rate-limited right after the scans: the
+    // crypto models need it, so they ask again after a pause.
+    for (const wait of kind === 'crypto' ? [0, 20_000, 60_000] : [0]) {
+      try {
+        if (wait) await new Promise(r => setTimeout(r, deps.retryWait ?? wait));
+        crypto = await deps.fetchCryptoTop(kind === 'crypto' ? Math.max(job.total, 20) : 20);
+        break;
+      } catch (e) {
+        if (kind === 'crypto' && wait === 60_000) throw new Error(`Couldn't get the top coins from CoinGecko: ${e.message}`);
+      }
+    }
+    (kind === 'crypto' ? crypto : crypto.slice(0, Math.ceil(room / 5))).forEach(add);
+  }
+  if (cap - out.length > 0 && kind !== 'crypto') {
     const stocks = parseSp500(await readFile(new URL('./sp500.csv', import.meta.url), 'utf8'));
-    const step = Math.max(1, Math.floor(stocks.length / (job.total - out.length || 1)));
+    const step = Math.max(1, Math.floor(stocks.length / (cap - out.length || 1)));
     stocks.filter((_, i) => i % step === 0).forEach(add);
   }
   return out;
 }
 
 // Training data for the ML models: one row per candle that has a known outcome.
-// job: { tf, items, settings, total }
+// job: { tf, items, settings, total, kind? ('stock' | 'crypto') }
 // result: { tf, features, symbols, rows: { key, t, x, seq, y, ret, yb, yt }[], errors }
 // (yb and yt are the turning-point labels, null for the last candles)
 export async function runDataset(job, deps = defaultDeps) {
@@ -684,7 +698,8 @@ async function main() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch(e => {
-    process.stderr.write(`${e.stack || e}\n`);
+    // The stack, then the message on the last line: that is what the service shows.
+    process.stderr.write(`${e.stack || e}\n${e.message || e}\n`);
     process.exit(1);
   });
 }

@@ -4,6 +4,7 @@
 import { analyze, signalAt, breakdown, MIN_CANDLES } from './signals.js';
 import { backtest } from './backtest.js';
 import { feeRate } from './fees.js';
+import { modelsFor } from './ml.js';
 
 // Method weights are re-learned from the backtest once a day per symbol.
 export const WEIGHTS_MAX_AGE_MS = 24 * 3600_000;
@@ -116,7 +117,7 @@ export async function scanItem(item, tf, settings, thresholds, deps, signal) {
     }
   }
   if (saved.candles.length < MIN_CANDLES) return { error: `Only ${saved.candles.length} candles, ${MIN_CANDLES} needed` };
-  const S = analyze(saved.candles, { models: deps.getModels?.(tf) });
+  const S = analyze(saved.candles, { models: modelsFor(deps.getModels?.(tf) || null, item.type) });
   let learned = null;
   if (deps.getWeight) {
     const w = deps.getWeight(item, tf);

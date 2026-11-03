@@ -174,7 +174,7 @@ def test_the_shadow_starts_level_and_the_filter_is_judged_after_enough_trades():
     st["paper"] = {"start": 5000, "cash": 4000, "createdAt": 1, "positions": [{"key": "crypto:SOL", "type": "crypto", "symbol": "SOL"}], "trades": [], "history": []}
     f = service.paper_fields(st, st["profile"])
     assert f["shadow"]["cash"] == 4000 and f["shadow"]["positions"] == st["paper"]["positions"] and f["shadow"]["createdAt"] > 1
-    assert f["useFilter"] is True and f["budgets"] is None
+    assert f["useFilter"] is True and f["budgets"] == service.BUDGET_SHARES
     st["paperShadow"] = {**f["shadow"], "createdAt": 50, "trades": [trade(pnl=4) for _ in range(120)]}
     assert [i["symbol"] for i in service.price_items({**st, "paper": {"positions": []}}, datetime(2026, 10, 14, 12, tzinfo=NY))] == ["NVDA", "SOL"]  # a holding, and the shadow's position
     st["paper"]["trades"] = [trade(opened=10)] + [trade(pnl=6) for _ in range(99)]  # one from before the shadow
@@ -204,16 +204,44 @@ def test_the_shadow_starts_level_and_the_filter_is_judged_after_enough_trades():
 def test_budgets_follow_results_a_step_a_week_within_limits():
     week = service.WEEK_MS
     st = {"paper": {"trades": [trade("signal", ret=0.03) for _ in range(50)] + [trade("scan", "crypto", ret=-0.01) for _ in range(50)]
-                    + [trade("scan", "stock", ret=0.05) for _ in range(10)]}}
+                    + [trade("scan", "stock", ret=0.05) for _ in range(10)]},
+          "profile": {"settings": {"paperAutoMove": True}}}
     b = service.follow_results(st, now=1000)
     assert b["shares"] == service.BUDGET_SHARES and b["at"] == 1000
     st["paperBudgets"] = b
-    assert service.follow_results(st, now=1000 + week - 1) is b  # not a week yet
+    assert service.follow_results(st, now=1000 + week - 1)["shares"] == b["shares"]  # not a week yet
     for k in range(3):
         st["paperBudgets"] = service.follow_results(st, now=1000 + (k + 1) * week)
     s = st["paperBudgets"]["shares"]
     assert s["alerts"] == 0.3 and s["cryptoIdeas"] == 0.1 and s["stockIdeas"] == 0.2  # stopped at the 10% floor
     assert abs(sum(s.values()) - 1) < 1e-9 and st["paperBudgets"]["moves"][0]["to"] == "alerts"
+
+
+def test_your_shares_stay_put_unless_the_weekly_move_is_on():
+    week = service.WEEK_MS
+    trades = [trade("signal", ret=0.03) for _ in range(50)] + [trade("scan", "crypto", ret=-0.01) for _ in range(50)]
+    mine = {"opportunities": 10, "stockIdeas": 0, "cryptoIdeas": 60, "alerts": 30}
+    st = {"paper": {"trades": trades}, "profile": {"settings": {"paperShares": mine}}}
+    for k in range(3):
+        st["paperBudgets"] = service.follow_results(st, now=1000 + k * week)
+    assert st["paperBudgets"]["shares"] == {"opportunities": 0.1, "stockIdeas": 0.0, "cryptoIdeas": 0.6, "alerts": 0.3}
+    st["profile"]["settings"]["paperAutoMove"] = True
+    st["paperBudgets"] = service.follow_results(st, now=1000 + 3 * week)
+    assert st["paperBudgets"]["shares"]["alerts"] == 0.35 and st["paperBudgets"]["shares"]["cryptoIdeas"] == 0.55
+    st["profile"]["settings"]["paperShares"] = {**mine, "alerts": 20, "opportunities": 20}
+    assert service.follow_results(st, now=1000 + 3 * week + 1)["shares"]["alerts"] == 0.2, "new shares start over"
+
+
+def test_paper_source_settings_are_cleaned_and_reach_the_engine():
+    clean = lambda s: service.clean_profile({"settings": s})["settings"]
+    d = clean({})
+    assert (d["paperStocks"], d["paperCrypto"], d["paperShares"], d["paperAutoMove"]) == (True, True, None, False)
+    assert clean({"paperShares": {"opportunities": 50, "stockIdeas": 0, "cryptoIdeas": 30, "alerts": 20}})["paperShares"]["cryptoIdeas"] == 30
+    assert clean({"paperShares": {"opportunities": 50, "stockIdeas": 10, "cryptoIdeas": 30, "alerts": 20}})["paperShares"] is None, "110%"
+    assert clean({"paperShares": {"opportunities": 100}})["paperShares"] is None
+    profile = service.clean_profile({"settings": {"paperStocks": False, "paperShares": {"opportunities": 50, "stockIdeas": 0, "cryptoIdeas": 30, "alerts": 20}}})
+    f = service.paper_fields({"profile": profile}, profile)
+    assert f["kinds"] == {"stock": False, "crypto": True} and f["budgets"]["opportunities"] == 0.5
 
 
 def test_reset_restarts_the_shadow_and_the_trial():

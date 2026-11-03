@@ -37,6 +37,11 @@ export const METHOD_INFO = {
   lstm: 'An LSTM neural network reads the last 32 candles\' moves and volume and gives the same chance; it votes the same way as LightGBM.',
   bottom: 'Bottom finder: the chance a buy here reaches its target before its stop. It only votes Buy, when that chance is clearly above how often it happens anyway.',
   top: 'Top finder: the chance the price falls to a target before rising to a stop. It only votes Sell, when that chance is clearly above usual.',
+  // Models trained separately for stocks and crypto, since the split.
+  lgbm2: 'LightGBM, trained on this kind of chart only (stocks or crypto), reads the 30 votes plus a few indicators and gives the chance a Buy here reaches its target before a Sell does (your stop and target in ATRs, within 30 candles). Its vote is that chance minus where its answers usually sit, divided by their usual spread.',
+  lstm2: 'An LSTM neural network, trained on this kind of chart only, reads the last 32 candles\' moves and volume and gives the same chance; it votes the same way as LightGBM.',
+  bottom2: 'Bottom finder, trained on this kind of chart only: the chance a buy here reaches its target before its stop. It only votes Buy, when that chance is clearly above how often it happens anyway.',
+  top2: 'Top finder, trained on this kind of chart only: the chance the price falls to a target before rising to a stop. It only votes Sell, when that chance is clearly above usual.',
 };
 
 export const SCORE_STEPS = [

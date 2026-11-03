@@ -418,9 +418,16 @@ table.setups th { color: var(--muted); font-weight: 600; }
 .srv-rows dd { margin: 0; }
 .srv-problems summary { cursor: pointer; }
 .srv-problems ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); }
-.srv-models { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
-.srv-models th, .srv-models td { text-align: left; padding: 2px 4px; }
-.srv-models thead th { color: var(--muted); font-weight: 500; }
+.srv-tf { border: 1px solid rgba(127,127,127,.35); border-radius: 10px; padding: 10px 10px 4px; margin: 12px 0; background: rgba(127,127,127,.06); }
+.srv-tf h4 { margin: 0 0 6px; font-size: 15px; }
+.srv-models { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; table-layout: fixed; }
+.srv-models th, .srv-models td { text-align: left; padding: 6px 4px; border-top: 1px solid rgba(127,127,127,.25); vertical-align: top; }
+.srv-models thead th { border-top: 0; color: var(--muted); font-weight: 500; font-size: 12px; }
+.srv-models tbody th { font-weight: 400; width: 40%; }
+.srv-hit { font-weight: 600; }
+.srv-chance { font-size: 11px; color: var(--muted); }
+.srv-on .srv-hit { color: var(--up); }
+.srv-off .srv-hit { color: var(--muted); font-weight: 400; }
 
 /* What if: the same trade with each exit */
 .whatif { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
@@ -476,3 +483,8 @@ details.why-fold[open] > summary::before { content: '▾ '; }
 .sb-calls { margin: 0; padding: 6px 12px 8px; list-style: none; border-bottom: 1px solid var(--line); background: var(--bg); }
 .sb-calls li { display: grid; grid-template-columns: 1.4fr 1.2fr .8fr; gap: 4px; padding: 3px 0; }
 .sb-calls li > span:last-child { text-align: right; }
+
+.set-body h3.set-sub { margin-top: 16px; }
+.share-grid { display: grid; grid-template-columns: 1fr 84px 62px; gap: 6px 10px; align-items: center; margin-top: 8px; }
+.share-grid input:disabled { opacity: .45; }
+

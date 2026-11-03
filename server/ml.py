@@ -1,27 +1,36 @@
 """
 Weekly machine-learning training for trade-service.
 
-Four models per timeframe. Two predict whether the price is up by more than
-the round-trip fee 10 candles later:
+Stocks and crypto get their own models (DATA_DIR/models/<tf>.json holds a
+`stock` and a `crypto` set): TRAIN_SYMBOLS stock charts (yours and an S&P 500
+sample) and the top TRAIN_CRYPTO coins plus yours. Four models per set:
 
 - LightGBM (gradient-boosted trees) on the 30 method votes plus a few
-  indicator features;
-- a small LSTM neural network on the last 32 candles' moves and volume.
+  indicator features, and a small LSTM neural network on the last 32 candles'
+  moves and volume. Both learn which comes first from a candle's close: a
+  Buy's target (takeAtr ATRs up before stopAtr down) or a Sell's (takeAtr down
+  before stopAtr up), within TURN_HORIZON candles, the way the scoreboard grades
+  calls. Candles where neither comes don't teach them. They are tested the same
+  way: an up vote is right when the Buy's target came first, a down vote when
+  the Sell's did, against how often that happens anyway (TURN_EDGE better).
+- Two more LightGBM models find turning points: "bottom" learns whether a buy
+  here reaches its target before its stop, "top" whether the price falls to a
+  target before rising to a stop. They must beat how often that happens anyway
+  by TURN_EDGE to vote.
 
-Two more LightGBM models find turning points: "bottom" learns whether a buy
-here reaches its target before its stop (the app's stop and target, in ATRs),
-"top" whether the price falls to a target before rising to a stop. They must
-beat how often that happens anyway by TURN_EDGE to vote.
+The trade filter is one model for both kinds (its features include the kind),
+trained on the Buy-looking candles of both datasets.
 
 The data comes from engine.mjs (mode "dataset"), so the features are computed
 by the same JavaScript the phone runs. Rows are split by time: the oldest ~70%
 trains the models and the newest ~30% tests them. The saved models are the
 ones trained before that cutoff, and the app only lets them vote on candles
-after it, so every score they get is out of sample. A model whose test hit
-rate isn't above 50% (on at least 200 clear calls) is saved but doesn't vote.
+after it, so every score they get is out of sample. A model that fails its
+test is saved but doesn't vote. A kind that can't be trained (too little
+history) keeps its previous models.
 
 Runs as its own process so the large libraries leave memory when it ends:
-    python ml.py < job.json        job: {tf, items, settings, total}
+    python ml.py < job.json        job: {tf, items, settings, total, cryptoTotal}
 It writes DATA_DIR/models/<tf>.json and prints a short summary as JSON.
 """
 import json
@@ -45,7 +54,8 @@ MIN_VOTE = 0.3            # the backtest's "clear opinion": |vote| >= 0.3
 MIN_HIT, MIN_N = 0.5, 200
 TEST_SHARE = 0.3
 MIN_TRAIN_ROWS, MIN_TEST_ROWS = 1000, 300
-MAX_ROWS = 150_000        # keeps training inside the VM's memory
+MAX_ROWS = 150_000        # keeps training inside the VM's memory (per kind)
+KINDS = ("stock", "crypto")
 SEED = 7
 
 
@@ -87,6 +97,8 @@ class Data:
         nan = lambda: np.full(len(t), np.nan, dtype=np.float32)
         self.bottom = yb if yb is not None else nan()
         self.top = yt if yt is not None else nan()
+        # Which target came first: 1 a Buy's, 0 a Sell's, NaN neither (or unknown).
+        self.first = np.where(self.bottom == 1, 1.0, np.where(self.top == 1, 0.0, np.nan)).astype(np.float32)
 
     def __len__(self):
         return len(self.t)
@@ -284,6 +296,24 @@ def turn_test(probs, labels, cal: dict) -> dict:
             "base": round(float(labels.mean()), 4) if len(labels) else 0}
 
 
+def first_test(probs, data: "Data", cal: dict) -> dict:
+    """LightGBM's and the LSTM's clear calls (|vote| >= 0.3), graded like the
+    scoreboard: an up vote is right when a Buy's target came first, a down vote
+    when a Sell's did. `base` is how often those calls would come true anyway
+    (each side's rate in the test, mixed like the calls)."""
+    import numpy as np
+    known = np.isfinite(data.bottom) & np.isfinite(data.top)
+    v = votes_of(np.asarray(probs, dtype=np.float64)[known], cal)
+    yb, yt = data.bottom[known], data.top[known]
+    up, down = v >= MIN_VOTE, v <= -MIN_VOTE
+    n = int(up.sum() + down.sum())
+    hits = int((up & (yb == 1)).sum() + (down & (yt == 1)).sum())
+    rb, rt = (float(yb.mean()), float(yt.mean())) if len(yb) else (0.0, 0.0)
+    base = (int(up.sum()) * rb + int(down.sum()) * rt) / n if n else 0.0
+    return {"hit": round(hits / n, 4) if n else 0, "n": n, "rows": int(len(yb)), "base": round(base, 4),
+            "up": int(up.sum()), "down": int(down.sum()), "buyFirst": round(rb, 4), "sellFirst": round(rt, 4)}
+
+
 # ---------------------------------------------------------------------------
 # LightGBM
 # ---------------------------------------------------------------------------
@@ -381,7 +411,7 @@ def export_lstm(net) -> dict:
     }
 
 
-def train_lstm(train: Data, epochs: int = 15):
+def train_lstm(train: Data, epochs: int = 15, target: str = "y"):
     import torch
     torch.manual_seed(SEED)
     torch.set_num_threads(2)
@@ -389,8 +419,8 @@ def train_lstm(train: Data, epochs: int = 15):
     net = _lstm_net()
     opt = torch.optim.Adam(net.parameters(), lr=2e-3)
     loss_fn = torch.nn.BCEWithLogitsLoss()
-    x, y = torch.from_numpy(fit.seq), torch.from_numpy(fit.y)
-    xv, yv = torch.from_numpy(valid.seq), torch.from_numpy(valid.y)
+    x, y = torch.from_numpy(fit.seq), torch.from_numpy(getattr(fit, target))
+    xv, yv = torch.from_numpy(valid.seq), torch.from_numpy(getattr(valid, target))
     best, best_state, patience = math.inf, None, 0
     g = torch.Generator().manual_seed(SEED)
     for _ in range(epochs):
@@ -433,19 +463,25 @@ def train_models(data: Data, features: List[str], tf: str, symbols: Optional[int
     if len(train) < MIN_TRAIN_ROWS or len(test) < MIN_TEST_ROWS:
         raise ValueError(f"Not enough history to train: {len(train)} training and {len(test)} test rows")
 
-    _, valid = valid_split(train)
-    booster, best, lgbm = train_lgbm(train, features)
+    first = train.labelled("first")
+    if len(first) < MIN_TRAIN_ROWS:
+        raise ValueError(f"Not enough history to train: {len(first)} training rows where a target was reached")
+    _, valid = valid_split(first)
+    levels = {"label": "first", "stopAtr": stop_atr, "takeAtr": take_atr}
+    booster, best, lgbm = train_lgbm(first, features, "first")
     lgbm.update(calibrate(booster.predict(valid.x, num_iteration=best)))
     p_test = booster.predict(test.x, num_iteration=best)
-    lgbm["test"] = hit_rate(p_test, test.ret, lgbm)
+    lgbm["test"] = first_test(p_test, test, lgbm)
     lgbm["outcomes"] = outcomes(p_test, test.ret, lgbm)
+    lgbm.update(levels)
     del booster
 
-    net, lstm = train_lstm(train)
+    net, lstm = train_lstm(first, target="first")
     lstm.update(calibrate(lstm_probs(net, valid.seq)))
     p_test = lstm_probs(net, test.seq)
-    lstm["test"] = hit_rate(p_test, test.ret, lstm)
+    lstm["test"] = first_test(p_test, test, lstm)
     lstm["outcomes"] = outcomes(p_test, test.ret, lstm)
+    lstm.update(levels)
 
     turns = {}
     for name in TURN_MODELS:
@@ -545,34 +581,107 @@ def train_filter(f: FilterData, features: List[str]) -> Optional[dict]:
     return model
 
 
+SET_KEYS = ("cutoff", "symbols", "trainRows", "testRows", "lgbm", "lstm", *TURN_MODELS)
+
+
+def _set_summary(m: dict) -> dict:
+    out = {k: m.get(k) for k in ("cutoff", "symbols", "trainRows", "testRows", "trainedAt", "old", "error")
+           if m.get(k) is not None}
+    for name in ("lgbm", "lstm", *TURN_MODELS):
+        out[name] = (m.get(name) or {}).get("test")
+    return out
+
+
 def summary(models: Optional[dict]) -> Optional[dict]:
     """The small part the app and /status show; no weights."""
     if not models:
         return None
-    keep = ("tf", "cutoff", "trainedAt", "symbols", "trainRows", "testRows")
-    out = {k: models.get(k) for k in keep}
-    for name in ("lgbm", "lstm", *TURN_MODELS, "filter"):
-        out[name] = (models.get(name) or {}).get("test")
-    return out
+    out = {k: models.get(k) for k in ("tf", "trainedAt")}
+    out["filter"] = (models.get("filter") or {}).get("test")
+    if models.get("kinds"):
+        out["kinds"] = models["kinds"]
+        for kind in models["kinds"]:
+            if models.get(kind):
+                out[kind] = _set_summary(models[kind])
+        return out
+    return {**out, **_set_summary(models)}
+
+
+def previous_set(prev: Optional[dict], kind: str) -> Optional[dict]:
+    """A kind's models from the last file, kept when this run can't train it:
+    that kind's set, or the mixed set of a file from before the split."""
+    if not prev:
+        return None
+    if prev.get("kinds"):
+        return prev.get(kind)
+    if not prev.get("lgbm"):
+        return None
+    return {**{k: prev[k] for k in SET_KEYS if k in prev}, "old": True, "trainedAt": prev.get("trainedAt")}
+
+
+def concat_filter(parts: List[FilterData]) -> FilterData:
+    import numpy as np
+    parts = [f for f in parts if len(f)]
+    if not parts:
+        return _filter_data([], [], [])
+    if len(parts) == 1:
+        return parts[0]
+    cat = lambda name: np.concatenate([getattr(f, name) for f in parts])
+    return FilterData(cat("keys"), cat("t"), np.concatenate([f.x for f in parts]), cat("win"), cat("ret"), cat("tp"), cat("sp"), cat("fee"))
+
+
+def train_kind(job: dict, kind: str, total: int, stop_atr: float, take_atr: float):
+    """One kind's dataset and models. Returns (models or None, error or None,
+    filter rows, filter feature names); the dataset is freed when it returns."""
+    header, data = load_dataset({**job, "kind": kind, "total": total})
+    filt = data.filt
+    try:
+        models = train_models(data, header["features"], job["tf"], header.get("symbols"),
+                              stop_atr=stop_atr, take_atr=take_atr)
+        return models, None, filt, header.get("filterFeatures")
+    except ValueError as e:
+        errors = header.get("errors") or {}
+        msg = str(e)
+        if errors:
+            first = next(iter(errors.values()))
+            msg = f"{msg}; {len(errors)} of {header.get('symbols')} charts could not be loaded ({first})"
+        return None, msg, filt, header.get("filterFeatures")
 
 
 def main() -> None:
+    import gc
     job = json.load(sys.stdin)
     started = time.time()
-    header, data = load_dataset(job)
     settings = job.get("settings") or {}
-    try:
-        models = train_models(data, header["features"], job["tf"], header.get("symbols"),
-                              stop_atr=settings.get("stopAtr", 2), take_atr=settings.get("takeAtr", 3))
-    except ValueError as e:
-        errors = header.get("errors") or {}
-        if not errors:
-            raise
-        first = next(iter(errors.values()))
-        raise ValueError(f"{e}; {len(errors)} of {header.get('symbols')} charts could not be loaded ({first})") from None
-    if header.get("filterFeatures") and len(data.filt):
+    stop_atr, take_atr = settings.get("stopAtr", 2), settings.get("takeAtr", 3)
+    totals = {"stock": int(job.get("total") or 120), "crypto": int(job.get("cryptoTotal") or 50)}
+    prev = load_models(job["tf"])
+    now = service.now_ms()
+    models = {"tf": job["tf"], "kinds": list(KINDS), "trainedAt": now}
+    filters, ffeatures, errors = [], None, {}
+    for kind in KINDS:
         try:
-            flt = train_filter(data.filt, header["filterFeatures"])
+            m, err, filt, ff = train_kind(job, kind, totals[kind], stop_atr, take_atr)
+        except Exception as e:  # the engine failed for this kind
+            m, err, filt, ff = None, str(e)[:300], None, None
+        if filt is not None:
+            filters.append(filt)
+        ffeatures = ffeatures or ff
+        if m:
+            m.pop("tf", None)
+            models[kind] = m
+        else:
+            errors[kind] = err
+            kept = previous_set(prev, kind)
+            if kept:
+                models[kind] = {**kept, "error": err}
+        gc.collect()
+    if not any(models.get(k) and not models[k].get("error") for k in KINDS):
+        raise ValueError("; ".join(f"{k}: {v}" for k, v in errors.items()))
+    flt_data = concat_filter(filters)
+    if ffeatures and len(flt_data):
+        try:
+            flt = train_filter(flt_data, ffeatures)
             if flt:
                 models["filter"] = flt
         except Exception as e:  # the other models still count
@@ -580,7 +689,7 @@ def main() -> None:
     save_models(job["tf"], models)
     out = summary(models)
     out["seconds"] = round(time.time() - started)
-    out["chartErrors"] = len(header.get("errors") or {})
+    out["errors"] = errors
     sys.stdout.write(json.dumps(out))
 
 

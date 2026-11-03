@@ -95,7 +95,8 @@ def test_scores_show_from_thirty_calls_and_split_by_kind():
     run_days(days)
     stocks = scoreboard.summary("stock", None, now=NOW)
     assert stocks["calls"][0]["n"] == 30 and stocks["calls"][0]["right"] == 1
-    assert stocks["ml"] == [{"id": "v:lgbm", "label": "LightGBM", "n": 30, "right": 1.0, "avg": pytest.approx(0.028), "edge": 0.0}]
+    assert stocks["ml"] == [{"id": "v:lgbm", "label": "LightGBM (old)", "n": 30, "right": 1.0, "avg": pytest.approx(0.028), "edge": 0.0}]
+    assert scoreboard.summary("crypto", None, now=NOW)["ml"] == [], "the old mixed models show only with graded calls"
     momentum = next(g for g in stocks["groups"] if g["id"] == "v:g:momentum")
     assert [m["label"] for m in momentum["methods"]] == ["MACD", "RSI"]
     assert "right" not in scoreboard.summary("crypto", None, now=NOW)["calls"][0], "under 30 calls: a count, no score"
@@ -150,3 +151,32 @@ def test_calls_recorded_by_the_first_version_are_dropped():
     scoreboard.record([obs("stock:AAA", 1, 101)], VOTERS, now=NOW)
     board = scoreboard.load()
     assert board["pending"] == {} and board["prices"]["stock:AAA:1D"][-1] == [T0 + DAY, 101, 101, 101]
+
+
+def test_each_side_is_graded_when_its_own_level_is_reached():
+    # A Buy with RSI leaning up and MACD leaning down, ATR 1, climbing 1 a day:
+    # the down side's stop (102) is hit on day 2, the up side's target (103) on day 3.
+    days = [[obs("stock:AAA", i, 100 + i, a="buy" if i == 0 else "hold", up=["rsi"] if i == 0 else [], down=["macd"] if i == 0 else [])]
+            for i in range(5)]
+    run_days(days)
+    board = scoreboard.load()
+    assert board["pending"] == {}
+    day = board["days"][scoreboard._day(T0)]["stock"]
+    assert day["buy"][:2] == [1, 1] and day["v:rsi"][:2] == [1, 1] and day["v:macd"][:2] == [1, 0]
+
+
+def test_the_up_side_does_not_wait_for_the_down_side():
+    # Buy at 100, ATR 1. Day 1 dips to 97.5: the up side's stop (98) is hit, the
+    # down side's target (97) and stop (102) are not, so only the up side is graded.
+    days = [[obs("stock:AAA", 0, 100, a="buy", up=["rsi"], down=["macd"])],
+            [obs("stock:AAA", 1, 99, low=97.5)],
+            [obs("stock:AAA", 2, 99.5)]]
+    run_days(days)
+    board = scoreboard.load()
+    day = board["days"][scoreboard._day(T0)]["stock"]
+    assert day["buy"][:2] == [1, 0] and day["v:rsi"][:2] == [1, 0] and "v:macd" not in day
+    assert list(board["pending"].values())[0]["done"] == [1], "the down side still waits"
+    run_days([[obs("stock:AAA", 3, 96.5, low=96.5)], [obs("stock:AAA", 4, 97)]])
+    board = scoreboard.load()
+    assert board["pending"] == {} and board["days"][scoreboard._day(T0)]["stock"]["v:macd"][:2] == [1, 1]
+    assert board["days"][scoreboard._day(T0)]["stock"]["buy"][0] == 1, "the Buy is graded once"

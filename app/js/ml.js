@@ -2,6 +2,13 @@
 // (server/ml.py) and saved as plain JSON, so both the server and the phone run
 // them here with the same code: a LightGBM tree ensemble on indicator features
 // and a small LSTM network on the recent sequence of price moves.
+//
+// Stocks and crypto have their own models (a timeframe's file holds `stock`
+// and `crypto` sets, see modelsFor). LightGBM and the LSTM learn which comes
+// first from a candle's close: the target of a Buy (takeAtr ATRs up before
+// stopAtr down) or the target of a Sell (takeAtr down before stopAtr up), the
+// way the scoreboard grades calls. Files from before the split hold one mixed
+// set and predict the move 10 candles later; they keep working until retrained.
 
 export const HORIZON = 10; // candles ahead the models predict
 export const FEE = 0.001; // the same per-side fee as the backtest
@@ -11,6 +18,14 @@ export const MIN_HIT = 0.5; // a model must beat a coin flip in its own test to 
 const ok = Number.isFinite;
 const sigmoid = x => 1 / (1 + Math.exp(-x));
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+// The models for one kind of chart: that kind's set, with the file's trade
+// filter and training time. A file from before the split is the same for both.
+export function modelsFor(models, type) {
+  if (!models || !models.kinds) return models || null;
+  const set = models[type === 'crypto' ? 'crypto' : 'stock'];
+  return { tf: models.tf, trainedAt: models.trainedAt, filter: models.filter, kinds: models.kinds, ...(set || {}), type: type === 'crypto' ? 'crypto' : 'stock' };
+}
 
 // ---- Features ---------------------------------------------------------------
 
@@ -172,8 +187,8 @@ export function lstmProbability(model, seq) {
 
 // ---- Votes --------------------------------------------------------------------
 
-// Direction models must beat a coin flip. Turning-point models (their test has
-// `base`, how often the outcome happens anyway) must beat that by TURN_EDGE.
+// Old direction models must beat a coin flip. The others (their test has
+// `base`, how often their calls would come true anyway) must beat that by TURN_EDGE.
 export const TURN_EDGE = 0.03;
 export const usable = m => !!m && !!m.test && m.test.n >= 200
   && (Number.isFinite(m.test.base) ? m.test.hit >= m.test.base + TURN_EDGE : m.test.hit > MIN_HIT);
@@ -194,7 +209,12 @@ export function voteFor(p, m) {
 }
 
 const pct = v => `${Math.round(v * 100)}%`;
-const describe = (p, m) => `${pct(p)} chance higher after fees in ${HORIZON} candles${Number.isFinite(m.center) ? ` (usually ${pct(m.center)})` : ''} · right ${pct(m.test.hit)} in its test`;
+const describe = (p, m) => m.label === 'first'
+  ? `${pct(p)} chance a Buy's target comes before a Sell's${Number.isFinite(m.center) ? ` (usually ${pct(m.center)})` : ''} · right ${pct(m.test.hit)} of its clear calls in its test, against ${pct(m.test.base)} by chance`
+  : `${pct(p)} chance higher after fees in ${HORIZON} candles${Number.isFinite(m.center) ? ` (usually ${pct(m.center)})` : ''} · right ${pct(m.test.hit)} in its test`;
+// Models trained since the stock/crypto split vote under new ids, so the
+// scoreboard grades them apart from the old mixed ones.
+const voteId = (id, models) => (models.kinds && !models.old ? `${id}2` : id);
 
 // The ML line on the chart: for each model that passed its test, today's vote
 // is looked up in its outcome table (what followed similar votes in the test
@@ -234,13 +254,13 @@ export function mlVotes(S, i, baseVotes, models) {
   const { lgbm, lstm } = models;
   if (usable(lgbm)) {
     const p = lgbmProbability(lgbm, featureVector(S, i, baseVotes, lgbm.features));
-    out.push({ id: 'lgbm', name: 'LightGBM (gradient-boosted trees)', group: 'ml', vote: voteFor(p, lgbm), note: describe(p, lgbm) });
+    out.push({ id: voteId('lgbm', models), name: 'LightGBM (gradient-boosted trees)', group: 'ml', vote: voteFor(p, lgbm), note: describe(p, lgbm) });
   }
   if (usable(lstm)) {
     const seq = sequence(S, i);
     if (seq) {
       const p = lstmProbability(lstm, seq);
-      out.push({ id: 'lstm', name: 'LSTM neural network', group: 'ml', vote: voteFor(p, lstm), note: describe(p, lstm) });
+      out.push({ id: voteId('lstm', models), name: 'LSTM neural network', group: 'ml', vote: voteFor(p, lstm), note: describe(p, lstm) });
     }
   }
   // Turning-point models only speak up: "not a bottom" is not a reason to sell.
@@ -250,7 +270,7 @@ export function mlVotes(S, i, baseVotes, models) {
     const p = lgbmProbability(m, featureVector(S, i, baseVotes, m.features));
     const v = Math.max(0, voteFor(p, m));
     if (v > 0) {
-      out.push({ id, name: t.name, group: 'ml', vote: t.sign * v,
+      out.push({ id: voteId(id, models), name: t.name, group: 'ml', vote: t.sign * v,
         note: `${pct(p)} chance ${t.what} (usually ${pct(m.test.base)}) · right ${pct(m.test.hit)} of its clear calls in its test` });
     }
   }
