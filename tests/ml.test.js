@@ -162,3 +162,17 @@ test('training data for one kind: your symbols and that kind only', async () => 
   assert.equal(stock.symbols, 120);
   assert.ok(seen.includes('AAPL') && !seen.some(s => s === 'XYZ' || /^COIN\d+X$/.test(s)));
 });
+
+test('the crypto training list asks CoinGecko again before giving up', async () => {
+  let calls = 0;
+  const deps = {
+    fetchCandles: async () => ({ candles: [] }),
+    yahooCandles: async () => ({ candles: [] }),
+    fetchCryptoTop: async n => { calls += 1; if (calls < 3) throw new Error('429'); return [{ type: 'crypto', symbol: 'BTC' }]; },
+    now: () => 0,
+    retryWait: 0,
+  };
+  assert.equal((await runDataset({ tf: '1h', settings: {}, items: [], total: 50, kind: 'crypto' }, deps)).symbols, 1);
+  calls = -10;
+  await assert.rejects(runDataset({ tf: '1h', settings: {}, items: [], total: 50, kind: 'crypto' }, deps), /Couldn't get the top coins from CoinGecko: 429/);
+});

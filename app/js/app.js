@@ -1291,7 +1291,8 @@ function renderServer() {
     const name = TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf;
     return m.kinds ? m.kinds.filter(k => m[k]).map(k => [`${name} ${k === 'crypto' ? 'crypto' : 'stocks'}${m[k].old ? ' (old)' : ''}`, m[k]]) : [[name, m]];
   });
-  const pct = t => (t ? `${Math.round(t.hit * 100)}%${t.usable ? '' : ' off'}` : '–');
+  // Right in its test, then (in brackets) how often its calls would come true by chance.
+  const pct = t => (t ? `${Math.round(t.hit * 100)}%${Number.isFinite(t.base) ? ` (${Math.round(t.base * 100)})` : ''}${t.usable ? '' : ' off'}` : '–');
   const training = trainingNow(st) ? `Training now, started ${timeAgo(st.training.runningSince)}`
     : st.training && st.training.nextAt ? `Next training ${when(st.training.nextAt)}` : '';
   info.replaceChildren(...[
@@ -1299,7 +1300,7 @@ function renderServer() {
     problems.length ? el('details', { class: 'srv-problems' },
       el('summary', { class: 'bad small', text: `${problems.length} problem${problems.length === 1 ? '' : 's'}: ${problems[0].split(':')[0]}${problems.length > 1 ? ' and more' : ''}` }),
       el('ul', { class: 'small' }, ...problems.map(t => el('li', { text: t })))) : null,
-    el('div', { class: 'muted small srv-models-head', text: models.length ? `Models, right in their test${training ? ` · ${training}` : ''}` : `Models are not trained yet${training ? ` · ${training}` : ''}` }),
+    el('div', { class: 'muted small srv-models-head', text: models.length ? `Models, right in their test (by chance in brackets; a model votes only 3 points above it)${training ? ` · ${training}` : ''}` : `Models are not trained yet${training ? ` · ${training}` : ''}` }),
     models.length ? el('table', { class: 'srv-models' },
       el('thead', {}, el('tr', {}, ...['', 'LightGBM', 'LSTM', 'Bottom', 'Top'].map(t => el('th', { text: t })))),
       el('tbody', {}, ...models.map(([name, m]) => el('tr', {},

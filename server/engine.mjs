@@ -584,10 +584,16 @@ async function trainingItems(job, deps) {
   const room = cap - out.length;
   if (room > 0 && kind !== 'stock') {
     let crypto = [];
-    try {
-      crypto = await deps.fetchCryptoTop(kind === 'crypto' ? Math.max(job.total, 20) : 20);
-    } catch (e) {
-      if (kind === 'crypto') throw new Error(`Top coins: ${e.message}`);
+    // CoinGecko's free list is often rate-limited right after the scans: the
+    // crypto models need it, so they ask again after a pause.
+    for (const wait of kind === 'crypto' ? [0, 20_000, 60_000] : [0]) {
+      try {
+        if (wait) await new Promise(r => setTimeout(r, deps.retryWait ?? wait));
+        crypto = await deps.fetchCryptoTop(kind === 'crypto' ? Math.max(job.total, 20) : 20);
+        break;
+      } catch (e) {
+        if (kind === 'crypto' && wait === 60_000) throw new Error(`Couldn't get the top coins from CoinGecko: ${e.message}`);
+      }
     }
     (kind === 'crypto' ? crypto : crypto.slice(0, Math.ceil(room / 5))).forEach(add);
   }
@@ -692,7 +698,8 @@ async function main() {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch(e => {
-    process.stderr.write(`${e.stack || e}\n`);
+    // The stack, then the message on the last line: that is what the service shows.
+    process.stderr.write(`${e.stack || e}\n${e.message || e}\n`);
     process.exit(1);
   });
 }
