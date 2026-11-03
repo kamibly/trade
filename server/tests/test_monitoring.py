@@ -307,3 +307,41 @@ def test_what_if_replays_open_and_unfinished_trades_and_keeps_finished_ones():
     r = TestClient(main.app).get("/paper", headers=KEY).json()
     assert set(r["whatIf"]) == {"crypto:SOL:5", "crypto:BTC:1"}
     assert service.whatif_due(service.load_state(), service.now_ms()) is False
+
+
+def test_own_trades_trains_on_closed_trades_and_sizes_next_buys():
+    service.set_profile(PROFILE)
+    t = {"key": "stock:AAA", "symbol": "AAA", "type": "stock", "openedAt": 1, "closedAt": 2, "pnl": 5}
+    shadow_only = {**t, "key": "stock:BBB", "openedAt": 3}
+    service.update_state(lambda st: st.update(
+        paper={"positions": [{**t, "key": "stock:CCC", "openedAt": 9}], "trades": [t]},
+        paperShadow={"positions": [], "trades": [t, shadow_only]},
+        whatIf={"lastRunAt": 0, "results": {"stock:AAA:1": {"target": {"pnl": 1, "open": False}}}},
+        ownInputs={"stock:OLD:1": {"crypto": 1}}))
+    seen = []
+
+    def engine(job, timeout):
+        seen.append(job)
+        return {"state": {"at": 1, "model": {"win": 0.5, "w": [0.1]}, "trades": 1, "judged": 0, "extra": 0, "qualified": False,
+                          "preds": {"stock:CCC:9": {"p": 0.6, "size": 1.2}}, "top": [["score", 0.1]]},
+                "inputs": {"stock:AAA:1": {"score": 0.3}}, "errors": {}}
+    service.run_own_trades(engine=engine)
+    job = seen[0]
+    assert job["mode"] == "ownTrades"
+    assert [x["key"] for x in job["shadowTrades"]] == ["stock:AAA", "stock:BBB"]
+    assert job["whatIf"]["stock:AAA:1"]["target"]["pnl"] == 1
+    st = service.load_state()
+    assert st["ownInputs"] == {"stock:AAA:1": {"score": 0.3}}  # the gone trade's inputs dropped
+    fields = service.paper_fields(st, st["profile"])
+    assert fields["own"] == {"model": {"win": 0.5, "w": [0.1]}, "qualified": False}
+    assert "mood" in fields
+    r = TestClient(main.app).get("/paper", headers=KEY).json()
+    assert r["ownTrades"]["preds"]["stock:CCC:9"]["size"] == 1.2
+    assert r["ownTrades"]["win"] == 0.5 and "model" not in r["ownTrades"]
+
+
+def test_own_trades_waits_for_closed_trades():
+    service.set_profile(PROFILE)
+    service.update_state(lambda st: st.update(paper={"positions": [], "trades": []}))
+    assert service.run_own_trades(engine=lambda job, timeout: 1 / 0) is None
+    assert service.paper_fields(service.load_state(), service.load_state()["profile"])["own"] is None

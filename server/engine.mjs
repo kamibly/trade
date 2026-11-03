@@ -18,6 +18,7 @@ import { featureNames, featureVector, sequence, label, turnLabels, modelsFor } f
 import { summarize, alertFor, learn, learnKey, ruleOf, tradeRecordLine, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
 import * as paper from './js/paper.js';
+import * as own from './js/owntrades.js';
 import { formatMoney } from './js/format.js';
 import { SETUPS } from './js/setups.js';
 import { lite, findOpportunities, digest } from './opportunities.mjs';
@@ -253,7 +254,7 @@ export async function runWatch(job, deps = defaultDeps) {
   }
   // The paper account trades the same signals: buys a Buy it doesn't hold yet
   // (within 1 ATR of where it began), sells on a Sell, the stop-loss or the target.
-  const paperEvents = bothAccounts(job, (acc, useFilter) => paper.step(acc, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsFor(job.budgets, job.kinds), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null, kinds: job.kinds || null }), deps);
+  const paperEvents = bothAccounts(job, (acc, useFilter) => paper.step(acc, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsFor(job.budgets, job.kinds), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null, kinds: job.kinds || null, own: job.own || null, mood: job.mood || null }), deps);
   return { signals, alerts, changes, holdingsAlerted, weights, errors, paper: job.paper || null, paperEvents, shadow: job.shadow || null, ...seen };
 }
 
@@ -513,7 +514,7 @@ async function opportunitiesFor(job, rows, deps, errors) {
 // result: { paper, paperEvents, shadow }
 export async function runPaper(job, deps = defaultDeps) {
   const paperEvents = bothAccounts(job, (acc, useFilter) => {
-    const opts = { riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsFor(job.budgets, job.kinds), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null, kinds: job.kinds || null };
+    const opts = { riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsFor(job.budgets, job.kinds), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null, kinds: job.kinds || null, own: job.own || null, mood: job.mood || null };
     const held = new Set(acc.positions.filter(p => p.setup === 'scan').map(p => p.key));
     return [
       ...paper.closeOnSells(acc, (job.scanSells || []).filter(s => held.has(s.key)), 'scan', opts),
@@ -661,6 +662,64 @@ export async function runDataset(job, deps = defaultDeps) {
 
 // [time, trend] lists for SPY (stocks) and Bitcoin (crypto), for the trade filter.
 const MARKETS = { stock: { type: 'stock', symbol: 'SPY', name: 'S&P 500' }, crypto: { type: 'crypto', symbol: 'BTC', name: 'Bitcoin', geckoId: 'bitcoin' } };
+// The own-trades model: learns from the closed paper trades (and the shadow's),
+// runs the fair test and gives each trade its judged chance and size.
+// Trades that didn't save their inputs (bought before it existed) get them
+// rebuilt from the daily chart on the buy day: the methods' votes and score
+// (watchlist Buys and scan ideas only) and the market's mood.
+// job: { settings, trades, shadowTrades, positions, whatIf: { id: { target, trail, lock } }, inputs: { id: x } }
+// result: { state: { at, model, trades, judged, extra, qualified, preds, top }, inputs: { id: x } (new ones), errors }
+export async function runOwnTrades(job, deps = defaultDeps) {
+  const errors = {};
+  const inputs = { ...(job.inputs || {}) };
+  const all = [...(job.trades || []), ...(job.shadowTrades || []), ...(job.positions || [])];
+  const missing = new Map();
+  for (const t of all) {
+    const id = own.tradeId(t);
+    if ((t.own && t.own.x) || inputs[id] || missing.has(id)) continue;
+    missing.set(id, t);
+  }
+  const fresh = {};
+  if (missing.size) {
+    const trends = await marketTrends(job.settings, deps, errors);
+    const bySymbol = new Map();
+    for (const t of missing.values()) {
+      const needVotes = !t.why && own.sourceOfSetup(t.setup) !== 'opportunities';
+      if (needVotes) bySymbol.set(t.key, [...(bySymbol.get(t.key) || []), t]);
+      else fresh[own.tradeId(t)] = { t, why: t.why || null };
+    }
+    await pool([...bySymbol.values()], 3, async trades => {
+      try {
+        const { candles } = await candlesFor({ type: trades[0].type, symbol: trades[0].symbol }, '1D', job.settings, deps);
+        const S = analyze(candles);
+        for (const t of trades) {
+          let i = -1;
+          for (let j = 0; j < candles.length && candles[j].time * 1000 <= t.openedAt; j++) i = j;
+          const votes = i >= 0 ? baseVotesAt(S, i) : [];
+          fresh[own.tradeId(t)] = { t, why: votes.length ? { score: scoreVotes(votes), votes: votes.map(v => [v.id, v.name, v.group, v.vote, 1]) } : null };
+        }
+      } catch (e) {
+        errors[trades[0].key] = e.message;
+        for (const t of trades) fresh[own.tradeId(t)] = { t, why: null };
+      }
+    });
+    for (const [id, { t, why }] of Object.entries(fresh)) {
+      const mood = trendAt(trends[t.type] || [], Math.floor(t.openedAt / 1000));
+      inputs[id] = own.compact(own.inputsOf({ why, filter: t.filter || null, type: t.type, setup: t.setup, mood }));
+    }
+  }
+  const state = own.fit({ trades: job.trades || [], shadowTrades: job.shadowTrades || [], inputs, whatIf: job.whatIf || {}, now: deps.now() });
+  // Open trades bought before the model existed get today's model's view.
+  for (const p of job.positions || []) {
+    const id = own.tradeId(p);
+    if (p.own && Number.isFinite(p.own.p)) continue;
+    const x = (p.own && p.own.x) || inputs[id];
+    const c = x && state.model ? own.chance(state.model, x) : NaN;
+    if (Number.isFinite(c)) state.preds[id] = { p: Number(c.toFixed(4)), size: Number(own.sizeFor(c, state.model.win).toFixed(3)) };
+  }
+  return { state, inputs: Object.fromEntries(Object.keys(fresh).map(id => [id, inputs[id]])), errors };
+}
+
 async function marketTrends(settings, deps, errors, kinds = ['stock', 'crypto']) {
   const out = {};
   for (const kind of kinds) {
@@ -681,7 +740,7 @@ async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
-  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper, paperEdit: runPaperEdit, whatIf: runWhatIf }[job.mode] || runWatch;
+  const run = { market: runMarket, dataset: runDataset, prices: runPrices, paper: runPaper, paperEdit: runPaperEdit, whatIf: runWhatIf, ownTrades: runOwnTrades }[job.mode] || runWatch;
   const result = await run(job);
   if (job.stream) {
     // Training data is big: a header line, then one row per line, so Python
