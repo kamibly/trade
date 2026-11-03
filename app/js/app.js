@@ -1286,13 +1286,26 @@ function renderServer() {
     ...Object.entries((st.training && st.training.results) || {}).filter(([, r]) => r.error).map(([tf, r]) => `Training ${tf}: ${r.error}`),
     ...Object.entries((st.training && st.training.results) || {}).flatMap(([tf, r]) => Object.entries(r.errors || {}).map(([kind, msg]) => `Training ${tf} ${kind}: ${msg}`)),
   ].filter(Boolean);
-  // One row per timeframe, or per timeframe and kind since stocks and crypto train apart.
-  const models = Object.entries(st.models || {}).flatMap(([tf, m]) => {
-    const name = TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf;
-    return m.kinds ? m.kinds.filter(k => m[k]).map(k => [`${name} ${k === 'crypto' ? 'crypto' : 'stocks'}${m[k].old ? ' (old)' : ''}`, m[k]]) : [[name, m]];
-  });
-  // Right in its test, then (in brackets) how often its calls would come true by chance.
-  const pct = t => (t ? `${Math.round(t.hit * 100)}%${Number.isFinite(t.base) ? ` (${Math.round(t.base * 100)})` : ''}${t.usable ? '' : ' off'}` : '–');
+  // One small table per timeframe: a row per model, a column per kind (one
+  // column for files from before stocks and crypto were split). Each cell: how
+  // often its test calls were right, how often they'd be right by chance, and
+  // whether it votes.
+  const ORDER = ['15m', '1h', '1D', '1W'];
+  const models = Object.entries(st.models || {}).sort(([a], [b]) => ORDER.indexOf(a) - ORDER.indexOf(b));
+  const MODEL_ROWS = [['lgbm', 'LightGBM'], ['lstm', 'LSTM'], ['bottom', 'Bottom finder'], ['top', 'Top finder']];
+  const cell = t => {
+    if (!t) return el('td', { class: 'muted', text: '–' });
+    const chance = Number.isFinite(t.base) ? `chance ${Math.round(t.base * 100)}%` : 'needs over 50%';
+    return el('td', { class: t.usable ? 'srv-on' : 'srv-off' },
+      el('div', { class: 'srv-hit', text: `${Math.round(t.hit * 100)}%${t.usable ? ' ✓' : ''}` }),
+      el('div', { class: 'srv-chance', text: chance }));
+  };
+  const modelTable = ([tf, m]) => {
+    const sets = m.kinds ? m.kinds.filter(k => m[k]).map(k => [`${k === 'crypto' ? 'Crypto' : 'Stocks'}${m[k].old ? ' (old)' : ''}`, m[k]]) : [['Stocks and crypto', m]];
+    return el('table', { class: 'srv-models' },
+      el('thead', {}, el('tr', {}, el('th', { text: TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf }), ...sets.map(([name]) => el('th', { text: name })))),
+      el('tbody', {}, ...MODEL_ROWS.map(([id, name]) => el('tr', {}, el('th', { text: name }), ...sets.map(([, set]) => cell(set[id]))))));
+  };
   const training = trainingNow(st) ? `Training now, started ${timeAgo(st.training.runningSince)}`
     : st.training && st.training.nextAt ? `Next training ${when(st.training.nextAt)}` : '';
   info.replaceChildren(...[
@@ -1300,12 +1313,8 @@ function renderServer() {
     problems.length ? el('details', { class: 'srv-problems' },
       el('summary', { class: 'bad small', text: `${problems.length} problem${problems.length === 1 ? '' : 's'}: ${problems[0].split(':')[0]}${problems.length > 1 ? ' and more' : ''}` }),
       el('ul', { class: 'small' }, ...problems.map(t => el('li', { text: t })))) : null,
-    el('div', { class: 'muted small srv-models-head', text: models.length ? `Models, right in their test (by chance in brackets; a model votes only 3 points above it)${training ? ` · ${training}` : ''}` : `Models are not trained yet${training ? ` · ${training}` : ''}` }),
-    models.length ? el('table', { class: 'srv-models' },
-      el('thead', {}, el('tr', {}, ...['', 'LightGBM', 'LSTM', 'Bottom', 'Top'].map(t => el('th', { text: t })))),
-      el('tbody', {}, ...models.map(([name, m]) => el('tr', {},
-        el('th', { text: name }),
-        ...[m.lgbm, m.lstm, m.bottom, m.top].map(t => el('td', { class: t && !t.usable ? 'muted' : '', text: pct(t) })))))) : null,
+    el('div', { class: 'muted small srv-models-head', text: models.length ? `Models: how often their test calls were right, against chance. ✓ votes (3 points or more above chance).${training ? ` ${training}.` : ''}` : `Models are not trained yet${training ? ` · ${training}` : ''}` }),
+    ...models.map(modelTable),
   ].filter(Boolean));
 }
 
