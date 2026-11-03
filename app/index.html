@@ -226,6 +226,15 @@
             <span class="label-info">Trade filter <button type="button" class="ghost info-btn" data-info="filter-info" aria-label="About the trade filter">ⓘ</button></span>
           </label>
           <p id="filter-info" class="muted small" hidden>Your server's machine-learning filter skips buy ideas it expects to lose and puts more into the ones it likes best. It is used only after passing its own test, and an account without it runs alongside to show whether it helps. Opportunities keep their own test.</p>
+          <h3 class="set-sub">What paper trades buy</h3>
+          <label class="switch"><input id="paper-stocks" type="checkbox"><span>Stocks</span></label>
+          <label class="switch"><input id="paper-crypto" type="checkbox"><span>Crypto</span></label>
+          <p class="muted small">Turning a kind off stops new buys of it. Its open trades still run to their stop or target. NDAX copies the paper crypto buys, so Crypto off also stops new real orders.</p>
+          <h3 class="set-sub">Share of the account per source</h3>
+          <div id="paper-shares" class="share-grid"></div>
+          <p id="paper-shares-note" class="muted small"></p>
+          <label class="switch"><input id="paper-automove" type="checkbox"><span>Move shares weekly by results</span></label>
+          <p class="muted small">When on, once two sources each have 50 closed trades, the best one takes up to 5% a week from the worst (each stays between 10% and 50%). Off keeps your numbers as you set them.</p>
           <p id="risk-status" class="small" role="status"></p>
         </div>
       </details>
