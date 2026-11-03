@@ -228,6 +228,10 @@ def clean_profile(raw: dict) -> dict:
             "riskPct": _num(s.get("riskPct"), 1, 0.1, 5),
             "paperStart": round(_num(s.get("paperStart"), 10000, 100, 10_000_000)),
             "tradeFilter": bool(s.get("tradeFilter", True)),
+            "paperStocks": bool(s.get("paperStocks", True)),
+            "paperCrypto": bool(s.get("paperCrypto", True)),
+            "paperShares": clean_shares(s.get("paperShares")),
+            "paperAutoMove": bool(s.get("paperAutoMove", False)),
             "paperExit": s.get("paperExit") if s.get("paperExit") in ("trail", "lock") else "target",
             "ndaxMode": s.get("ndaxMode") if s.get("ndaxMode") in ndax.MODES else "off",
             "ndaxBudget": round(_num(s.get("ndaxBudget"), 100, 0, 1_000_000), 2),
@@ -515,7 +519,9 @@ def paper_fields(state: dict, profile: dict) -> dict:
         "paper": acc,
         "shadow": shadow,
         "useFilter": bool(profile["settings"].get("tradeFilter", True)) and trial.get("result") != "behind",
-        "budgets": (state.get("paperBudgets") or {}).get("shares"),
+        "budgets": budget_state(state)["shares"],
+        "kinds": {"stock": bool(profile["settings"].get("paperStocks", True)),
+                  "crypto": bool(profile["settings"].get("paperCrypto", True))},
         "trail": profile["settings"].get("paperExit") == "trail",
         "lock": profile["settings"].get("paperExit") == "lock",
         "tradable": ndax.tradable(state),
@@ -559,12 +565,48 @@ def filter_trial(st: dict, now: Optional[int] = None) -> Optional[dict]:
     return out
 
 
-# Each source's share of the paper account (app/js/paper.js BUDGETS). Once two
-# sources have BUDGET_MIN_TRADES closed trades, once a week the one with the
-# best average trade takes up to BUDGET_STEP from the worst, within the limits.
+# Each source's share of the paper account (app/js/paper.js BUDGETS), as set
+# in the app's Settings (paperShares, in percent) or these defaults. With the
+# weekly move on (paperAutoMove), once two sources have BUDGET_MIN_TRADES closed
+# trades, once a week the one with the best average trade takes up to
+# BUDGET_STEP from the worst, within the limits. Stocks or crypto switched off
+# (paperStocks, paperCrypto) hand their sources' shares to the others in the
+# engine (paper.js sharesInUse).
 BUDGET_SHARES = {"opportunities": 0.4, "stockIdeas": 0.2, "cryptoIdeas": 0.2, "alerts": 0.2}
 BUDGET_MIN_TRADES, BUDGET_STEP, BUDGET_MIN, BUDGET_MAX = 50, 0.05, 0.1, 0.5
 WEEK_MS = 7 * 86400_000
+
+
+def clean_shares(raw) -> Optional[Dict[str, int]]:
+    """Whole percents for every source that add up to 100, or None (the defaults)."""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        out = {k: int(raw[k]) for k in BUDGET_SHARES}
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(v < 0 or v > 100 for v in out.values()) or sum(out.values()) != 100:
+        return None
+    return out
+
+
+def base_shares(settings: dict) -> Dict[str, float]:
+    user = settings.get("paperShares")
+    return {k: round(v / 100, 4) for k, v in user.items()} if user else dict(BUDGET_SHARES)
+
+
+def budget_state(st: dict, now: Optional[int] = None) -> dict:
+    """The shares the account trades with. New shares from Settings start over
+    from them; the weekly moves build on them only while the move is on."""
+    settings = (st.get("profile") or {}).get("settings") or {}
+    base = base_shares(settings)
+    b = st.get("paperBudgets")
+    auto = bool(settings.get("paperAutoMove"))
+    if not b or b.get("base") != base:
+        return {"shares": dict(base), "base": base, "at": now or now_ms(), "moves": [], "auto": auto}
+    if not auto:  # off: your shares as set, and the weekly clock keeps running
+        return {**b, "shares": dict(base), "auto": False}
+    return {**b, "auto": True}
 
 
 def bucket_of(t: dict) -> str:
@@ -578,8 +620,8 @@ def bucket_of(t: dict) -> str:
 
 def follow_results(st: dict, now: Optional[int] = None) -> dict:
     now = now or now_ms()
-    b = st.get("paperBudgets") or {"shares": dict(BUDGET_SHARES), "at": now, "moves": []}
-    if now - b["at"] < WEEK_MS:
+    b = budget_state(st, now)
+    if not b["auto"] or now - b["at"] < WEEK_MS:
         return b
     b = {**b, "shares": dict(b["shares"]), "at": now}
     stats = {}

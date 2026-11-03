@@ -193,7 +193,7 @@ const paperLine = ev => (ev.kind === 'open'
 // Watchlist and holdings on the alert timeframe, plus the paper account.
 // job: { tf, settings, items, holdings, prev: { key: signal }, weights: { "key:tf": {at, weights} },
 //        models, mood: { stock, crypto } market trends, paper: account | null, riskPct,
-//        shadow: the unfiltered account | null, useFilter, budgets: { source: share }, trail }
+//        shadow: the unfiltered account | null, useFilter, budgets: { source: share }, kinds: { stock, crypto }, trail }
 // result: { signals, alerts, changes, holdingsAlerted, weights, errors, paper, paperEvents, shadow }
 export async function runWatch(job, deps = defaultDeps) {
   const { tf, settings } = job;
@@ -253,7 +253,7 @@ export async function runWatch(job, deps = defaultDeps) {
   }
   // The paper account trades the same signals: buys a Buy it doesn't hold yet
   // (within 1 ATR of where it began), sells on a Sell, the stop-loss or the target.
-  const paperEvents = bothAccounts(job, (acc, useFilter) => paper.step(acc, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsWith(job.budgets), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null }), deps);
+  const paperEvents = bothAccounts(job, (acc, useFilter) => paper.step(acc, { signals, alerts: changes, riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsFor(job.budgets, job.kinds), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null, kinds: job.kinds || null }), deps);
   return { signals, alerts, changes, holdingsAlerted, weights, errors, paper: job.paper || null, paperEvents, shadow: job.shadow || null, ...seen };
 }
 
@@ -509,11 +509,11 @@ async function opportunitiesFor(job, rows, deps, errors) {
 
 // The paper account (and its unfiltered shadow) takes the market scan's
 // opportunities and buy ideas, and sells scan trades that turned Sell.
-// job: { paper, shadow, opportunities, scanBuys, scanSells, riskPct, useFilter, budgets, trail, lock, tradable }
+// job: { paper, shadow, opportunities, scanBuys, scanSells, riskPct, useFilter, budgets, kinds, trail, lock, tradable }
 // result: { paper, paperEvents, shadow }
 export async function runPaper(job, deps = defaultDeps) {
   const paperEvents = bothAccounts(job, (acc, useFilter) => {
-    const opts = { riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsWith(job.budgets), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null };
+    const opts = { riskPct: job.riskPct || 1, now: deps.now(), budgets: paper.budgetsFor(job.budgets, job.kinds), useFilter, trail: !!job.trail, lock: !!job.lock, tradable: job.tradable || null, kinds: job.kinds || null };
     const held = new Set(acc.positions.filter(p => p.setup === 'scan').map(p => p.key));
     return [
       ...paper.closeOnSells(acc, (job.scanSells || []).filter(s => held.has(s.key)), 'scan', opts),

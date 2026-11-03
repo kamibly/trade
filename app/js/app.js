@@ -21,7 +21,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.28.0 (stock and crypto models)';
+export const APP_VERSION = '0.28.0 (stock and crypto models, paper sources)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1666,7 +1666,7 @@ function paperAccount() {
 function stepPaper(tf, alerts) {
   if (serverOn()) return; // the server trades the paper account
   const signals = Object.fromEntries(Object.entries(state.signals).filter(([, s]) => s.tf === tf));
-  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct, budgets: paper.PHONE_BUDGETS, trail: state.settings.paperExit === 'trail', lock: state.settings.paperExit === 'lock' });
+  const events = paper.step(paperAccount(), { signals, alerts, riskPct: state.settings.riskPct, budgets: paper.PHONE_BUDGETS, kinds: paperKinds(state.settings), trail: state.settings.paperExit === 'trail', lock: state.settings.paperExit === 'lock' });
   store.savePaper(state.paper);
   for (const ev of events) {
     toast(ev.kind === 'open'
@@ -2267,7 +2267,7 @@ function bySetupTable(acc, budgets) {
         el('td', { class: upDown(r.ret), text: r.trades ? fmtPct(r.ret) : '–' }),
         el('td', { text: r.trades ? fmtPct(-r.maxDrawdown) : '–' })))))),
     el('p', { class: 'muted small', text: 'Return is on the starting amount. Opportunity trades sell at their stop, their target or the end of their holding period.' }),
-    budgets && budgets.shares ? el('p', { class: 'muted small', text: `Share of the account each source can use (one trade gets up to a fifth of it, up to 10 trades): ${Object.entries(paper.BUDGETS).map(([k, b]) => `${b.name} ${Math.round((budgets.shares[k] ?? b.share) * 100)}%`).join(', ')}. Once two sources have 50 closed trades, the one with the best average trade takes up to 5 points a week from the worst, within 10% to 50%.` }) : null);
+    budgets && budgets.shares ? el('p', { class: 'muted small', text: `Share of the account each source can use (one trade gets up to a fifth of it, up to 10 trades): ${(used => Object.entries(paper.BUDGETS).map(([k, b]) => `${b.name} ${Math.round(used[k] * 100)}%`).join(', '))(paper.sharesInUse(budgets.shares, paperKinds(state.settings)))}. ${budgets.auto ? ' Once two sources have 50 closed trades, the one with the best average trade takes up to 5 points a week from the worst, within 10% to 50%.' : ' Change them in Settings > Paper trading.'}` }) : null);
 }
 
 async function resetPaper() {
@@ -2286,6 +2286,64 @@ async function resetPaper() {
   state.paper = paper.newAccount(state.settings.paperStart);
   store.savePaper(state.paper);
   renderPaper();
+}
+
+// Settings > Paper: what the paper account buys and each source's share.
+// "In use" is what the account trades with: your shares (or the server's,
+// moved by results, while the weekly move is on), less switched-off kinds.
+const paperKinds = s => ({ stock: s.paperStocks !== false, crypto: s.paperCrypto !== false });
+function userShares(s) {
+  return Object.fromEntries(Object.entries(paper.BUDGETS).map(([k, b]) => [k, s.paperShares && Number.isFinite(s.paperShares[k]) ? s.paperShares[k] : Math.round(b.share * 100)]));
+}
+function renderPaperSources() {
+  const s = state.settings, kinds = paperKinds(s), mine = userShares(s);
+  const server = state.serverPaper && state.serverPaper.budgets;
+  const base = s.paperAutoMove && server && server.auto && server.shares ? server.shares : Object.fromEntries(Object.entries(mine).map(([k, v]) => [k, v / 100]));
+  const used = paper.sharesInUse(base, kinds);
+  const grid = $('paper-shares');
+  const inputs = {};
+  grid.replaceChildren(el('span'), el('span', { class: 'small muted', text: 'You set' }), el('span', { class: 'small muted', text: 'In use' }),
+    ...Object.entries(paper.BUDGETS).flatMap(([k, b]) => {
+      const off = paper.KIND_ONLY[k] && !kinds[paper.KIND_ONLY[k]];
+      const input = inputs[k] = el('input', { type: 'number', inputmode: 'numeric', min: '0', max: '100', step: '5', value: String(mine[k]), 'aria-label': `${b.name}, % of the account` });
+      input.disabled = !!off;
+      input.addEventListener('change', savePaperShares);
+      const share = Math.round(used[k] * 100);
+      return [el('span', { text: b.name }), input, off || !share ? el('span', { class: 'muted small', text: off ? 'off' : '0%' }) : el('b', { text: `${share}%` })];
+    }),
+    el('span', { class: 'small', text: 'Total' }), el('span', { class: 'small', id: 'paper-shares-total' }), el('span'));
+  grid._inputs = inputs;
+  showSharesTotal();
+  const offNames = Object.entries(paper.KIND_ONLY).filter(([, kind]) => !kinds[kind]).map(([k]) => paper.BUDGETS[k].name);
+  $('paper-shares-note').textContent = !kinds.stock && !kinds.crypto ? 'Stocks and crypto are both off, so the paper account buys nothing new.'
+    : offNames.length ? `With ${kinds.stock ? 'Crypto' : 'Stocks'} off, the share of ${offNames.join(' and ')} goes to the other sources in proportion, and Opportunities and Watchlist alerts buy only ${kinds.stock ? 'stocks' : 'crypto'}. One trade gets up to a fifth of its source's share.`
+    : s.paperAutoMove && server && server.auto ? 'In use follows the weekly moves, starting from your numbers. One trade gets up to a fifth of its source\'s share.'
+    : 'One trade gets up to a fifth of its source\'s share, and a source holds up to 10 trades.';
+  $('paper-stocks').checked = kinds.stock;
+  $('paper-crypto').checked = kinds.crypto;
+  $('paper-automove').checked = !!s.paperAutoMove;
+}
+function sharesTyped() {
+  const inputs = $('paper-shares')._inputs || {};
+  return Object.fromEntries(Object.entries(inputs).map(([k, i]) => [k, Number(i.value)]));
+}
+function showSharesTotal() {
+  const typed = sharesTyped();
+  const total = Object.values(typed).reduce((t, v) => t + (Number.isFinite(v) ? v : 0), 0);
+  const ok = total === 100 && Object.values(typed).every(v => Number.isInteger(v) && v >= 0 && v <= 100);
+  const cell = $('paper-shares-total');
+  cell.textContent = ok ? '100% ✓' : `${total}%, must be 100%`;
+  cell.className = ok ? 'small' : 'small bad';
+  return ok ? typed : null;
+}
+function savePaperShares() {
+  const typed = showSharesTotal();
+  if (!typed) { $('risk-status').textContent = 'Not saved yet: the shares must be whole numbers that add up to 100%.'; return; }
+  const defaults = Object.entries(paper.BUDGETS).every(([k, b]) => typed[k] === Math.round(b.share * 100));
+  state.settings = store.saveSettings({ paperShares: defaults ? null : typed });
+  markChanged();
+  renderPaperSources();
+  $('risk-status').textContent = 'Saved. New paper buys use these shares from the next check; open trades stay as they are.';
 }
 
 // ---- Settings ---------------------------------------------------------------
@@ -2308,7 +2366,8 @@ function renderSettingsSummaries() {
   const muted = ((state.market && state.market.setupsInfo) || {}).muted || [];
   $('sum-setups').textContent = `${on} of ${ids.length} on${muted.length ? ` · ${muted.length} muted` : ''}`;
   const exits = { target: 'sells at target', trail: 'trailing stop', lock: 'profit lock' };
-  $('sum-paper').textContent = [formatMoney(s.paperStart), `${s.riskPct}% risk`, `stop ${s.stopAtr}, target ${s.takeAtr} ATR`, exits[s.paperExit] || exits.target, s.tradeFilter !== false ? 'filter on' : 'filter off'].join(' · ');
+  $('sum-paper').textContent = [formatMoney(s.paperStart), `${s.riskPct}% risk`, `stop ${s.stopAtr}, target ${s.takeAtr} ATR`, exits[s.paperExit] || exits.target, s.tradeFilter !== false ? 'filter on' : 'filter off',
+    s.paperStocks === false && s.paperCrypto === false ? 'buys nothing' : s.paperStocks === false ? 'crypto only' : s.paperCrypto === false ? 'stocks only' : null].filter(Boolean).join(' · ');
   const mode = ['off', 'dry', 'live'].includes(s.ndaxMode) ? s.ndaxMode : 'off';
   const modeName = { off: 'Off', dry: 'Dry run', live: 'Live' }[mode];
   const nd = state.ndax;
@@ -2403,6 +2462,7 @@ function renderSettings() {
   $('risk-pct').value = state.settings.riskPct;
   $('paper-start').value = state.settings.paperStart;
   $('filter-toggle').checked = state.settings.tradeFilter !== false;
+  renderPaperSources();
   $('paper-exit').value = ['trail', 'lock'].includes(state.settings.paperExit) ? state.settings.paperExit : 'target';
   $('ndax-mode').value = ['off', 'dry', 'live'].includes(state.settings.ndaxMode) ? state.settings.ndaxMode : 'off';
   $('ndax-budget').value = state.settings.ndaxBudget;
@@ -2606,6 +2666,25 @@ function bind() {
     state.settings = store.saveSettings({ tradeFilter: e.target.checked });
     markChanged();
     $('risk-status').textContent = 'Saved. The paper account uses it from the next check.';
+  });
+  for (const [id, key, kind] of [['paper-stocks', 'paperStocks', 'stock'], ['paper-crypto', 'paperCrypto', 'crypto']]) {
+    $(id).addEventListener('change', e => {
+      if (!e.target.checked && kind === 'crypto' && state.settings.ndaxMode === 'live' && !confirm('NDAX copies the paper crypto buys, so this also stops new real crypto orders. Its open trades still sell as planned. Continue?')) {
+        e.target.checked = true;
+        return;
+      }
+      state.settings = store.saveSettings({ [key]: e.target.checked });
+      markChanged();
+      renderPaperSources();
+      renderSettingsSummaries();
+      $('risk-status').textContent = `Saved. ${e.target.checked ? 'New paper buys can include it again' : 'No new paper buys of it; open trades still run to their stop or target'} from the next check.`;
+    });
+  }
+  $('paper-automove').addEventListener('change', e => {
+    state.settings = store.saveSettings({ paperAutoMove: e.target.checked });
+    markChanged();
+    renderPaperSources();
+    $('risk-status').textContent = e.target.checked ? 'Saved. The server moves shares weekly by results, starting from your numbers.' : 'Saved. The shares stay as you set them.';
   });
   $('paper-exit').addEventListener('change', e => {
     state.settings = store.saveSettings({ paperExit: ['trail', 'lock'].includes(e.target.value) ? e.target.value : 'target' });
