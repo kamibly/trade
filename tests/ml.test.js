@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { analyze, votesAt, baseVotesAt, signalAt, METHOD_IDS } from '../app/js/signals.js';
-import { featureNames, featureVector, sequence, label, lgbmProbability, lstmProbability, usable, mlVotes, mlOutlook, voteFor, SEQ_LEN, HORIZON } from '../app/js/ml.js';
+import { featureNames, featureVector, sequence, label, lgbmProbability, lstmProbability, usable, mlVotes, mlOutlook, voteFor, modelsFor, SEQ_LEN, HORIZON } from '../app/js/ml.js';
+import { runDataset } from '../server/engine.mjs';
 import { backtest } from '../app/js/backtest.js';
 import { scanItem } from '../app/js/scanner.js';
 
@@ -123,4 +124,41 @@ test('the chart outlook uses what followed similar votes, weighted by cases', ()
   assert.equal(mlOutlook(S, 299, [], { cutoff: 0, lgbm: { ...lgbm, test: { hit: 0.4, n: 999 } } }), null); // failed its test
   assert.equal(mlOutlook(S, 299, [], { cutoff: 0, lgbm: { ...lgbm, outcomes: undefined } }), null); // older models
   assert.equal(mlOutlook(S, 299, [], { cutoff: candles[299].time, lgbm }), null); // inside the training period
+});
+
+test('stocks and crypto use their own models, which vote under new ids', () => {
+  const candles = series(300, 0.002);
+  const lgbm = { features: ['vote:sma'], trees: [{ nodes: [], leaves: [3] }], center: 0.5, scale: 0.25, label: 'first', stopAtr: 2, takeAtr: 3,
+    test: { hit: 0.6, n: 300, base: 0.4 } };
+  const file = { tf: '1D', trainedAt: 9, kinds: ['stock', 'crypto'], filter: { x: 1 },
+    stock: { cutoff: candles[200].time, lgbm }, crypto: { cutoff: candles[200].time, lgbm: { ...lgbm, test: { hit: 0.42, n: 300, base: 0.4 } } } };
+  assert.equal(modelsFor(file, 'stock').lgbm, lgbm);
+  assert.deepEqual([modelsFor(file, 'crypto').trainedAt, modelsFor(file, 'crypto').filter, modelsFor(file, 'crypto').type], [9, file.filter, 'crypto']);
+  const old = { cutoff: 1, lgbm };
+  assert.equal(modelsFor(old, 'crypto'), old, 'a file from before the split is the same for both');
+  const votes = S => votesAt(S, 250).filter(v => v.group === 'ml');
+  const stock = votes(analyze(candles, { models: modelsFor(file, 'stock') }));
+  assert.deepEqual(stock.map(v => v.id), ['lgbm2']);
+  assert.match(stock[0].note, /a Buy's target comes before a Sell's .* right 60% of its clear calls in its test, against 40% by chance/);
+  assert.deepEqual(votes(analyze(candles, { models: modelsFor(file, 'crypto') })), [], 'not 3 points above chance: no vote');
+  const kept = { ...file, crypto: { cutoff: candles[200].time, lgbm: { ...lgbm, label: undefined, test: { hit: 0.55, n: 300 } }, old: true } };
+  assert.deepEqual(votes(analyze(candles, { models: modelsFor(kept, 'crypto') })).map(v => v.id), ['lgbm'], 'old mixed models kept for a kind vote as before');
+});
+
+test('training data for one kind: your symbols and that kind only', async () => {
+  const seen = [];
+  const deps = {
+    yahooCandles: async item => { seen.push(item.symbol); return { candles: [] }; },
+    fetchCandles: async item => { seen.push(item.symbol); return { candles: [] }; },
+    fetchCryptoTop: async n => Array.from({ length: n }, (_, k) => ({ type: 'crypto', symbol: `COIN${k}X` })),
+    now: () => 0,
+  };
+  const items = [{ type: 'stock', symbol: 'AAPL' }, { type: 'crypto', symbol: 'XYZ' }];
+  const crypto = await runDataset({ tf: '1h', settings: {}, items, total: 50, kind: 'crypto' }, deps);
+  assert.equal(crypto.symbols, 51, 'your coin plus all top 50');
+  assert.ok(!seen.includes('AAPL'));
+  seen.length = 0;
+  const stock = await runDataset({ tf: '1h', settings: {}, items, total: 120, kind: 'stock' }, deps);
+  assert.equal(stock.symbols, 120);
+  assert.ok(seen.includes('AAPL') && !seen.some(s => s === 'XYZ' || /^COIN\d+X$/.test(s)));
 });

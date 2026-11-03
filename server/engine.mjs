@@ -14,7 +14,7 @@ import { proxiedFetch, fallbackFetch } from './proxy.mjs';
 import { analyze, signalAt, baseVotesAt, scoreVotes, METHOD_IDS, MIN_CANDLES } from './js/signals.js';
 import { filterNames, filterVector, tradeOutcome, marketTrend, trendAt, judge, MIN_SCORE as FILTER_MIN_SCORE } from './js/filter.js';
 import { feeRate } from './js/fees.js';
-import { featureNames, featureVector, sequence, label, turnLabels } from './js/ml.js';
+import { featureNames, featureVector, sequence, label, turnLabels, modelsFor } from './js/ml.js';
 import { summarize, alertFor, learn, learnKey, ruleOf, tradeRecordLine, WEIGHTS_MAX_AGE_MS } from './js/scanner.js';
 import { checkHolding } from './js/portfolio.js';
 import * as paper from './js/paper.js';
@@ -116,7 +116,7 @@ async function candlesFor(item, tf, settings, deps) {
 async function score(item, tf, settings, weightsCache, deps, models, { onS, mood } = {}) {
   const { candles, source } = await candlesFor(item, tf, settings, deps);
   if (candles.length < MIN_CANDLES) throw new Error(`Only ${candles.length} candles, ${MIN_CANDLES} needed`);
-  const S = analyze(candles, { models });
+  const S = analyze(candles, { models: modelsFor(models, item.type) });
   const wKey = `${key(item)}:${tf}`;
   const modelsAt = (models && models.trainedAt) || null;
   let w = weightsCache[wKey];
@@ -566,33 +566,41 @@ export async function runWhatIf(job, deps = defaultDeps) {
 }
 
 // Your symbols plus a spread of S&P 500 stocks and top cryptos, so the models
-// learn from more than a handful of charts. `total` caps the list.
+// learn from more than a handful of charts. `total` caps the list. With
+// `kind`, only that kind: your stocks and an S&P 500 sample, or your coins and
+// the top `total` coins (all of them, on top of yours).
 async function trainingItems(job, deps) {
   const out = [];
   const seen = new Set();
+  const kind = job.kind || null;
+  const cap = kind === 'crypto' ? job.total + (job.items || []).filter(i => i.type === 'crypto').length : job.total;
   const add = item => {
-    if (out.length < job.total && !seen.has(key(item))) {
+    if (out.length < cap && !seen.has(key(item)) && (!kind || item.type === kind)) {
       seen.add(key(item));
       out.push(item);
     }
   };
   (job.items || []).forEach(add);
-  const room = job.total - out.length;
-  if (room > 0) {
+  const room = cap - out.length;
+  if (room > 0 && kind !== 'stock') {
     let crypto = [];
     try {
-      crypto = await deps.fetchCryptoTop(20);
-    } catch { /* stocks alone are enough */ }
-    crypto.slice(0, Math.ceil(room / 5)).forEach(add);
+      crypto = await deps.fetchCryptoTop(kind === 'crypto' ? Math.max(job.total, 20) : 20);
+    } catch (e) {
+      if (kind === 'crypto') throw new Error(`Top coins: ${e.message}`);
+    }
+    (kind === 'crypto' ? crypto : crypto.slice(0, Math.ceil(room / 5))).forEach(add);
+  }
+  if (cap - out.length > 0 && kind !== 'crypto') {
     const stocks = parseSp500(await readFile(new URL('./sp500.csv', import.meta.url), 'utf8'));
-    const step = Math.max(1, Math.floor(stocks.length / (job.total - out.length || 1)));
+    const step = Math.max(1, Math.floor(stocks.length / (cap - out.length || 1)));
     stocks.filter((_, i) => i % step === 0).forEach(add);
   }
   return out;
 }
 
 // Training data for the ML models: one row per candle that has a known outcome.
-// job: { tf, items, settings, total }
+// job: { tf, items, settings, total, kind? ('stock' | 'crypto') }
 // result: { tf, features, symbols, rows: { key, t, x, seq, y, ret, yb, yt }[], errors }
 // (yb and yt are the turning-point labels, null for the last candles)
 export async function runDataset(job, deps = defaultDeps) {

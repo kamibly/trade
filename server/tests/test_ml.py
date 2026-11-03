@@ -95,12 +95,16 @@ def test_training_scores_the_test_period_and_js_predicts_the_same(dataset):
     assert times[0] < models["cutoff"] < times[-1]
     for name in ("lgbm", "lstm"):
         t = models[name]["test"]
-        assert t["rows"] == models["testRows"] and 0 <= t["hit"] <= 1 and "usable" in t
-        assert 0 < models[name]["center"] < 1 and models[name]["scale"] > 0 and t["n"] > 0
-        assert sum(b["n"] for b in models[name]["outcomes"]) == t["rows"]
+        # Graded like the scoreboard, on the test candles whose outcome is known.
+        assert 0 < t["rows"] <= models["testRows"] and 0 <= t["hit"] <= 1 and "usable" in t
+        assert t["n"] == t["up"] + t["down"] > 0 and 0 < t["base"] < 1
+        assert models[name]["label"] == "first" and models[name]["stopAtr"] == 2 and models[name]["takeAtr"] == 3
+        assert t["usable"] == (t["n"] >= ml.MIN_N and t["hit"] >= t["base"] + ml.TURN_EDGE)
+        assert 0 < models[name]["center"] < 1 and models[name]["scale"] > 0
+        assert sum(b["n"] for b in models[name]["outcomes"]) == models["testRows"]
     assert models["lgbm"]["features"] == dataset["features"] and models["lgbm"]["trees"]
-    # The trending series are learnable: the trees should beat a coin flip.
-    assert models["lgbm"]["test"]["hit"] > 0.5
+    # The trending series are learnable: the trees' calls should beat chance.
+    assert models["lgbm"]["test"]["hit"] > models["lgbm"]["test"]["base"]
     # Turning-point models: measured against how often the outcome happens anyway.
     for name in ml.TURN_MODELS:
         m = models[name]
@@ -175,11 +179,15 @@ def test_training_schedule(monkeypatch):
     assert slot.startswith("2026-01-04T03:00")
     service.update_state(lambda st: st.update(lastTrainSlot=slot, training={"lastRunAt": service.now_ms(), "results": {}}))
     assert service.train_due(service.load_state(), wed) is None  # failed just now: wait
-    ml.save_models("1D", {"cutoff": 1})
+    ml.save_models("1D", {"kinds": ["stock", "crypto"]})
     service.update_state(lambda st: st.update(training={"lastRunAt": 0, "results": {}}))
     assert service.train_due(service.load_state(), wed)  # other timeframes still have no models
-    for tf in ("15m", "1h", "1W"):
-        ml.save_models(tf, {"cutoff": 1})
+    for tf in ("15m", "1h"):
+        ml.save_models(tf, {"kinds": ["stock", "crypto"]})
+    ml.save_models("1W", {"cutoff": 1})
+    assert service.train_due(service.load_state(), wed), "mixed models from before the split train again"
+    ml.save_models("1W", {"kinds": ["stock", "crypto"]})
+    service._split_seen.clear()
     service.update_state(lambda st: st.update(training={"lastRunAt": 0, "results": {}}))
     assert service.train_due(service.load_state(), wed) is None  # has models, week not over
     assert service.train_due(service.load_state(), datetime(2026, 1, 11, 3, 5, tzinfo=tz)).startswith("2026-01-11T03:00")
@@ -255,3 +263,39 @@ def test_dataset_carries_trade_filter_rows(dataset):
     assert set(data.filt.win.tolist()) <= {0.0, 1.0} and (data.filt.fee == 0.001).all()
     base = dataset["filterFeatures"].index("baseScore")
     assert (data.filt.x[:, base] >= 15).all()
+
+
+def test_first_target_label_and_its_test():
+    import numpy as np
+    rows = [{"key": "k", "t": i, "x": [0.0], "seq": [[0.0, 0.0]], "y": 0, "ret": 0.0, "yb": yb, "yt": yt}
+            for i, (yb, yt) in enumerate([(1, 0), (0, 1), (0, 0), (None, None)])]
+    d = ml.to_data(rows)
+    assert d.first[:2].tolist() == [1.0, 0.0] and np.isnan(d.first[2]) and np.isnan(d.first[3])
+    # Up on the Buy-first candle, down on the Sell-first one, up on the neither one (wrong).
+    t = ml.first_test([0.9, 0.1, 0.9, 0.9], d, {"center": 0.5, "scale": 0.25})
+    assert (t["n"], t["up"], t["down"], t["rows"]) == (3, 2, 1, 3)
+    assert t["hit"] == round(2 / 3, 4) and t["base"] == round((2 * (1 / 3) + 1 * (1 / 3)) / 3, 4)
+
+
+def test_main_trains_stocks_and_crypto_apart_and_keeps_old_models_for_a_kind_it_cannot_train(dataset, monkeypatch, capsys):
+    import io
+    jobs = []
+
+    def fake_load(job, timeout=3000):
+        jobs.append(job)
+        rows = dataset["rows"] if job["kind"] == "stock" else dataset["rows"][:40]
+        return {"features": dataset["features"], "filterFeatures": None, "symbols": 8, "errors": {}}, ml.to_data(rows)
+
+    monkeypatch.setattr(ml, "load_dataset", fake_load)
+    old = {"tf": "1D", "cutoff": 7, "trainedAt": 1, "symbols": 120, "lgbm": {"trees": [], "test": {"hit": 0.52, "n": 300}},
+           "lstm": {"test": {"hit": 0.5, "n": 300}}}
+    ml.save_models("1D", old)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({"tf": "1D", "items": [], "settings": {}, "total": 120, "cryptoTotal": 50})))
+    ml.main()
+    out = json.loads(capsys.readouterr().out)
+    assert [(j["kind"], j["total"]) for j in jobs] == [("stock", 120), ("crypto", 50)]
+    saved = ml.load_models("1D")
+    assert saved["kinds"] == ["stock", "crypto"] and saved["stock"]["lgbm"]["label"] == "first"
+    assert saved["crypto"]["old"] and saved["crypto"]["cutoff"] == 7 and "Not enough history" in saved["crypto"]["error"]
+    assert "Not enough history" in out["errors"]["crypto"] and out["stock"]["lgbm"]["n"] > 0 and out["crypto"]["old"]
+    assert ml.summary(saved)["crypto"]["lgbm"]["hit"] == 0.52

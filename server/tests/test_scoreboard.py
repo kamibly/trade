@@ -95,7 +95,8 @@ def test_scores_show_from_thirty_calls_and_split_by_kind():
     run_days(days)
     stocks = scoreboard.summary("stock", None, now=NOW)
     assert stocks["calls"][0]["n"] == 30 and stocks["calls"][0]["right"] == 1
-    assert stocks["ml"] == [{"id": "v:lgbm", "label": "LightGBM", "n": 30, "right": 1.0, "avg": pytest.approx(0.028), "edge": 0.0}]
+    assert stocks["ml"] == [{"id": "v:lgbm", "label": "LightGBM (old)", "n": 30, "right": 1.0, "avg": pytest.approx(0.028), "edge": 0.0}]
+    assert scoreboard.summary("crypto", None, now=NOW)["ml"] == [], "the old mixed models show only with graded calls"
     momentum = next(g for g in stocks["groups"] if g["id"] == "v:g:momentum")
     assert [m["label"] for m in momentum["methods"]] == ["MACD", "RSI"]
     assert "right" not in scoreboard.summary("crypto", None, now=NOW)["calls"][0], "under 30 calls: a count, no score"

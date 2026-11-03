@@ -40,6 +40,7 @@ KEEP_DAYS = 400
 KEEP_RECENT = 50          # graded calls kept per source for the app's list
 MAX_PENDING_AGE_MS = 120 * 86_400_000
 SOURCES_CALLS = ("buy", "sell")
+RETIRED_ML = {"lgbm", "lstm", "bottom", "top"}  # app/js/ml.js voteId
 FILTER_BUCKETS = ("f:bigger", "f:smaller", "f:blocked")
 
 _lock = threading.Lock()
@@ -258,7 +259,11 @@ def summary(kind: str = "all", days: Optional[int] = 30, now: Optional[int] = No
         methods = sorted((vid for vid, (_, grp) in names.items() if grp == g), key=lambda v: names[v][0])
         groups[g] = {**_row(f"v:g:{g}", title, totals.get(f"v:g:{g}", zero)),
                      "methods": [_row(f"v:{v}", names[v][0], totals.get(f"v:{v}", zero)) for v in methods]}
-    ml = [_row(f"v:{vid}", name, totals.get(f"v:{vid}", zero)) for vid, (name, grp) in sorted(names.items()) if grp == "ml"]
+    # The mixed stock-and-crypto models from before the split show only while
+    # their graded calls are in the window; their successors (lgbm2...) start fresh.
+    ml = [_row(f"v:{vid}", f"{name} (old)" if vid in RETIRED_ML else name, totals.get(f"v:{vid}", zero))
+          for vid, (name, grp) in sorted(names.items())
+          if grp == "ml" and (vid not in RETIRED_ML or totals.get(f"v:{vid}", zero)[0] > 0)]
     filt = [_row(src, label, totals.get(src, zero)) for src, label in
             zip(FILTER_BUCKETS, ("Full size or bigger", "Made smaller", "Blocked"))]
     return {

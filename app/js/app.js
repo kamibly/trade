@@ -19,9 +19,9 @@ import { feeOf } from './fees.js';
 import * as pf from './portfolio.js';
 import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
-import { usable as modelUsable, mlOutlook, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
+import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.26.1 (scoreboard: stop or target)';
+export const APP_VERSION = '0.28.0 (stock and crypto models)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -599,7 +599,7 @@ function renderAnalysis() {
     return;
   }
   // The votes and backtest take a moment on a phone, so they are kept until the candles change.
-  const models = state.models[state.chartTf] || null;
+  const models = modelsFor(state.models[state.chartTf] || null, state.chartItem.type);
   const id = `${store.itemKey(state.chartItem)}:${state.chartTf}:${candles.length}:${candles.at(-1).time}:${candles.at(-1).close}:${models ? models.trainedAt : ''}`;
   const key = learnKey(state.settings);
   if (!state.analysis || state.analysis.id !== id || state.analysis.key !== key) {
@@ -674,15 +674,24 @@ function modelsCard(models, bt) {
         text: `right ${Math.round(t.hit * 100)}% of ${t.n} test calls${base} · ${used ? `votes${s && s.n ? ` · weight ${bt.weights[s.id].toFixed(2)}` : ''}` : 'not used'}`,
       }));
   };
+  const split = models.kinds && !models.old;
+  const id = base => (split ? `${base}2` : base);
+  const kindName = models.type === 'crypto' ? 'crypto' : 'stock';
+  const lt = models.lgbm && models.lgbm.test;
+  const intro = !models.cutoff
+    ? `Your server couldn't train ${kindName} models for this timeframe yet${models.error ? ` (${models.error})` : ''}.`
+    : split
+      ? `Trained on your server ${fmtDate(models.trainedAt)} from ${models.symbols} ${kindName} charts only. LightGBM and the LSTM predict which comes first from today's close: a Buy's target (${models.lgbm.takeAtr} ATR up before ${models.lgbm.stopAtr} down) or a Sell's, within 30 candles, the way the scoreboard grades calls. All four were tested on the newest ${models.testRows} candles they never trained on${lt && Number.isFinite(lt.buyFirst) ? ` (a Buy's target came first ${Math.round(lt.buyFirst * 100)}% of the time there, a Sell's ${Math.round(lt.sellFirst * 100)}%)` : ''}.`
+      : `Trained on your server ${fmtDate(models.trainedAt || 0)} from ${models.symbols} charts, stocks and crypto together${models.kinds ? `: the newest training couldn't make ${kindName} models of their own${models.error ? ` (${models.error})` : ''}, so these older ones still vote` : ''}. LightGBM and the LSTM predict whether the price is higher after fees ${ML_HORIZON} candles later. All four were tested on the newest ${models.testRows} candles they never trained on (prices went up ${Math.round(((lt && lt.upShare) || 0) * 100)}% of the time there).`;
   return el('div', { class: 'card' },
     el('h3', { text: 'Machine-learning models' }),
-    el('p', { class: 'muted small', text: `Trained on your server ${fmtDate(models.trainedAt)} from ${models.symbols} charts. LightGBM and the LSTM predict whether the price is higher after fees ${ML_HORIZON} candles later. All four were tested on the newest ${models.testRows} candles they never trained on (prices went up ${Math.round(((models.lgbm && models.lgbm.test && models.lgbm.test.upShare) || 0) * 100)}% of the time there).` }),
-    row('LightGBM', models.lgbm, 'lgbm'),
-    row('LSTM', models.lstm, 'lstm'),
-    row('Bottom finder', models.bottom, 'bottom'),
-    row('Top finder', models.top, 'top'),
+    el('p', { class: 'muted small', text: intro }),
+    models.cutoff ? row('LightGBM', models.lgbm, id('lgbm')) : null,
+    models.cutoff ? row('LSTM', models.lstm, id('lstm')) : null,
+    models.cutoff ? row('Bottom finder', models.bottom, id('bottom')) : null,
+    models.cutoff ? row('Top finder', models.top, id('top')) : null,
     filterRow(models.filter),
-    el('p', { class: 'muted small', text: `The bottom finder learns whether a buy here reached its target before its stop; the top finder, whether the price fell to a target before rising to a stop. They only push the score their way. LightGBM and the LSTM vote only if right more than half the time on at least 200 clear test calls; the finders, only if right ${Math.round(TURN_EDGE * 100)} points more often than the outcome happens anyway. Like every method, the backtest then weights them by how often they were right.` }));
+    el('p', { class: 'muted small', text: `The bottom finder learns whether a buy here reached its target before its stop; the top finder, whether the price fell to a target before rising to a stop. They only push the score their way. ${split ? 'LightGBM and the LSTM' : 'The finders'} vote only if right ${Math.round(TURN_EDGE * 100)} points more often than their calls would come true anyway, on at least 200 clear test calls${split ? ', and so do the finders' : '; LightGBM and the LSTM, if right more than half the time'}. Like every method, the backtest then weights them by how often they were right.` }));
 }
 
 // The trade filter's test on the newest year of Buy-looking candles it never trained on.
@@ -1275,8 +1284,13 @@ function renderServer() {
     c.listError ? `Coin list: ${c.listError}` : null,
     st.market && st.market.error ? `Stock scan: ${st.market.error}` : null,
     ...Object.entries((st.training && st.training.results) || {}).filter(([, r]) => r.error).map(([tf, r]) => `Training ${tf}: ${r.error}`),
+    ...Object.entries((st.training && st.training.results) || {}).flatMap(([tf, r]) => Object.entries(r.errors || {}).map(([kind, msg]) => `Training ${tf} ${kind}: ${msg}`)),
   ].filter(Boolean);
-  const models = Object.entries(st.models || {});
+  // One row per timeframe, or per timeframe and kind since stocks and crypto train apart.
+  const models = Object.entries(st.models || {}).flatMap(([tf, m]) => {
+    const name = TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf;
+    return m.kinds ? m.kinds.filter(k => m[k]).map(k => [`${name} ${k === 'crypto' ? 'crypto' : 'stocks'}${m[k].old ? ' (old)' : ''}`, m[k]]) : [[name, m]];
+  });
   const pct = t => (t ? `${Math.round(t.hit * 100)}%${t.usable ? '' : ' off'}` : '–');
   const training = trainingNow(st) ? `Training now, started ${timeAgo(st.training.runningSince)}`
     : st.training && st.training.nextAt ? `Next training ${when(st.training.nextAt)}` : '';
@@ -1288,8 +1302,8 @@ function renderServer() {
     el('div', { class: 'muted small srv-models-head', text: models.length ? `Models, right in their test${training ? ` · ${training}` : ''}` : `Models are not trained yet${training ? ` · ${training}` : ''}` }),
     models.length ? el('table', { class: 'srv-models' },
       el('thead', {}, el('tr', {}, ...['', 'LightGBM', 'LSTM', 'Bottom', 'Top'].map(t => el('th', { text: t })))),
-      el('tbody', {}, ...models.map(([tf, m]) => el('tr', {},
-        el('th', { text: TIMEFRAMES[tf] ? TIMEFRAMES[tf].label : tf }),
+      el('tbody', {}, ...models.map(([name, m]) => el('tr', {},
+        el('th', { text: name }),
         ...[m.lgbm, m.lstm, m.bottom, m.top].map(t => el('td', { class: t && !t.usable ? 'muted' : '', text: pct(t) })))))) : null,
   ].filter(Boolean));
 }

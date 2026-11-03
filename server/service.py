@@ -14,7 +14,8 @@ Environment variables:
     TWELVE_DATA_KEY    - optional; backup for stocks Yahoo Finance can't serve
     DATA_DIR           - where trade.json is kept, default /data
     TRAIN_AT           - when the machine-learning models retrain each week, default "Sun 03:00"
-    TRAIN_SYMBOLS      - how many charts the models learn from, default 120
+    TRAIN_SYMBOLS      - how many stock charts the stock models learn from, default 120
+    TRAIN_CRYPTO       - how many top coins the crypto models learn from (plus yours), default 50
     SEC_CONTACT        - your email, which the SEC asks for in its requests; insider buying
                          and earnings dates load only once it is set (see events.py)
     NDAX_API_KEY, NDAX_API_SECRET, NDAX_USER_ID - real crypto orders on NDAX (see ndax.py)
@@ -49,6 +50,7 @@ NODE = os.environ.get("NODE_BIN", "node")
 ML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml.py")
 TRAIN_AT = os.environ.get("TRAIN_AT", "Sun 03:00")
 TRAIN_SYMBOLS = int(os.environ.get("TRAIN_SYMBOLS", "120") or 120)
+TRAIN_CRYPTO = int(os.environ.get("TRAIN_CRYPTO", "50") or 50)
 DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 # How often the watchlist and holdings are checked, by alert timeframe (minutes),
@@ -1055,6 +1057,24 @@ def load_models(tf: str) -> Optional[dict]:
     return ml.load_models(tf)
 
 
+_split_seen: Dict[str, tuple] = {}
+
+
+def models_split(tf: str) -> bool:
+    """Whether a timeframe has models with separate stock and crypto sets
+    (read again only when its file changes)."""
+    path = os.path.join(DATA_DIR, "models", f"{tf}.json")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return False
+    seen = _split_seen.get(path)
+    if not seen or seen[0] != mtime:
+        seen = (mtime, bool((load_models(tf) or {}).get("kinds")))
+        _split_seen[path] = seen
+    return seen[1]
+
+
 def model_summaries() -> Dict[str, dict]:
     import ml
     out = {}
@@ -1090,9 +1110,10 @@ def run_train(reason: str = "schedule", trainer: Callable[[dict, int], dict] = r
         update_state(lambda st: st["training"].update(runningSince=now_ms()))
         results = {}
         for tf in train_timeframes(profile):
-            job = {"tf": tf, "items": watch_items(profile), "settings": engine_settings(profile), "total": TRAIN_SYMBOLS}
+            job = {"tf": tf, "items": watch_items(profile), "settings": engine_settings(profile), "total": TRAIN_SYMBOLS,
+                   "cryptoTotal": TRAIN_CRYPTO}
             try:
-                results[tf] = {**trainer(job, 3600), "at": now_ms()}
+                results[tf] = {**trainer(job, 5400), "at": now_ms()}
             except Exception as e:
                 logger.exception("Training %s failed", tf)
                 results[tf] = {"error": str(e), "at": now_ms()}
@@ -1140,7 +1161,8 @@ def train_due(state: dict, now: datetime) -> Optional[str]:
     slot = train_slot(now).isoformat()
     if state.get("lastTrainSlot") != slot:
         return slot
-    missing = [tf for tf in train_timeframes(profile) if not os.path.exists(os.path.join(DATA_DIR, "models", f"{tf}.json"))]
+    # A timeframe without models, or with mixed ones from before stocks and crypto were split.
+    missing = [tf for tf in train_timeframes(profile) if not models_split(tf)]
     last = (state.get("training") or {}).get("lastRunAt") or 0
     # After a failed training, wait 6 hours before trying again.
     if missing and now_ms() - last >= 6 * 3600_000:

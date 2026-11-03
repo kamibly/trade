@@ -47,11 +47,17 @@ stop-loss hits.
 Every week (`TRAIN_AT`, Sunday 03:00 by default), and soon after the first
 start, the service trains models for every timeframe (15m, 1H, 1D and 1W), one
 at a time, your alert timeframe first. Yahoo Finance only has about a month of
-15-minute stock history, so 15m models may not pass their test. It learns from your watchlist and holdings plus
-a spread of S&P 500 stocks and top cryptos (`TRAIN_SYMBOLS`, 120 charts).
-The newest ~30% of that history tests the models; the app shows the result and
-only lets a model vote if it was right more than half the time on at least 200
-test calls. Models are saved in `trade_folder/trade-data/models/`.
+15-minute stock history, so 15m models may not pass their test. Stocks and
+crypto get their own models: the stock ones learn from your stocks and a spread
+of S&P 500 stocks (`TRAIN_SYMBOLS`, 120 charts), the crypto ones from your coins
+and the top `TRAIN_CRYPTO` coins (50). LightGBM and the LSTM learn whether a
+Buy's or a Sell's target comes first (your stop and target in ATRs), the way
+the scoreboard grades calls. The newest ~30% of that history tests the models;
+the app shows the result and only lets a model vote if its clear calls on at
+least 200 test candles came true 3 points more often than they would anyway.
+A kind that can't be trained keeps its previous models. Models from before the
+split are retrained soon after the service starts. Models are saved in
+`trade_folder/trade-data/models/`.
 
 Training runs in its own process for a few minutes and needs up to about
 1 GB of memory while it runs, then gives it back. The compose snippet caps the
@@ -163,7 +169,8 @@ With server alerts on, the app stops showing its own system notifications
 | `TWELVE_DATA_KEY` | Backup for stocks Yahoo Finance can't serve | none |
 | `STOCK_PROXY` | A fallback for Yahoo and Nasdaq: when they refuse the VM, their requests go through this proxy for the next 30 minutes, such as a Tailscale exit node at home (`http://host:port` or `socks5://host:port`). Nothing else uses it | none |
 | `TRAIN_AT` | When the models retrain each week (day and local time) | `Sun 03:00` |
-| `TRAIN_SYMBOLS` | How many charts the models learn from | `120` |
+| `TRAIN_SYMBOLS` | How many stock charts the stock models learn from | `120` |
+| `TRAIN_CRYPTO` | How many top coins the crypto models learn from (plus yours) | `50` |
 | `SEC_CONTACT` | Your email, which the SEC asks every program to send with its requests. Insider buying and earnings dates load only once it is set; it is sent only to the SEC | none |
 | `NDAX_API_KEY`, `NDAX_API_SECRET`, `NDAX_USER_ID` | Real crypto orders on NDAX that follow the paper account's crypto trades. Create the key in NDAX under Settings, API Key, with trading permission only and no withdrawals; the user ID is under Personal User Info. Orders go out only in the app's Live mode | none |
 
