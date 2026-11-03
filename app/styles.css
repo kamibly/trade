@@ -476,3 +476,8 @@ details.why-fold[open] > summary::before { content: '▾ '; }
 .sb-calls { margin: 0; padding: 6px 12px 8px; list-style: none; border-bottom: 1px solid var(--line); background: var(--bg); }
 .sb-calls li { display: grid; grid-template-columns: 1.4fr 1.2fr .8fr; gap: 4px; padding: 3px 0; }
 .sb-calls li > span:last-child { text-align: right; }
+
+.set-body h3.set-sub { margin-top: 16px; }
+.share-grid { display: grid; grid-template-columns: 1fr 84px 62px; gap: 6px 10px; align-items: center; margin-top: 8px; }
+.share-grid input:disabled { opacity: .45; }
+

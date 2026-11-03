@@ -23,7 +23,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.19.1"
+VERSION = "1.20.0"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 

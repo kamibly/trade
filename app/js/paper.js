@@ -22,6 +22,21 @@ export function budgetsWith(shares) {
   if (!shares) return BUDGETS;
   return Object.fromEntries(Object.entries(BUDGETS).map(([k, b]) => [k, { ...b, share: Number.isFinite(shares[k]) ? shares[k] : b.share }]));
 }
+// The shares in use when stocks or crypto are switched off (`kinds`, as
+// { stock, crypto }): a source that only buys the switched-off kind gets
+// nothing, and its share goes to the others in proportion. Both off: nothing.
+export const KIND_ONLY = { stockIdeas: 'stock', cryptoIdeas: 'crypto' };
+export function sharesInUse(shares, kinds) {
+  const base = Object.fromEntries(Object.entries(BUDGETS).map(([k, b]) => [k, Number.isFinite(shares?.[k]) ? shares[k] : b.share]));
+  const on = kind => !kinds || kinds[kind] !== false;
+  if (!on('stock') && !on('crypto')) return Object.fromEntries(Object.keys(base).map(k => [k, 0]));
+  const kept = Object.fromEntries(Object.entries(base).map(([k, v]) => [k, KIND_ONLY[k] && !on(KIND_ONLY[k]) ? 0 : v]));
+  const total = Object.values(base).reduce((t, v) => t + v, 0);
+  const left = Object.values(kept).reduce((t, v) => t + v, 0);
+  if (!(left > 0)) return kept;
+  return Object.fromEntries(Object.entries(kept).map(([k, v]) => [k, v * total / left]));
+}
+export const budgetsFor = (shares, kinds) => budgetsWith(sharesInUse(shares, kinds));
 export const PHONE_BUDGETS = { alerts: { share: 1, slots: 10, max: 10, name: 'Watchlist alerts' } };
 export const MAX_POSITIONS = Object.values(BUDGETS).reduce((n, b) => n + b.max, 0);
 const DAY_MS = 86400_000;
@@ -192,7 +207,7 @@ function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter
 // `alerts` maps key → 'buy' | 'sell' for actions that just changed this scan.
 // Returns the events (paper buys and sells) and updates `acc` in place.
 // `tradable`: the coins the crypto exchange sells (NDAX), or null for any coin.
-export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, lock = false, tradable = null }) {
+export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, lock = false, tradable = null, kinds = null }) {
   const events = [];
   const prices = Object.fromEntries(Object.entries(signals).map(([k, s]) => [k, s.entry]));
   // Exits first so the freed cash can fund new buys.
@@ -223,7 +238,7 @@ export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(),
     const start = acc.signalStarts[key];
     const id = `signal:${key}:${start.at}`;
     const idea = { ...sig, id, key, setup: 'signal', ranAway: ok(sig.atr) && sig.entry > start.entry + sig.atr };
-    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets, useFilter, trail, lock, tradable });
+    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets, useFilter, trail, lock, tradable, kinds });
     if (ev) events.push(ev);
   }
   pruneTaken(acc);
@@ -241,6 +256,8 @@ const SKIPS = {
   levels: 'no valid stop below the price',
   filter: 'the trade filter expects a loss',
   venue: 'NDAX does not sell this coin',
+  stockOff: 'stocks are switched off in Settings',
+  cryptoOff: 'crypto is switched off in Settings',
 };
 
 function skip(acc, key, why) {
@@ -249,13 +266,14 @@ function skip(acc, key, why) {
 }
 
 // Buys one idea if its budget, cash and price allow; records why not otherwise.
-function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trail = false, lock = false, tradable = null }) {
+function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trail = false, lock = false, tradable = null, kinds = null }) {
   acc.skips ||= {};
   if (acc.positions.some(p => p.key === o.key)) { delete acc.skips[o.key]; return null; }
   // An idea counts as taken only if it was really traded: older versions
   // marked ideas they had no cash for, which then were never bought.
   const traded = acc.positions.some(p => p.key === o.key) || acc.trades.some(t => t.key === o.key);
   if (acc.taken.includes(o.id) && traded) return skip(acc, o.key, 'done'), null;
+  if (kinds && kinds[o.type] === false) return skip(acc, o.key, o.type === 'crypto' ? 'cryptoOff' : 'stockOff'), null;
   if (o.ranAway) return skip(acc, o.key, 'ranAway'), null;
   if (o.type === 'crypto' && Array.isArray(tradable) && tradable.length && !tradable.includes(o.symbol)) return skip(acc, o.key, 'venue'), null;
   if (!(o.entry > 0) || !(o.stop < o.entry)) return skip(acc, o.key, 'levels'), null;
@@ -284,13 +302,13 @@ function pruneTaken(acc) {
 // once; it is sold at its stop, its target or after its holding period
 // (trading days for stocks, calendar days for crypto).
 // opportunities: [{ id, setup, key, symbol, type, entry, stop, take, hold, ev }]
-export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, lock = false, tradable = null } = {}) {
+export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, lock = false, tradable = null, kinds = null } = {}) {
   const events = [];
   acc.taken ||= [];
   const prices = {};
   const list = [...opportunities].sort((a, b) => (b.ev || 0) - (a.ev || 0));
   for (const o of list) {
-    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter, trail, lock, tradable });
+    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter, trail, lock, tradable, kinds });
     if (ev) events.push(ev);
   }
   pruneTaken(acc);

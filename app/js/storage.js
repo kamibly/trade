@@ -39,6 +39,10 @@ export const DEFAULT_SETTINGS = {
   riskPct: 1,
   paperStart: 10000,
   tradeFilter: true, // the server's paper account skips and sizes ideas by the trade filter
+  paperStocks: true, // paper trades buy stocks
+  paperCrypto: true, // paper trades buy crypto
+  paperShares: null, // each paper source's share of the account in percent, or null for paper.js BUDGETS
+  paperAutoMove: false, // the server moves up to 5% a week from the worst source to the best
   stopAtr: 2,
   takeAtr: 3,
   signalsTab: 'watchlist', // the Signals page's tab: watchlist, opps or market
