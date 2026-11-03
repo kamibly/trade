@@ -178,13 +178,22 @@ def grade(board: dict, now: int) -> int:
             continue
         points = board["prices"].get(f"{item['key']}:{item['tf']}") or []
         i = _index(points, item["t"])
-        directions = ([1] if item["a"] == "buy" or item["up"] else []) + ([-1] if item["a"] == "sell" or item["down"] else [])
+        # Each side is graded as soon as its own stop or target is reached: a
+        # Buy and the voters leaning up need not wait for those leaning down.
+        done = set(item.get("done") or [])
+        directions = [d for d in ([1] if item["a"] == "buy" or item["up"] else []) + ([-1] if item["a"] == "sell" or item["down"] else [])
+                      if d not in done]
         exits = {d: exit_of(points, i, item, d) for d in directions} if i is not None else {}
-        if i is None or any(e is None for e in exits.values()):
-            if now - item.get("at", now) > MAX_PENDING_AGE_MS:
-                del board["pending"][pid]
+        exits = {d: e for d, e in exits.items() if e is not None}
+        if len(exits) == len(directions):
+            del board["pending"][pid]
+        elif now - item.get("at", now) > MAX_PENDING_AGE_MS:
+            del board["pending"][pid]
             continue
-        del board["pending"][pid]
+        else:
+            item["done"] = sorted(done | set(exits))
+        if not exits:
+            continue
         fee = FEE.get(item["type"], FEE["stock"])
         day = board["days"].setdefault(_day(item["t"]), {}).setdefault(item["type"], {})
         outcomes = {}
@@ -209,14 +218,14 @@ def grade(board: dict, now: int) -> int:
             recent.insert(0, o["entry"])
             del recent[KEEP_RECENT:]
 
-        if item["a"] in SOURCES_CALLS:
+        if item["a"] in SOURCES_CALLS and (1 if item["a"] == "buy" else -1) in outcomes:
             add(item["a"], 1 if item["a"] == "buy" else -1)
-        if item["a"] == "buy" and "f" in item:
+        if item["a"] == "buy" and "f" in item and 1 in outcomes:
             f = item["f"]
             add("f:blocked" if not f > 0 else "f:smaller" if f < 1 else "f:bigger", 1)
-        for vid in item["up"]:
+        for vid in item["up"] if 1 in outcomes else []:
             add(f"v:{vid}", 1)
-        for vid in item["down"]:
+        for vid in item["down"] if -1 in outcomes else []:
             add(f"v:{vid}", -1)
         graded += 1
     cutoff = _day(now // 1000 - KEEP_DAYS * 86_400)
