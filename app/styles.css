@@ -488,3 +488,19 @@ details.why-fold[open] > summary::before { content: '▾ '; }
 .share-grid { display: grid; grid-template-columns: 1fr 84px 62px; gap: 6px 10px; align-items: center; margin-top: 8px; }
 .share-grid input:disabled { opacity: .45; }
 
+
+/* Own-trades model: the size badge on paper trades and its status line */
+.size-badge { font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.size-badge.up { background: rgba(38, 166, 154, 0.18); color: var(--up); }
+.size-badge.down { background: rgba(210, 153, 34, 0.18); color: var(--warn); }
+.size-badge.learning { background: rgba(139, 148, 158, 0.16); color: var(--muted); }
+.size-how { background: var(--panel-2); border-radius: 10px; padding: 8px 10px; margin: 6px 0; font-size: 13px; }
+.size-how > div { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+.size-how > .total { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; font-weight: 700; }
+.ot-status { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; margin: 10px 0; font-size: 14px; }
+.ot-status summary { cursor: pointer; list-style: none; }
+.ot-status summary::-webkit-details-marker { display: none; }
+.ot-status summary b { display: block; margin-bottom: 2px; }
+.ot-top { list-style: none; padding: 0; margin: 8px 0; }
+.ot-top li { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid var(--line); }
+.list .sym { flex-wrap: wrap; }

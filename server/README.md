@@ -59,6 +59,15 @@ A kind that can't be trained keeps its previous models. Models from before the
 split are retrained soon after the service starts. Models are saved in
 `trade_folder/trade-data/models/`.
 
+The own-trades model learns from the paper account's own closed trades (and the
+shadow's, and each trade's what-if exits) which Buys make money after fees. It
+is a small logistic model, retrained after each what-if replay (every 30
+minutes). Each closed trade is judged by a model that only knew the trades
+closed before it was bought; once 30 are judged and its sizes clearly earned
+more than the sizes used, it sizes new paper Buys from ×0.5 to ×1.5 (times the
+trade filter's size, within ×0.25 to ×2). It never skips a Buy. It lives in
+`trade.json` (`ownTrades`).
+
 Training runs in its own process for a few minutes and needs up to about
 1 GB of memory while it runs, then gives it back. The compose snippet caps the
 container at 1.5 GB so jobspy-service always keeps room. The image grows by several

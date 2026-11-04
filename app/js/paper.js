@@ -3,6 +3,7 @@
 // trusting them with real money. Long only, no leverage, prices in USD.
 
 import { feeOf } from './fees.js';
+import { judgeBuy, bothSizes } from './owntrades.js';
 
 export const DEFAULT_START = 10_000;
 // Each source of trades has its own share of the account and its own
@@ -101,7 +102,7 @@ function closePosition(acc, p, price, reason, now, soldWhy = null) {
   acc.cash = round2(acc.cash + value);
   const pnl = value - p.cost;
   acc.trades.push({ key: p.key, symbol: p.symbol, type: p.type, qty: p.qty, entry: p.entry, cost: p.cost, exit: price, openedAt: p.openedAt, closedAt: now, pnl: round2(pnl), ret: pnl / p.cost, reason, setup: setupOf(p),
-    sellsAt: exitOf(p), ...firstLevels(p), ...(p.until ? { until: p.until } : {}), ...(p.filter ? { filter: p.filter } : {}),
+    sellsAt: exitOf(p), ...firstLevels(p), ...(p.until ? { until: p.until } : {}), ...(p.filter ? { filter: p.filter } : {}), ...(p.own ? { own: p.own } : {}),
     ...(p.why ? { why: p.why } : {}), ...(soldWhy ? { whySold: soldWhy } : {}) });
   acc.positions = acc.positions.filter(x => x !== p);
   return { kind: 'close', symbol: p.symbol, key: p.key, price, pnl: round2(pnl), reason, setup: setupOf(p) };
@@ -193,13 +194,13 @@ function room(acc, x, budgets, eq) {
 // (switched off, not trained, or an opportunity, which keeps its own gate).
 const filterOf = (o, useFilter) => (useFilter && o.filter && Number.isFinite(o.filter.size) ? o.filter : null);
 
-function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter, trail, lock }) {
+function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter, own, trail, lock }) {
   const qty = positionSize({ equity: equity(acc, prices), cash: acc.cash, entry: s.entry, stop: s.stop, riskPct, cap, type: s.type });
   const cost = qty * s.entry + feeOf(s.type, qty, s.entry);
   // Under $10 the fees outweigh the trade.
   if (!(qty > 0) || cost < 10 || cost > acc.cash + 0.005) return null;
   acc.cash = round2(acc.cash - cost);
-  acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, stop0: s.stop, take0: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}), ...(filter ? { filter } : {}), ...(s.why ? { why: s.why } : {}), ...(trail ? { trail: true, risk: s.entry - s.stop, high: s.entry } : lock ? { lock: true, risk: s.entry - s.stop, high: s.entry } : {}) });
+  acc.positions.push({ key, symbol: s.symbol, type: s.type, qty, entry: s.entry, stop: s.stop, take: s.take, stop0: s.stop, take0: s.take, cost, openedAt: now, setup, ...(until ? { until } : {}), ...(id ? { id } : {}), ...(filter ? { filter } : {}), ...(own ? { own } : {}), ...(s.why ? { why: s.why } : {}), ...(trail ? { trail: true, risk: s.entry - s.stop, high: s.entry } : lock ? { lock: true, risk: s.entry - s.stop, high: s.entry } : {}) });
   return { kind: 'open', symbol: s.symbol, key, price: s.entry, qty, cost: round2(cost), setup };
 }
 
@@ -207,7 +208,7 @@ function open(acc, s, { key, riskPct, now, prices, setup, until, id, cap, filter
 // `alerts` maps key → 'buy' | 'sell' for actions that just changed this scan.
 // Returns the events (paper buys and sells) and updates `acc` in place.
 // `tradable`: the coins the crypto exchange sells (NDAX), or null for any coin.
-export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, lock = false, tradable = null, kinds = null }) {
+export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, lock = false, tradable = null, kinds = null, own = null, mood = null }) {
   const events = [];
   const prices = Object.fromEntries(Object.entries(signals).map(([k, s]) => [k, s.entry]));
   // Exits first so the freed cash can fund new buys.
@@ -238,7 +239,7 @@ export function step(acc, { signals, alerts = {}, riskPct = 1, now = Date.now(),
     const start = acc.signalStarts[key];
     const id = `signal:${key}:${start.at}`;
     const idea = { ...sig, id, key, setup: 'signal', ranAway: ok(sig.atr) && sig.entry > start.entry + sig.atr };
-    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets, useFilter, trail, lock, tradable, kinds });
+    const ev = tryOpen(acc, idea, { riskPct, now, prices, budgets, useFilter, trail, lock, tradable, kinds, own, mood });
     if (ev) events.push(ev);
   }
   pruneTaken(acc);
@@ -266,7 +267,7 @@ function skip(acc, key, why) {
 }
 
 // Buys one idea if its budget, cash and price allow; records why not otherwise.
-function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trail = false, lock = false, tradable = null, kinds = null }) {
+function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trail = false, lock = false, tradable = null, kinds = null, own = null, mood = null }) {
   acc.skips ||= {};
   if (acc.positions.some(p => p.key === o.key)) { delete acc.skips[o.key]; return null; }
   // An idea counts as taken only if it was really traded: older versions
@@ -283,7 +284,11 @@ function tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter = true, trai
   if (!slot) return skip(acc, o.key, 'full'), null;
   // No holding period (market scan ideas): sold at the stop, the target or a later Sell.
   const days = !o.hold ? 0 : o.type === 'stock' ? o.hold * (7 / 5) : o.hold;
-  const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: Math.min(slot.cap * (filter ? filter.size : 1), slot.left), filter, trail: trail && canTrail(o), lock: lock && !(trail && canTrail(o)) });
+  // The own-trades model's view; it changes the size only once it qualified.
+  const mine = judgeBuy(own, { why: o.why, filter, type: o.type, setup: o.setup, mood: mood ? mood[o.type] : NaN });
+  const size = bothSizes(filter ? filter.size : NaN, mine);
+  const ownInfo = { ...mine, ...(mine.used ? { mult: Number((size / (filter ? filter.size : 1)).toFixed(4)) } : {}) };
+  const ev = open(acc, o, { key: o.key, riskPct, now, prices, setup: o.setup, until: days ? now + Math.round(days * DAY_MS) : null, id: o.id, cap: Math.min(slot.cap * size, slot.left), filter, own: ownInfo, trail: trail && canTrail(o), lock: lock && !(trail && canTrail(o)) });
   // Without the cash to buy it, the idea is tried again next scan.
   if (!ev) return skip(acc, o.key, 'cash'), null;
   delete acc.skips[o.key];
@@ -302,13 +307,13 @@ function pruneTaken(acc) {
 // once; it is sold at its stop, its target or after its holding period
 // (trading days for stocks, calendar days for crypto).
 // opportunities: [{ id, setup, key, symbol, type, entry, stop, take, hold, ev }]
-export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, lock = false, tradable = null, kinds = null } = {}) {
+export function openSetups(acc, opportunities, { riskPct = 1, now = Date.now(), budgets = BUDGETS, useFilter = true, trail = false, lock = false, tradable = null, kinds = null, own = null, mood = null } = {}) {
   const events = [];
   acc.taken ||= [];
   const prices = {};
   const list = [...opportunities].sort((a, b) => (b.ev || 0) - (a.ev || 0));
   for (const o of list) {
-    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter, trail, lock, tradable, kinds });
+    const ev = tryOpen(acc, o, { riskPct, now, prices, budgets, useFilter, trail, lock, tradable, kinds, own, mood });
     if (ev) events.push(ev);
   }
   pruneTaken(acc);

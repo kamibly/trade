@@ -64,7 +64,7 @@ QUIET_START, QUIET_END = 22, 7
 TIMEFRAMES = set(WATCH_EVERY)
 
 _lock = threading.RLock()
-_run_locks = {name: threading.Lock() for name in ("watch", "market", "crypto", "pulse", "train", "events", "whatif")}
+_run_locks = {name: threading.Lock() for name in ("watch", "market", "crypto", "pulse", "train", "events", "whatif", "owntrades")}
 CRYPTO_SCAN_MINUTES = int(os.environ.get("CRYPTO_SCAN_MINUTES", "15") or 15)
 UNIVERSE_EVERY_MS = 20 * 3600_000  # the crypto list is rebuilt about once a day
 PULSE_EVERY_MS = 60_000            # fast-move watch
@@ -125,6 +125,8 @@ def _empty_state() -> dict:
         "announced": [],          # opportunity and warning ids already sent
         "feedback": {},           # setup -> your latest ratings, True for useful
         "whatIf": {"lastRunAt": None, "results": {}},  # each paper trade with the target, trailing stop and profit lock
+        "ownTrades": None,        # the own-trades model: learns from our closed paper trades (engine runOwnTrades)
+        "ownInputs": {},          # inputs rebuilt for trades bought before the model saved them
     }
 
 
@@ -525,7 +527,26 @@ def paper_fields(state: dict, profile: dict) -> dict:
         "trail": profile["settings"].get("paperExit") == "trail",
         "lock": profile["settings"].get("paperExit") == "lock",
         "tradable": ndax.tradable(state),
+        "own": own_model(state),
+        "mood": state.get("marketMood") or {},
     }
+
+
+def own_model(state: dict) -> Optional[dict]:
+    """The own-trades model a paper step sizes Buys with: its weights and whether it qualified."""
+    box = state.get("ownTrades") or {}
+    return {"model": box["model"], "qualified": bool(box.get("qualified"))} if box.get("model") else None
+
+
+def own_summary(state: dict) -> Optional[dict]:
+    """The own-trades model for the app: progress, the fair test, its strongest
+    inputs and each trade's judged chance and size (not its weights)."""
+    box = state.get("ownTrades")
+    if not box:
+        return None
+    return {"at": box.get("at"), "trades": box.get("trades", 0), "judged": box.get("judged", 0), "extra": box.get("extra", 0),
+            "qualified": bool(box.get("qualified")), "win": (box.get("model") or {}).get("win"), "top": box.get("top", []),
+            "preds": box.get("preds", {}), "errors": box.get("errors", {})}
 
 
 def save_paper(st: dict, result: dict) -> None:
@@ -1296,6 +1317,41 @@ def trade_id(t: dict) -> str:
     return f"{t.get('key')}:{t.get('openedAt')}"
 
 
+def run_own_trades(engine: Callable[[dict, int], dict] = run_engine) -> Optional[dict]:
+    """Trains the own-trades model on the closed paper trades, the shadow's and
+    their what-if exits, and runs its fair test (engine runOwnTrades). Runs
+    after each what-if replay, so new closed trades and exits are in."""
+    lock = _run_locks["owntrades"]
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        state = load_state()
+        profile = state.get("profile")
+        acc = state.get("paper") or {}
+        if not profile or not acc.get("trades"):
+            return None
+        job = {"mode": "ownTrades", "settings": engine_settings(profile),
+               "trades": acc.get("trades", []), "shadowTrades": (state.get("paperShadow") or {}).get("trades", []),
+               "positions": acc.get("positions", []), "whatIf": (state.get("whatIf") or {}).get("results", {}),
+               "inputs": state.get("ownInputs") or {}}
+        try:
+            result = engine(job, 600)
+        except Exception as e:
+            logger.warning("Own-trades training failed: %s", e)
+            return None
+
+        def apply(st):
+            a, sh = st.get("paper") or {}, st.get("paperShadow") or {}
+            keep = {trade_id(t) for x in (a, sh) for t in [*x.get("positions", []), *x.get("trades", [])]}
+            st["ownInputs"] = {k: v for k, v in {**(st.get("ownInputs") or {}), **result.get("inputs", {})}.items() if k in keep}
+            st["ownTrades"] = {**result["state"], "errors": result.get("errors", {})}
+
+        update_state(apply)
+        return result
+    finally:
+        lock.release()
+
+
 def whatif_due(state: dict, now: int) -> bool:
     acc = state.get("paper") or {}
     return bool(acc.get("positions") or acc.get("trades")) and \
@@ -1380,7 +1436,7 @@ def start_scheduler() -> None:
                 if events_due(state, now):
                     _spawn(run_events)
                 if whatif_due(state, now):
-                    _spawn(run_whatif)
+                    _spawn(lambda: (run_whatif(), run_own_trades()))
                 if state.get("ndaxQueue"):
                     _spawn(run_ndax)
                 if ndax.coins_due(state, now):

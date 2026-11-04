@@ -15,13 +15,14 @@ import { SETUPS, recordLine, proven as setupProven, MIN_PROVEN } from './setups.
 import { notify, canNotify, askPermission, inQuietHours } from './notify.js';
 import { voteMatrix, backtest } from './backtest.js';
 import * as paper from './paper.js';
+import { bothSizes, inputName, JUDGE_MIN, tradeId as ownId } from './owntrades.js';
 import { feeOf } from './fees.js';
 import * as pf from './portfolio.js';
 import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.28.2 (models table by timeframe)';
+export const APP_VERSION = '0.29.0 (own-trades model)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -1754,7 +1755,7 @@ function renderPaper({ force = false } = {}) {
     onServer ? filterTrialCard(state.serverPaper) : null,
   ];
   // replaceChildren() writes a null child as the text "null", so drop the empty parts.
-  $('paper-body').replaceChildren(...[kindChips, summary, onServer ? whatIfTotals(acc) : null, tabs, ...body].filter(Boolean));
+  $('paper-body').replaceChildren(...[kindChips, summary, onServer ? whatIfTotals(acc) : null, onServer ? ownStatus(state.serverPaper.ownTrades) : null, tabs, ...body].filter(Boolean));
 
   // One kind's results: its gain/loss after the fees paid so far (closed trades
   // as they sold, open ones at today's price) and its running gain over time.
@@ -1933,7 +1934,7 @@ function renderPaper({ force = false } = {}) {
   function openCard({ p, price, value, pnl, ret }) {
     return foldCard('holding paper-card', `paper:${p.key}`, [
       el('div', { class: 'sym' }, p.symbol, typeBadge(p.type), el('span', { class: 'badge', text: sourceTag(p.setup || 'signal') }),
-        p.trail ? el('span', { class: 'badge', text: 'Trailing' }) : p.lock ? el('span', { class: 'badge', text: 'Profit lock' }) : null),
+        p.trail ? el('span', { class: 'badge', text: 'Trailing' }) : p.lock ? el('span', { class: 'badge', text: 'Profit lock' }) : null, ownBadge(p)),
       el('div', { class: `paper-gain ${upDown(pnl)}`, text: Number.isFinite(pnl) ? `${signed(pnl)} · ${fmtPct(ret)}` : '–' }),
     ], [
       el('dl', { class: 'money-row' },
@@ -1945,6 +1946,7 @@ function renderPaper({ force = false } = {}) {
         ? `Trailing stop at ${formatMoney(p.stop)}${p.stop > p.entry ? ' (above what it cost)' : ''}, highest ${formatMoney(p.high || p.entry)}; no target`
         : `Sells at the stop ${formatMoney(p.stop)}${p.lock && p.stop > p.entry ? ' (profit locked)' : ''} or the target ${formatMoney(p.take)}${p.until ? `, or by ${fmtTime(p.until)}` : ''}${p.lock ? `; the stop keeps part of the best gain (highest ${formatMoney(p.high || p.entry)})` : ''}` }),
       outcomeLine(p.qty, p.cost, p.stop, p.trail ? null : p.take, p.type),
+      ownHow(p),
       p.filter && !p.why ? el('div', { class: 'sub', text: filterText(p.filter) }) : null,
       whyFold(p.why, `why:${p.key}:${p.openedAt}`, 'buy', p.filter),
       el('div', { class: 'sub', text: `${setupName(paper.setupOf(p))} · bought ${fmtTime(p.openedAt)}${p.edited ? ' · stop and target set by you' : ''}` }),
@@ -1973,12 +1975,13 @@ function renderPaper({ force = false } = {}) {
     const shown = state.closedShown || 10;
     const why = t => (t.reason === 'time' ? 'holding period over' : t.reason);
     const card = t => foldCard('holding', `closed:${t.key}:${t.closedAt}`, [
-      el('div', { class: 'sym' }, t.symbol, typeBadge(t.type), el('span', { class: 'closed-why', text: why(t) })),
+      el('div', { class: 'sym' }, t.symbol, typeBadge(t.type), el('span', { class: 'closed-why', text: why(t) }), ownBadge(t)),
       el('div', { class: `paper-gain ${upDown(t.pnl)}`, text: `${signed(t.pnl)} · ${fmtPct(t.ret)}` }),
     ], [
       el('div', { class: 'sub', text: `Invested ${formatMoney(costOf(t))} · got back ${formatMoney(costOf(t) + t.pnl)}` }),
       el('div', { class: 'sub', text: `${fmtQty(t)} from ${formatMoney(t.entry)} to ${formatMoney(t.exit)}` }),
       el('div', { class: 'sub', text: `${setupName(t.setup || 'signal')} · ${fmtTime(t.openedAt)} to ${fmtTime(t.closedAt)}` }),
+      ownHow(t),
       whyFold(t.why, `why:${t.key}:${t.openedAt}`, 'buy', t.filter),
       whyFold(t.whySold, `whysold:${t.key}:${t.closedAt}`, 'sell'),
       whatIfRow(t, t.pnl, t.sellsAt, false),
@@ -2207,6 +2210,61 @@ function equityChart(acc, now, shadow, { bare = false, gainOf = null } = {}) {
     readout,
     chart,
     el('p', { class: 'muted small', text: gainOf ? 'Dashed line: no gain or loss. The line steps as trades close; its end adds the open ones at today\'s price.' : `Dashed line: the ${formatMoney(acc.start)} you started with.${spts.length > 1 ? ' Grey line: the same account without the trade filter.' : ''}` }));
+}
+
+// The own-trades model's view of a trade: what it said when the trade was
+// bought (kept on the trade), or, for trades from before it, what the fair
+// test judged (closed) or today's model says (open). null when it has none.
+function ownView(t) {
+  if (t.own && Number.isFinite(t.own.p)) return { ...t.own, filterSize: t.filter ? t.filter.size : NaN };
+  const ot = state.serverPaper && state.serverPaper.ownTrades;
+  const pred = ot && ot.preds && ot.preds[ownId(t)];
+  return pred ? { ...pred, used: false, win: ot.win, filterSize: t.filter ? t.filter.size : NaN, later: true } : null;
+}
+
+const pct0 = x => `${Math.round(x * 100)}%`;
+const times = x => `×${x.toFixed(2)}`;
+
+function ownBadge(t) {
+  const v = ownView(t);
+  if (!v) return null;
+  if (!v.used) return el('span', { class: 'size-badge learning', text: `Learning · ${times(v.size)} · ${pct0(v.p)}` });
+  const size = bothSizes(v.filterSize, v);
+  return el('span', { class: `size-badge ${size >= 1 ? 'up' : 'down'}`, text: `${times(size)} · ${pct0(v.p)}` });
+}
+
+// How the badge's size was worked out.
+function ownHow(t) {
+  const v = ownView(t);
+  if (!v) return null;
+  const row = (a, b, cls = '') => el('div', { class: cls }, el('span', { text: a }), el('span', { text: b }));
+  const hasFilter = Number.isFinite(v.filterSize);
+  const win = Number.isFinite(v.win) ? v.win : NaN;
+  return el('div', { class: 'size-how' },
+    row("Model's chance of a profit", pct0(v.p)),
+    Number.isFinite(win) ? row('Our trades usually win', pct0(win)) : null,
+    row(Number.isFinite(win) ? `Model size: 1 + 2 × (${pct0(v.p)} − ${pct0(win)})` : 'Model size', times(v.size)),
+    hasFilter ? row('Trade filter size', times(v.filterSize)) : null,
+    v.used ? row('Bought with', `${times(bothSizes(v.filterSize, v))} of the slot`, 'total')
+      : row(v.later ? 'Judged after it was bought' : 'Still learning: bought with', v.later ? 'size not changed' : `${times(hasFilter ? v.filterSize : 1)} of the slot`, 'total'));
+}
+
+// The own-trades model's progress, at the top of the Paper page; tap it for
+// the inputs it leans on most.
+function ownStatus(ot) {
+  if (!ot) return null;
+  const money = x => `${x >= 0 ? '+' : '−'}${formatMoney(Math.abs(x))}`;
+  const head = ot.qualified ? 'Own-trades model: resizing trades' : `Own-trades model: learning`;
+  const line = ot.qualified
+    ? `Judged on ${ot.judged} trades · its sizes made ${money(ot.extra)} more than the sizes used`
+    : ot.judged
+      ? `${Math.min(ot.judged, JUDGE_MIN)} of ${JUDGE_MIN} trades judged · its sizes would have made ${money(ot.extra)} so far${ot.judged >= JUDGE_MIN ? ' (not clearly better yet)' : ''}`
+      : `Learning from ${ot.trades} closed trade${ot.trades === 1 ? '' : 's'}; it judges trades once 10 have closed`;
+  const top = (ot.top || []).slice(0, 6);
+  return el('details', { class: 'ot-status' },
+    el('summary', {}, el('b', { text: head }), el('span', { class: 'muted', text: line })),
+    top.length ? el('ul', { class: 'ot-top' }, ...top.map(([k, w]) => el('li', {}, el('span', { text: inputName(k) }), el('span', { class: w > 0 ? 'good' : 'bad', text: w > 0 ? 'helps' : 'hurts' })))) : null,
+    el('p', { class: 'muted small', text: 'It learns from your closed paper trades which Buys make money, and judges each trade with only what it knew before it. Once 30 trades are judged and its sizes clearly did better, it sizes new Buys from ×0.5 to ×1.5, multiplied by the trade filter. It never skips a Buy.' }));
 }
 
 // The filtered account against the same account without the filter, on the
