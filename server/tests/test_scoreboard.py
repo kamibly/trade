@@ -117,7 +117,7 @@ def test_a_forming_candle_keeps_its_latest_read():
     scoreboard.record([obs("stock:AAA", 0, 100, a="buy")], VOTERS, now=NOW)
     scoreboard.record([obs("stock:AAA", 0, 101, a="hold")], VOTERS, now=NOW)
     board = scoreboard.load()
-    assert board["prices"]["stock:AAA:1D"] == [[T0, 101, 101, 101]]
+    assert board["prices"]["stock:AAA:1D"] == [[T0 - T0 % DAY, 101, 101, 101]], "daily candles are keyed by their day"
     assert board["pending"] == {}, "the Buy was dropped before the candle closed, and a hold with no firm votes is not graded"
 
 
@@ -149,4 +149,36 @@ def test_calls_recorded_by_the_first_version_are_dropped():
         json.dump({"prices": {"stock:AAA:1D": [[T0, 100]]}, "pending": {"stock:AAA:1D:1": {"key": "stock:AAA", "tf": "1D", "t": T0, "a": "buy", "up": [], "down": []}}}, f)
     scoreboard.record([obs("stock:AAA", 1, 101)], VOTERS, now=NOW)
     board = scoreboard.load()
-    assert board["pending"] == {} and board["prices"]["stock:AAA:1D"][-1] == [T0 + DAY, 101, 101, 101]
+    assert board["pending"] == {} and board["prices"]["stock:AAA:1D"][-1] == [T0 - T0 % DAY + DAY, 101, 101, 101]
+
+
+def test_a_stock_day_stamped_at_two_times_is_one_candle():
+    # The same days come stamped 13:30 and 14:30 UTC (winter time, or a candle
+    # added from a live quote): the calls must still find their prices.
+    days = []
+    for i in range(5):
+        shift = 3600 if i % 2 else 0
+        a = obs("stock:AAA", i, 100 + i, a="buy" if i == 0 else "hold", up=["rsi"] if i == 0 else [])
+        a["t"] += shift
+        days.append([a])
+    days.append([{**obs("stock:AAA", 1, 101), "t": T0 + DAY}])  # a later read of day 1 at the other time
+    run_days(days)
+    board = scoreboard.load()
+    assert len(board["prices"]["stock:AAA:1D"]) == 5
+    assert board["recent"]["buy"][0]["how"] == "target"
+    assert board["pending"] == {}
+
+
+def test_boards_saved_with_two_times_for_a_day_are_merged():
+    t = T0 - T0 % DAY + 13 * 3600 + 1800
+    item = {"key": "stock:AAA", "type": "stock", "tf": "1D", "p": 100, "atr": 1, "sa": 2, "ta": 3, "a": "buy", "up": [], "down": []}
+    board = {"prices": {"stock:AAA:1D": [[t + 3600, 100, 100, 100], [t + DAY + 3600, 101, 101, 101]],
+                        "crypto:BTC:1H": [[t, 1, 1, 1]]},
+             "pending": {f"stock:AAA:1D:{t}": {**item, "t": t, "at": 1}, f"stock:AAA:1D:{t + 3600}": {**item, "t": t + 3600, "at": 2}},
+             "days": {}, "recent": {}, "voters": {}, "since": 1}
+    scoreboard.normalize(board)
+    day0 = t - t % DAY
+    assert board["prices"]["stock:AAA:1D"] == [[day0, 100, 100, 100], [day0 + DAY, 101, 101, 101]]
+    assert board["prices"]["crypto:BTC:1H"] == [[t, 1, 1, 1]]
+    assert list(board["pending"]) == [f"stock:AAA:1D:{day0}"]
+    assert board["pending"][f"stock:AAA:1D:{day0}"]["at"] == 2
