@@ -71,10 +71,18 @@ export function withYahooToday(candles, json) {
   const lo = Number(m.regularMarketDayLow);
   const volume = Number(m.regularMarketVolume);
   return [...candles, {
-    time: day * 86400 + 13.5 * 3600, open, close,
+    time: usOpen(day), open, close,
     high: Math.max(hi > 0 ? hi : 0, open, close), low: Math.min(lo > 0 ? lo : Infinity, open, close),
     volume: Number.isFinite(volume) ? volume : 0,
   }];
+}
+
+// The US open (09:30 New York) on a day, in seconds: 13:30 UTC in summer time,
+// 14:30 UTC in winter, where Yahoo puts its daily candles. `day` counts days since 1970.
+const NY = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hourCycle: 'h23', hour: '2-digit' });
+export function usOpen(day) {
+  const summer = day * 86400 + 13.5 * 3600;
+  return Number(NY.format(new Date(summer * 1000))) === 9 ? summer : summer + 3600;
 }
 
 // ---- Nasdaq -----------------------------------------------------------------
@@ -87,8 +95,8 @@ export function fromNasdaq(json) {
   if (!rows || !rows.length) throw new Error('Nasdaq: no data');
   return cleanCandles(rows.map(r => {
     const [m, d, y] = String(r.date).split('/').map(Number);
-    // 13:30 UTC is the US open, where Yahoo puts its daily candles too.
-    return { time: Date.UTC(y, m - 1, d, 13, 30) / 1000, open: money(r.open), high: money(r.high), low: money(r.low), close: money(r.close), volume: money(r.volume) };
+    // The US open, where Yahoo puts its daily candles too.
+    return { time: usOpen(Date.UTC(y, m - 1, d) / 86400000), open: money(r.open), high: money(r.high), low: money(r.low), close: money(r.close), volume: money(r.volume) };
   }));
 }
 
@@ -109,7 +117,7 @@ export function withToday(candles, info) {
   const close = p && money(p.lastSalePrice);
   const m = p && /([A-Z][a-z]{2})\w* (\d{1,2}), (\d{4})/.exec(String(p.lastTradeTimestamp || ''));
   if (!candles.length || !(close > 0) || !m || !MONTHS.includes(m[1])) return candles;
-  const time = Date.UTC(Number(m[3]), MONTHS.indexOf(m[1]), Number(m[2]), 13, 30) / 1000;
+  const time = usOpen(Date.UTC(Number(m[3]), MONTHS.indexOf(m[1]), Number(m[2])) / 86400000);
   const last = candles.at(-1);
   if (time <= last.time) return candles;
   const range = String((d.keyStats && d.keyStats.dayrange && d.keyStats.dayrange.value) || '').split('-').map(money);

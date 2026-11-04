@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stockSources, fromNasdaq, nasdaqPriceOf, withToday, withYahooToday } from '../server/stocks.mjs';
+import { stockSources, fromNasdaq, nasdaqPriceOf, withToday, withYahooToday, usOpen } from '../server/stocks.mjs';
 import { fromYahoo } from '../app/js/candles.js';
 
 const yahooChart = closes => ({ chart: { result: [{ timestamp: closes.map((_, i) => 1_700_000_000 + i * 86400), indicators: { quote: [{ open: closes, high: closes, low: closes, close: closes, volume: closes.map(() => 1) }] } }] } });
@@ -25,7 +25,7 @@ function fakeFetch(routes) {
 test('Nasdaq tables and quotes parse', () => {
   const c = fromNasdaq(nasdaqRows(3));
   assert.equal(c.length, 3);
-  assert.deepEqual(c[0], { time: Date.UTC(2026, 0, 2, 13, 30) / 1000, open: 10, high: 11.5, low: 9, close: 10, volume: 1234567 });
+  assert.deepEqual(c[0], { time: Date.UTC(2026, 0, 2, 14, 30) / 1000, open: 10, high: 11.5, low: 9, close: 10, volume: 1234567 });
   assert.equal(nasdaqPriceOf({ data: { primaryData: { lastSalePrice: '$1,234.56' } } }), 1234.56);
   assert.throws(() => fromNasdaq({ data: null }), /no data/);
 });
@@ -74,7 +74,7 @@ test("Nasdaq's live quote adds today's candle, which its history table lacks unt
   const info = { data: { primaryData: { lastSalePrice: '$10.50', lastTradeTimestamp: 'Jan 5, 2026', volume: '2,000' }, keyStats: { dayrange: { value: '9.90 - 10.60' } } } };
   const c = withToday(hist, info);
   assert.equal(c.length, 4);
-  assert.deepEqual(c.at(-1), { time: Date.UTC(2026, 0, 5, 13, 30) / 1000, open: 10.02, high: 10.6, low: 9.9, close: 10.5, volume: 2000 });
+  assert.deepEqual(c.at(-1), { time: Date.UTC(2026, 0, 5, 14, 30) / 1000, open: 10.02, high: 10.6, low: 9.9, close: 10.5, volume: 2000 });
   // Already in the table, or no date: unchanged.
   assert.equal(withToday(hist, { data: { primaryData: { lastSalePrice: '$10.50', lastTradeTimestamp: 'Jan 4, 2026' } } }).length, 3);
   assert.equal(withToday(hist, { data: { primaryData: { lastSalePrice: '$10.50' } } }).length, 3);
@@ -92,4 +92,11 @@ test("a Yahoo daily chart a day behind gets today's candle from its own quote", 
   // Up to date: unchanged.
   json.chart.result[0].meta.regularMarketTime = thu + 3600;
   assert.equal(withYahooToday(fromYahoo(json), json).length, 2);
+});
+
+test('the US open is 13:30 UTC in summer time and 14:30 UTC in winter, as Yahoo stamps its daily candles', () => {
+  const day = (y, m, d) => Date.UTC(y, m - 1, d) / 86400000;
+  assert.equal(usOpen(day(2026, 10, 30)), Date.UTC(2026, 9, 30, 13, 30) / 1000);
+  assert.equal(usOpen(day(2026, 11, 2)), Date.UTC(2026, 10, 2, 14, 30) / 1000);
+  assert.equal(usOpen(day(2026, 3, 9)), Date.UTC(2026, 2, 9, 13, 30) / 1000);
 });
