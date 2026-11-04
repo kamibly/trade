@@ -75,6 +75,44 @@ def _day(t: int) -> str:
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%d")
 
 
+DAY_TFS = ("1D", "1W")
+
+
+def _slot(tf: str, t: int) -> int:
+    """A candle's time as the scoreboard keys it. Daily and weekly candles are
+    keyed by their UTC day: the same stock day can come stamped 13:30 or 14:30
+    UTC (summer or winter time, or a candle added from a live quote), and both
+    must be the same candle."""
+    return t - t % 86400 if tf in DAY_TFS else t
+
+
+def _tf_of(chart: str) -> str:
+    return chart.rsplit(":", 1)[-1]
+
+
+def normalize(board: dict) -> None:
+    """Keys every daily and weekly price and waiting call by its day, merging
+    the copies one day got under two times (the newer read wins). Boards saved
+    before this fix carry such copies; afterwards it changes nothing."""
+    for chart, pts in board["prices"].items():
+        tf = _tf_of(chart)
+        if tf not in DAY_TFS:
+            continue
+        merged: Dict[int, list] = {}
+        for pt in pts:
+            merged[_slot(tf, int(pt[0]))] = [_slot(tf, int(pt[0])), *pt[1:]]
+        board["prices"][chart] = [merged[t] for t in sorted(merged)]
+    pending: Dict[str, dict] = {}
+    for item in board["pending"].values():
+        if "t" not in item or "key" not in item or "tf" not in item:
+            continue
+        t = _slot(item["tf"], int(item["t"]))
+        pid = f"{item['key']}:{item['tf']}:{t}"
+        if pid not in pending or item.get("at", 0) >= pending[pid].get("at", 0):
+            pending[pid] = {**item, "t": t}
+    board["pending"] = pending
+
+
 def _add_point(points: List[list], point: list) -> None:
     """One [time, close, high, low] per candle; a candle still forming keeps
     its latest read."""
@@ -101,6 +139,7 @@ def record(observations: Optional[List[dict]], voters: Optional[Dict[str, list]]
     now = now or service.now_ms()
     with _lock:
         board = load()
+        normalize(board)
         board["since"] = board["since"] or now
         board["voters"].update(voters or {})
         for o in observations:
@@ -108,15 +147,16 @@ def record(observations: Optional[List[dict]], voters: Optional[Dict[str, list]]
                 continue
             chart = f"{o['key']}:{o['tf']}"
             p = float(o["p"])
-            _add_point(board["prices"].setdefault(chart, []), [int(o["t"]), p, _num(o.get("h"), p), _num(o.get("l"), p)])
+            t = _slot(o["tf"], int(o["t"]))
+            _add_point(board["prices"].setdefault(chart, []), [t, p, _num(o.get("h"), p), _num(o.get("l"), p)])
             # The latest read of a candle wins: a call made and dropped while the
             # candle was forming doesn't count, the one standing at its close does.
-            item = {"key": o["key"], "type": o.get("type", "stock"), "tf": o["tf"], "t": int(o["t"]), "p": p,
+            item = {"key": o["key"], "type": o.get("type", "stock"), "tf": o["tf"], "t": t, "p": p,
                     "atr": _num(o.get("atr"), 0), "sa": _num(o.get("sa"), 2), "ta": _num(o.get("ta"), 3),
                     "a": o.get("a", "hold"), "up": o.get("up") or [], "down": o.get("down") or [], "at": now}
             if "f" in o and o["f"] is not None:
                 item["f"] = o["f"]
-            pid = f"{chart}:{o['t']}"
+            pid = f"{chart}:{t}"
             if item["a"] != "hold" or item["up"] or item["down"]:
                 board["pending"][pid] = item
             else:
