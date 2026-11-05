@@ -233,3 +233,9 @@ def test_each_row_counts_and_lists_its_waiting_calls():
     sell = scoreboard.waiting("sell")["calls"][0]
     assert (sell["dir"], sell["level"]) == (-1, "stop") and sell["levelMove"] == pytest.approx(0.02)
     assert scoreboard.waiting("v:macd")["count"] == 2
+
+
+def test_the_bar_to_beat_follows_the_stop_and_target():
+    assert scoreboard.summary("all", 30, now=NOW)["chance"] == 0.4
+    service.update_state(lambda st: st.update(profile={"settings": {"stopAtr": 1, "takeAtr": 3}}))
+    assert scoreboard.summary("all", 30, now=NOW)["chance"] == 0.25

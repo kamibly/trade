@@ -282,6 +282,15 @@ def _row(source: str, label: str, s: list) -> dict:
     return row
 
 
+def chance() -> float:
+    """How often a call is right by luck: a price that wanders at random reaches
+    a target takeAtr away before a stop stopAtr away stopAtr / (stopAtr + takeAtr)
+    of the time (2 / (2 + 3) = 40% with the default levels), not half."""
+    settings = ((service.load_state().get("profile") or {}).get("settings")) or {}
+    sa, ta = _num(settings.get("stopAtr"), 2), _num(settings.get("takeAtr"), 3)
+    return round(sa / (sa + ta), 4) if sa > 0 and ta > 0 else 0.4
+
+
 def summary(kind: str = "all", days: Optional[int] = 30, now: Optional[int] = None) -> dict:
     """The app's Scoreboard tab: the calls, the voters (by group, with their
     methods) and the trade filter, over the last `days` days (None: all)."""
@@ -322,7 +331,7 @@ def summary(kind: str = "all", days: Optional[int] = 30, now: Optional[int] = No
     for row in [*calls, *ml, *filt, *groups.values(), *(m for g in groups.values() for m in g["methods"])]:
         row["waiting"] = counts.get(row["id"], 0)
     return {
-        "kind": kind, "days": days, "minCalls": MIN_CALLS, "cap": CAP, "since": board["since"],
+        "kind": kind, "days": days, "minCalls": MIN_CALLS, "cap": CAP, "since": board["since"], "chance": chance(),
         "pending": len(board["pending"]),
         "calls": calls,
         "groups": list(groups.values()),

@@ -22,7 +22,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.29.1 (waiting calls on the Scoreboard)';
+export const APP_VERSION = '0.29.2 (Scoreboard: the real bar to beat)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -879,7 +879,7 @@ function sbRow(r, { min, sub = false, open = null } = {}) {
     onclick: () => { if (state.openCards.has(id)) state.openCards.delete(id); else state.openCards.add(id); renderScoreboard(); },
   },
   el('span', { class: 'sb-name', text: r.label }),
-  el('span', { class: scored ? '' : 'muted', text: scored ? `${Math.round(r.right * 100)}%` : '–' }),
+  el('span', { class: scored ? upDown(r.right - (sbState.data && Number.isFinite(sbState.data.chance) ? sbState.data.chance : 0.4)) : 'muted', text: scored ? `${Math.round(r.right * 100)}%` : '–' }),
   el('span', { class: scored ? upDown(r.avg) : 'muted', text: scored ? fmtPct(r.avg) : '–' }),
   el('span', { class: scored ? upDown(r.edge) : 'muted', text: scored ? fmtPct(r.edge) : '–' }),
   el('span', { class: `sb-n${scored ? '' : ' muted'}` }, scored ? String(r.n) : `${r.n}/${min}`,
@@ -921,7 +921,7 @@ function renderScoreboard() {
   box.replaceChildren(tools,
     note(`${started} · ${d.pending} call${d.pending === 1 ? '' : 's'} waiting for their target or stop. Tap a row for its calls.`),
     el('h2', { class: 'section', text: "1. The app's calls" }),
-    note(`Each Buy and Sell graded like the trade it opens: right when its target comes before its stop, or by the move after ${d.cap} candles if neither comes. Returns are after fees. Bars to beat: 50% right, and 0% vs hold (the average move of every chart of the same kind over the same candles).`),
+    note(`Each Buy and Sell graded like the trade it opens: right when its target comes before its stop, or by the move after ${d.cap} candles if neither comes. Returns are after fees. Bars to beat: ${Math.round((d.chance ?? 0.4) * 100)}% right (the stop is closer than the target, so a coin flip reaches the target first only that often), and 0% vs hold (the average move of every chart of the same kind over the same candles).`),
     sbTable('Call', d.calls, min),
     el('h2', { class: 'section', text: '2. The voters' }),
     note('Each voter graded on its own firm votes, whether or not the score acted on them. Tap a group for its methods.'),
