@@ -504,3 +504,8 @@ details.why-fold[open] > summary::before { content: '▾ '; }
 .ot-top { list-style: none; padding: 0; margin: 8px 0; }
 .ot-top li { display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px solid var(--line); }
 .list .sym { flex-wrap: wrap; }
+
+.sb-n small { display: block; font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; }
+.sb-calls li.sb-head { display: block; margin-top: 6px; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.sb-calls li.sb-head:first-child { margin-top: 0; }
+.sb-calls li.sb-wait > span { white-space: nowrap; }

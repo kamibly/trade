@@ -95,7 +95,7 @@ def test_scores_show_from_thirty_calls_and_split_by_kind():
     run_days(days)
     stocks = scoreboard.summary("stock", None, now=NOW)
     assert stocks["calls"][0]["n"] == 30 and stocks["calls"][0]["right"] == 1
-    assert stocks["ml"] == [{"id": "v:lgbm", "label": "LightGBM (old)", "n": 30, "right": 1.0, "avg": pytest.approx(0.028), "edge": 0.0}]
+    assert stocks["ml"] == [{"id": "v:lgbm", "label": "LightGBM (old)", "n": 30, "right": 1.0, "avg": pytest.approx(0.028), "edge": 0.0, "waiting": 0}]
     assert scoreboard.summary("crypto", None, now=NOW)["ml"] == [], "the old mixed models show only with graded calls"
     momentum = next(g for g in stocks["groups"] if g["id"] == "v:g:momentum")
     assert [m["label"] for m in momentum["methods"]] == ["MACD", "RSI"]
@@ -124,9 +124,9 @@ def test_a_forming_candle_keeps_its_latest_read():
 
 def test_the_endpoints(client=None):
     client = TestClient(main.app)
-    assert client.get("/scoreboard", headers=KEY).json()["calls"][0] == {"id": "buy", "label": "Buy", "n": 0}
+    assert client.get("/scoreboard", headers=KEY).json()["calls"][0] == {"id": "buy", "label": "Buy", "n": 0, "waiting": 0}
     assert client.get("/scoreboard?kind=bonds", headers=KEY).status_code == 400
-    assert client.get("/scoreboard/calls?source=buy", headers=KEY).json() == {"source": "buy", "calls": []}
+    assert client.get("/scoreboard/calls?source=buy", headers=KEY).json() == {"source": "buy", "calls": [], "waiting": {"count": 0, "calls": []}}
     assert client.get("/scoreboard").status_code == 401
 
 
@@ -212,3 +212,30 @@ def test_boards_saved_with_two_times_for_a_day_are_merged():
     assert board["prices"]["crypto:BTC:1H"] == [[t, 1, 1, 1]]
     assert list(board["pending"]) == [f"stock:AAA:1D:{day0}"]
     assert board["pending"][f"stock:AAA:1D:{day0}"]["at"] == 2
+
+
+def test_each_row_counts_and_lists_its_waiting_calls():
+    # Day 0: a Buy on AAA (RSI up, MACD down) and a Sell on BBB; both drift a little.
+    run_days([[obs("stock:AAA", 0, 100, a="buy", up=["rsi"], down=["macd"], f=0.8), obs("stock:BBB", 0, 50, a="sell", down=["macd"], atr=0.5)],
+              [obs("stock:AAA", 1, 101), obs("stock:BBB", 1, 50.2, atr=0.5)],
+              [obs("stock:AAA", 2, 100.5), obs("stock:BBB", 2, 50.1, atr=0.5)]])
+    s = scoreboard.summary("all", 30, now=NOW)
+    assert [c["waiting"] for c in s["calls"]] == [1, 1]
+    momentum = next(g for g in s["groups"] if g["id"] == "v:g:momentum")
+    assert {m["id"]: m["waiting"] for m in momentum["methods"]} == {"v:macd": 2, "v:rsi": 1}
+    assert next(f for f in s["filter"] if f["id"] == "f:smaller")["waiting"] == 1
+    assert scoreboard.summary("crypto", 30, now=NOW)["calls"][0]["waiting"] == 0
+    w = scoreboard.waiting("buy")
+    assert w["count"] == 1
+    c = w["calls"][0]
+    assert (c["key"], c["dir"], c["candles"], c["level"]) == ("stock:AAA", 1, 2, "target")
+    assert c["now"] == pytest.approx(0.005) and c["levelMove"] == pytest.approx(0.03)
+    sell = scoreboard.waiting("sell")["calls"][0]
+    assert (sell["dir"], sell["level"]) == (-1, "stop") and sell["levelMove"] == pytest.approx(0.02)
+    assert scoreboard.waiting("v:macd")["count"] == 2
+
+
+def test_the_bar_to_beat_follows_the_stop_and_target():
+    assert scoreboard.summary("all", 30, now=NOW)["chance"] == 0.4
+    service.update_state(lambda st: st.update(profile={"settings": {"stopAtr": 1, "takeAtr": 3}}))
+    assert scoreboard.summary("all", 30, now=NOW)["chance"] == 0.25

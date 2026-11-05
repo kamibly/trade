@@ -23,7 +23,7 @@ import service
 
 logging.basicConfig(level=logging.INFO)
 
-VERSION = "1.22.0"
+VERSION = "1.22.2"
 API_KEY = os.environ.get("TRADE_API_KEY", "")
 ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://kamibly.github.io")
 
@@ -131,7 +131,7 @@ def get_scoreboard(kind: str = "all", days: int = 30, x_api_key: Optional[str] =
 def get_scoreboard_calls(source: str, kind: str = "all", x_api_key: Optional[str] = Header(default=None)):
     """One source's latest graded calls, newest first."""
     check_api_key(x_api_key)
-    return {"source": source, "calls": scoreboard.recent(source, kind)}
+    return {"source": source, "calls": scoreboard.recent(source, kind), "waiting": scoreboard.waiting(source, kind)}
 
 
 @app.get("/ndax")

@@ -22,7 +22,7 @@ import { atr as atrSeries } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.29.0 (own-trades model)';
+export const APP_VERSION = '0.29.2 (Scoreboard: the real bar to beat)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -839,7 +839,7 @@ async function loadSourceCalls(id) {
   sbState.calls[k] = { loading: true };
   try {
     const r = await srv.serverFetch(state.settings, `/scoreboard/calls?source=${encodeURIComponent(id)}&kind=${sbState.kind}`);
-    sbState.calls[k] = { list: r.calls };
+    sbState.calls[k] = { list: r.calls, waiting: r.waiting || { count: 0, calls: [] } };
   } catch (e) {
     sbState.calls[k] = { error: e.message };
   }
@@ -851,12 +851,23 @@ function sbCalls(id) {
   if (!c) { loadSourceCalls(id); return el('p', { class: 'muted small sb-calls', text: 'Loading…' }); }
   if (c.loading) return el('p', { class: 'muted small sb-calls', text: 'Loading…' });
   if (c.error) return el('p', { class: 'muted small sb-calls', text: `Couldn't load: ${c.error}` });
-  if (!c.list.length) return el('p', { class: 'muted small sb-calls', text: 'No graded calls yet.' });
+  const w = c.waiting || { count: 0, calls: [] };
+  if (!c.list.length && !w.count) return el('p', { class: 'muted small sb-calls', text: 'No calls yet.' });
   const day = t => new Date(t * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
-  return el('ul', { class: 'sb-calls small' }, ...c.list.map(x => el('li', {},
-    el('span', { text: `${x.key.split(':')[1]} · ${day(x.t)}${x.tf !== '1D' ? ` · ${x.tf}` : ''}` }),
-    el('span', { class: 'muted', text: `${x.dir > 0 ? 'Up' : 'Down'} · ${SB_HOW[x.how] || 'exit'} ${fmtPct(x.ret)} in ${x.candles}` }),
-    el('span', { class: upDown(x.r), text: x.right ? '✓ right' : '✗ wrong' }))));
+  const name = x => `${x.key.split(':')[1]} · ${day(x.t)}${x.tf !== '1D' ? ` · ${x.tf}` : ''}`;
+  return el('ul', { class: 'sb-calls small' },
+    el('li', { class: 'sb-head' }, el('span', { text: 'Graded' })),
+    ...(c.list.length ? c.list.map(x => el('li', {},
+      el('span', { text: name(x) }),
+      el('span', { class: 'muted', text: `${x.dir > 0 ? 'Up' : 'Down'} · ${SB_HOW[x.how] || 'exit'} ${fmtPct(x.ret)} in ${x.candles}` }),
+      el('span', { class: upDown(x.r), text: x.right ? '✓ right' : '✗ wrong' })))
+      : [el('li', { class: 'muted' }, el('span', { text: 'None yet' }))]),
+    w.count ? el('li', { class: 'sb-head' }, el('span', { text: `Waiting (${w.count})` })) : null,
+    ...w.calls.map(x => el('li', { class: 'sb-wait' },
+      el('span', { text: name(x) }),
+      el('span', { class: 'muted', text: `now ${fmtPct(x.now)} · ${x.candles}/${x.cap}` }),
+      el('span', { class: 'muted', text: `${x.level} ${fmtPct(x.levelMove)}` }))),
+    w.count > w.calls.length ? el('li', { class: 'muted' }, el('span', { text: `and ${w.count - w.calls.length} more` })) : null);
 }
 
 function sbRow(r, { min, sub = false, open = null } = {}) {
@@ -868,10 +879,11 @@ function sbRow(r, { min, sub = false, open = null } = {}) {
     onclick: () => { if (state.openCards.has(id)) state.openCards.delete(id); else state.openCards.add(id); renderScoreboard(); },
   },
   el('span', { class: 'sb-name', text: r.label }),
-  el('span', { class: scored ? '' : 'muted', text: scored ? `${Math.round(r.right * 100)}%` : '–' }),
+  el('span', { class: scored ? upDown(r.right - (sbState.data && Number.isFinite(sbState.data.chance) ? sbState.data.chance : 0.4)) : 'muted', text: scored ? `${Math.round(r.right * 100)}%` : '–' }),
   el('span', { class: scored ? upDown(r.avg) : 'muted', text: scored ? fmtPct(r.avg) : '–' }),
   el('span', { class: scored ? upDown(r.edge) : 'muted', text: scored ? fmtPct(r.edge) : '–' }),
-  el('span', { class: scored ? '' : 'muted', text: scored ? String(r.n) : `${r.n}/${min}` }));
+  el('span', { class: `sb-n${scored ? '' : ' muted'}` }, scored ? String(r.n) : `${r.n}/${min}`,
+    r.waiting ? el('small', { text: `${r.waiting} waiting` }) : null));
   return [row, shown ? (r.methods ? null : sbCalls(r.id)) : null];
 }
 
@@ -909,7 +921,7 @@ function renderScoreboard() {
   box.replaceChildren(tools,
     note(`${started} · ${d.pending} call${d.pending === 1 ? '' : 's'} waiting for their target or stop. Tap a row for its calls.`),
     el('h2', { class: 'section', text: "1. The app's calls" }),
-    note(`Each Buy and Sell graded like the trade it opens: right when its target comes before its stop, or by the move after ${d.cap} candles if neither comes. Returns are after fees. Bars to beat: 50% right, and 0% vs hold (the average move of every chart of the same kind over the same candles).`),
+    note(`Each Buy and Sell graded like the trade it opens: right when its target comes before its stop, or by the move after ${d.cap} candles if neither comes. Returns are after fees. Bars to beat: ${Math.round((d.chance ?? 0.4) * 100)}% right (the stop is closer than the target, so a coin flip reaches the target first only that often), and 0% vs hold (the average move of every chart of the same kind over the same candles).`),
     sbTable('Call', d.calls, min),
     el('h2', { class: 'section', text: '2. The voters' }),
     note('Each voter graded on its own firm votes, whether or not the score acted on them. Tap a group for its methods.'),

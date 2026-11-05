@@ -282,11 +282,21 @@ def _row(source: str, label: str, s: list) -> dict:
     return row
 
 
+def chance() -> float:
+    """How often a call is right by luck: a price that wanders at random reaches
+    a target takeAtr away before a stop stopAtr away stopAtr / (stopAtr + takeAtr)
+    of the time (2 / (2 + 3) = 40% with the default levels), not half."""
+    settings = ((service.load_state().get("profile") or {}).get("settings")) or {}
+    sa, ta = _num(settings.get("stopAtr"), 2), _num(settings.get("takeAtr"), 3)
+    return round(sa / (sa + ta), 4) if sa > 0 and ta > 0 else 0.4
+
+
 def summary(kind: str = "all", days: Optional[int] = 30, now: Optional[int] = None) -> dict:
     """The app's Scoreboard tab: the calls, the voters (by group, with their
     methods) and the trade filter, over the last `days` days (None: all)."""
     now = now or service.now_ms()
     board = load()
+    normalize(board)
     start = _day(now // 1000 - days * 86_400) if days else ""
     totals: Dict[str, list] = {}
     for d, kinds in board["days"].items():
@@ -315,10 +325,15 @@ def summary(kind: str = "all", days: Optional[int] = 30, now: Optional[int] = No
           if grp == "ml" and (vid not in RETIRED_ML or totals.get(f"v:{vid}", zero)[0] > 0)]
     filt = [_row(src, label, totals.get(src, zero)) for src, label in
             zip(FILTER_BUCKETS, ("Full size or bigger", "Made smaller", "Blocked"))]
+    calls = [_row("buy", "Buy", totals.get("buy", zero)), _row("sell", "Sell", totals.get("sell", zero))]
+    # Each row's waiting calls, so a call shows the moment it is made.
+    counts = waiting_counts(board, kind)
+    for row in [*calls, *ml, *filt, *groups.values(), *(m for g in groups.values() for m in g["methods"])]:
+        row["waiting"] = counts.get(row["id"], 0)
     return {
-        "kind": kind, "days": days, "minCalls": MIN_CALLS, "cap": CAP, "since": board["since"],
+        "kind": kind, "days": days, "minCalls": MIN_CALLS, "cap": CAP, "since": board["since"], "chance": chance(),
         "pending": len(board["pending"]),
-        "calls": [_row("buy", "Buy", totals.get("buy", zero)), _row("sell", "Sell", totals.get("sell", zero))],
+        "calls": calls,
         "groups": list(groups.values()),
         "ml": ml,
         "filter": filt,
@@ -329,6 +344,67 @@ def recent(source: str, kind: str = "all") -> List[dict]:
     """A source's latest graded calls, newest first."""
     rows = load()["recent"].get(source) or []
     return [r for r in rows if kind == "all" or r["key"].startswith(f"{kind}:")]
+
+
+WAITING_SHOWN = 10        # waiting calls listed per source
+
+
+def _sources(item: dict):
+    """The sources a waiting call still counts for, each with its direction
+    (sides already graded are left out)."""
+    done = set(item.get("done") or [])
+    if 1 not in done:
+        if item.get("a") == "buy":
+            yield "buy", 1
+            if "f" in item:
+                f = item["f"]
+                yield ("f:blocked" if not f > 0 else "f:smaller" if f < 1 else "f:bigger"), 1
+        for vid in item.get("up") or []:
+            yield f"v:{vid}", 1
+    if -1 not in done:
+        if item.get("a") == "sell":
+            yield "sell", -1
+        for vid in item.get("down") or []:
+            yield f"v:{vid}", -1
+
+
+def _waiting_items(board: dict, kind: str) -> List[dict]:
+    return [item for item in board["pending"].values()
+            if "p" in item and (kind == "all" or item.get("type") == kind)]
+
+
+def waiting_counts(board: dict, kind: str = "all") -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for item in _waiting_items(board, kind):
+        for src, _ in _sources(item):
+            counts[src] = counts.get(src, 0) + 1
+    return counts
+
+
+def waiting(source: str, kind: str = "all", now: Optional[int] = None) -> dict:
+    """A source's waiting calls, newest first (at most WAITING_SHOWN): how far
+    the price has moved since the call, how many of its CAP candles have
+    passed, and the level (target or stop) it is nearer to, as a move from the
+    call's price."""
+    board = load()
+    normalize(board)
+    rows = []
+    for item in _waiting_items(board, kind):
+        d = next((d for src, d in _sources(item) if src == source), None)
+        if d is None:
+            continue
+        points = board["prices"].get(f"{item['key']}:{item['tf']}") or []
+        i = next((j for j, pt in enumerate(points) if pt[0] == item["t"]), None)
+        last = points[-1][1] if points else item["p"]
+        move = last / item["p"] - 1
+        atr = (item.get("atr") or 0) / item["p"]
+        toward = move * d >= 0
+        level = d * (item["ta"] if toward else -item["sa"]) * atr
+        rows.append({"key": item["key"], "tf": item["tf"], "t": item["t"], "dir": d, "now": round(move, 5),
+                     "candles": (len(points) - 1 - i) if i is not None else 0, "cap": CAP,
+                     "level": "target" if toward else "stop", "levelMove": round(level, 5)})
+    rows.sort(key=lambda r: r["t"], reverse=True)
+    return {"count": len(rows), "calls": rows[:WAITING_SHOWN]}
 
 
 # The method groups, as app/js/signals.js names them.
