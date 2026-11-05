@@ -4,7 +4,7 @@ import * as store from './storage.js';
 import {
   fetchCandles, fetchQuotes, fetchCryptoTop, fetchUsdCad, checkStock, checkTwelveKey, twelveLimiter,
 } from './data.js';
-import { PriceChart } from './chart.js';
+import { PriceChart, LEVEL_COLORS } from './chart.js';
 import * as F from './forecast.js';
 import {
   analyze, signalAt, scoreVotes, scoreParts, crossings, actionFor, baseVotesAt, GROUPS, MIN_CANDLES,
@@ -18,11 +18,11 @@ import * as paper from './paper.js';
 import { bothSizes, inputName, JUDGE_MIN, tradeId as ownId } from './owntrades.js';
 import { feeOf } from './fees.js';
 import * as pf from './portfolio.js';
-import { atr as atrSeries } from './indicators.js';
+import { atr as atrSeries, swings, pivots as pivotsAt, fibonacci } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.29.2 (Scoreboard: the real bar to beat)';
+export const APP_VERSION = '0.29.3 (Chart: lines for more voters)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -531,6 +531,69 @@ function levelsLine(sig) {
   return `Entry ${formatMoney(sig.entry)} · Stop ${formatMoney(sig.stop)} · ${word} ${formatMoney(sig.take)}`;
 }
 
+// The linear regression voter's channel: its fitted line over the last 100
+// candles, two standard deviations either side.
+const CHANNEL_N = 100;
+function trendChannel(S, candles) {
+  const n = candles.length;
+  const lr = F.linearRegression(S.close, n - 1, CHANNEL_N);
+  if (!lr) return {};
+  const start = n - CHANNEL_N;
+  const fit = k => lr.intercept + lr.slope * k;
+  let ss = 0;
+  for (let k = 0; k < CHANNEL_N; k++) ss += (S.close[start + k] - fit(k)) ** 2;
+  const sd = Math.sqrt(ss / CHANNEL_N);
+  const line = off => candles.slice(start).map((c, k) => ({ time: c.time, value: fit(k) + off }));
+  return { lrMid: line(0), lrUpper: line(2 * sd), lrLower: line(-2 * sd) };
+}
+
+// Flat lines at the levels the structure voters look at on the last candle.
+function chartLevels(S, candles, o) {
+  const i = candles.length - 1;
+  const c = S.close[i];
+  const out = [];
+  if (o.sr) {
+    // As the support and resistance voter: the nearest swing low under the price and swing high over it.
+    const { highs, lows } = swings(candles, i, 3, 120);
+    const res = highs.map(k => candles[k].high).filter(h => h > c).sort((a, b) => a - b)[0];
+    const sup = lows.map(k => candles[k].low).filter(l => l < c).sort((a, b) => b - a)[0];
+    out.push({ price: res, kind: 'resistance', title: 'Resistance', strong: true }, { price: sup, kind: 'support', title: 'Support', strong: true });
+  }
+  if (o.pivots) {
+    const p = pivotsAt(candles, i);
+    if (p) out.push({ price: p.r1, kind: 'pivot', title: 'R1' }, { price: p.p, kind: 'pivot', title: 'Pivot', strong: true }, { price: p.s1, kind: 'pivot', title: 'S1' });
+  }
+  if (o.fib && i >= 99) {
+    const f = fibonacci(candles, i);
+    for (const r of [0.382, 0.5, 0.618]) out.push({ price: f.levels[r], kind: 'fib', title: `Fib ${(r * 100).toFixed(1).replace('.0', '')}%`, strong: r !== 0.382 });
+  }
+  return out;
+}
+
+// The color keys under the chart for the lines that are on.
+const LEGEND = [
+  ['ma', [['#f2c94c', 'SMA 20'], ['#4c9aff', 'SMA 50'], ['#c77dff', 'SMA 200']]],
+  ['ema', [['#ff7ab6', 'EMA 50'], ['#e05aa0', 'EMA 200']]],
+  ['bands', [['rgba(139,148,158,0.8)', 'Bollinger']]],
+  ['cloud', [['rgba(38,166,154,0.7)', 'Ichimoku cloud']]],
+  ['keltner', [['rgba(86,204,242,0.8)', 'Keltner']]],
+  ['donchian', [['rgba(242,153,74,0.85)', 'Donchian 20']]],
+  ['supertrend', [['#26a69a', 'SuperTrend up'], ['#ef5350', 'down']]],
+  ['psar', [['#e6edf3', 'Parabolic SAR dots']]],
+  ['vwap', [['#9b8cff', 'VWAP 20']]],
+  ['channel', [['rgba(201,209,217,0.9)', 'Trend channel (100)']]],
+  ['sr', [[LEVEL_COLORS.support, 'Support'], [LEVEL_COLORS.resistance, 'Resistance']]],
+  ['pivots', [[LEVEL_COLORS.pivot, 'Pivot, R1, S1']]],
+  ['fib', [[LEVEL_COLORS.fib, 'Fibonacci 38-62%']]],
+  ['forecast', [['#4c9aff', 'Forecast: median and 10–90% range of 500 simulated paths']]],
+  ['ml', [['#ff9f43', 'ML: average move after similar predictions']]],
+];
+function renderLegend() {
+  const o = state.settings.overlays;
+  const keys = LEGEND.filter(([k]) => o[k]).flatMap(([, items]) => items);
+  $('chart-legend').replaceChildren(...keys.flatMap(([color, text]) => [el('span', { class: 'key', style: `background:${color}` }), el('span', { text })]));
+}
+
 function chartOverlays(S, candles, scores, rule) {
   const o = state.settings.overlays;
   const n = candles.length;
@@ -565,12 +628,23 @@ function chartOverlays(S, candles, scores, rule) {
     overlays.ml = [{ time: last.time, value: last.close }, { time: timeAt(n + ML_HORIZON - 1), value: last.close * (1 + outlook.ret) }];
     titles.ml = `ML ${fmtPct(outlook.ret)}`;
   }
+  if (o.ema) Object.assign(overlays, { ema50: pts(S.ema50), ema200: pts(S.ema200) });
+  if (o.keltner) Object.assign(overlays, { kcUpper: pts(S.keltner.upper), kcLower: pts(S.keltner.lower) });
+  if (o.donchian) Object.assign(overlays, { dcUpper: pts(S.donchian.upper), dcLower: pts(S.donchian.lower) });
+  if (o.supertrend) {
+    const { line, up } = S.supertrend;
+    overlays.stUp = pts(line.map((v, i) => (up[i] === true ? v : NaN)));
+    overlays.stDown = pts(line.map((v, i) => (up[i] === false ? v : NaN)));
+  }
+  if (o.psar) overlays.psar = pts(S.psar.sar);
+  if (o.vwap && S.vwap) overlays.vwap = pts(S.vwap);
+  if (o.channel) Object.assign(overlays, trendChannel(S, candles));
   let markers = [];
   if (o.markers) {
     const hist = scores.map((v, i) => (i < n - 250 ? NaN : v));
     markers = crossings(hist, rule, S).map(x => ({ time: candles[x.i].time, action: x.action }));
   }
-  return { overlays, markers, titles, outlook };
+  return { overlays, markers, titles, outlook, levels: chartLevels(S, candles, o) };
 }
 
 // The sentence under the chart that goes with the ML line.
@@ -590,6 +664,7 @@ function renderAnalysis() {
   const panel = $('analysis');
   const candles = state.chartCandles;
   for (const b of document.querySelectorAll('#overlay-chips button')) b.classList.toggle('on', !!state.settings.overlays[b.dataset.ov]);
+  renderLegend();
   if (!state.chart) return;
   if (candles.length < MIN_CANDLES) {
     state.chart.setOverlays({}, []);
@@ -617,8 +692,8 @@ function renderAnalysis() {
   const tuned = autoTune(state.settings) && !!learned.rule;
   const opts = { thresholds: rule, ...riskOpts() };
   const scores = votes.map(v => (v.length ? scoreVotes(v, weights) : NaN));
-  const { overlays, markers, titles, outlook } = chartOverlays(S, candles, scores, rule);
-  state.chart.setOverlays(overlays, markers, titles);
+  const { overlays, markers, titles, outlook, levels } = chartOverlays(S, candles, scores, rule);
+  state.chart.setOverlays(overlays, markers, titles, levels);
   const mlText = state.settings.overlays.ml ? mlLineText(outlook, S.models) : '';
   $('ml-line').textContent = mlText;
   $('ml-line').hidden = !mlText;
