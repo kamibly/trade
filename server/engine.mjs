@@ -96,7 +96,7 @@ export const defaultDeps = {
 
 // Stocks: Yahoo Finance first (no key), then Nasdaq for daily and weekly charts
 // (see stocks.mjs), then Twelve Data if the server has a key.
-async function candlesFor(item, tf, settings, deps) {
+export async function candlesFor(item, tf, settings, deps) {
   if (item.type === 'crypto') return deps.fetchCandles(item, tf, settings);
   try {
     return await deps.yahooCandles(item, tf);
@@ -570,7 +570,7 @@ export async function runWhatIf(job, deps = defaultDeps) {
 // learn from more than a handful of charts. `total` caps the list. With
 // `kind`, only that kind: your stocks and an S&P 500 sample, or your coins and
 // the top `total` coins (all of them, on top of yours).
-async function trainingItems(job, deps) {
+export async function trainingItems(job, deps) {
   const out = [];
   const seen = new Set();
   const kind = job.kind || null;
