@@ -56,7 +56,7 @@ export const DEFAULT_SETTINGS = {
   serverUrl: '',
   serverKey: '',
   serverPush: false,
-  overlays: { ma: true, bands: false, cloud: false, forecast: true, ml: true, markers: true },
+  overlays: { ma: true, bands: false, cloud: false, forecast: true, ml: true, markers: true, ema: false, keltner: false, donchian: false, supertrend: false, psar: false, vwap: false, channel: false, sr: false, pivots: false, fib: false },
   setups: { insider: true, earnings: true, ranking: true, crowd: true }, // opportunity setups the server looks for
 };
 

@@ -20,7 +20,23 @@ const LINES = {
   fc10: { color: 'rgba(76,154,255,0.55)', lineWidth: 1, lineStyle: 2 },
   fc90: { color: 'rgba(76,154,255,0.55)', lineWidth: 1, lineStyle: 2 },
   ml: { color: '#ff9f43', lineWidth: 3, lineStyle: 0, lastValueVisible: true },
+  ema50: { color: '#ff7ab6', lineWidth: 1 },
+  ema200: { color: '#e05aa0', lineWidth: 2 },
+  kcUpper: { color: 'rgba(86,204,242,0.8)', lineWidth: 1, lineStyle: 2 },
+  kcLower: { color: 'rgba(86,204,242,0.8)', lineWidth: 1, lineStyle: 2 },
+  dcUpper: { color: 'rgba(242,153,74,0.85)', lineWidth: 1, lineStyle: 1 },
+  dcLower: { color: 'rgba(242,153,74,0.85)', lineWidth: 1, lineStyle: 1 },
+  stUp: { color: UP, lineWidth: 2, gaps: true },
+  stDown: { color: DOWN, lineWidth: 2, gaps: true },
+  psar: { color: '#e6edf3', lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 1.5 },
+  vwap: { color: '#9b8cff', lineWidth: 2 },
+  lrMid: { color: 'rgba(201,209,217,0.9)', lineWidth: 1 },
+  lrUpper: { color: 'rgba(201,209,217,0.5)', lineWidth: 1, lineStyle: 2 },
+  lrLower: { color: 'rgba(201,209,217,0.5)', lineWidth: 1, lineStyle: 2 },
 };
+
+// Colors of the flat level lines (support/resistance, pivots, Fibonacci).
+export const LEVEL_COLORS = { support: UP, resistance: DOWN, pivot: '#f2c94c', fib: 'rgba(199,125,255,0.9)' };
 
 export class PriceChart {
   constructor(el) {
@@ -41,14 +57,16 @@ export class PriceChart {
     this.volume = this.chart.addHistogramSeries({ priceScaleId: 'vol', priceFormat: { type: 'volume' } });
     this.chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     this.lines = {};
+    this.levels = [];
     this.key = null;
     this.shift = t => t;
   }
 
   line(name) {
     if (!this.lines[name]) {
+      const { gaps, ...style } = LINES[name];
       this.lines[name] = this.chart.addLineSeries({
-        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...LINES[name],
+        priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...style,
       });
     }
     return this.lines[name];
@@ -76,14 +94,21 @@ export class PriceChart {
 
   // overlays: { name: [{ time, value }] | null }, markers: [{ time, action }],
   // titles: { name: label shown with the line's last value on the price scale }
-  setOverlays(overlays, markers = [], titles = {}) {
+  // levels: [{ price, kind: key of LEVEL_COLORS, title, strong? }], flat lines across the chart.
+  setOverlays(overlays, markers = [], titles = {}, levels = []) {
     for (const name of Object.keys(LINES)) {
       const points = overlays[name];
       if (!points && !this.lines[name]) continue;
       const series = this.line(name);
       series.applyOptions({ priceFormat: this.priceFormat, title: titles[name] || '' });
-      series.setData(points ? points.filter(p => Number.isFinite(p.value)).map(p => ({ time: this.shift(p.time), value: p.value })) : []);
+      // Missing values stay gaps, so a line that switches sides (SuperTrend) isn't joined up.
+      const gaps = !!LINES[name].gaps;
+      series.setData(points ? points.filter(p => gaps || Number.isFinite(p.value)).map(p => (Number.isFinite(p.value) ? { time: this.shift(p.time), value: p.value } : { time: this.shift(p.time) })) : []);
     }
+    for (const l of this.levels) this.candles.removePriceLine(l);
+    this.levels = levels.filter(l => Number.isFinite(l.price)).map(l => this.candles.createPriceLine({
+      price: l.price, color: LEVEL_COLORS[l.kind], lineWidth: l.strong ? 2 : 1, lineStyle: l.strong ? 0 : 2, axisLabelVisible: true, title: l.title,
+    }));
     this.candles.setMarkers(markers.map(m => ({
       time: this.shift(m.time),
       position: m.action === 'buy' ? 'belowBar' : 'aboveBar',
@@ -98,6 +123,8 @@ export class PriceChart {
     this.candles.setMarkers([]);
     this.volume.setData([]);
     for (const s of Object.values(this.lines)) s.setData([]);
+    for (const l of this.levels) this.candles.removePriceLine(l);
+    this.levels = [];
     this.key = null;
   }
 }
