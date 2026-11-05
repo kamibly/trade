@@ -13,7 +13,7 @@ WORKDIR /srv
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY package.json main.py service.py ml.py events.py crypto.py ndax.py scoreboard.py engine.mjs opportunities.mjs stocks.mjs proxy.mjs btc_lead.mjs sp500.csv generate_vapid_keys.py ./
+COPY package.json main.py service.py ml.py rank_check.py events.py crypto.py ndax.py scoreboard.py engine.mjs opportunities.mjs stocks.mjs proxy.mjs btc_lead.mjs sp500.csv generate_vapid_keys.py ./
 COPY js ./js
 
 ENV DATA_DIR=/data
