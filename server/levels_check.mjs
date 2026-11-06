@@ -36,8 +36,8 @@ export const BUFFER = 0.25;    // ATRs under support for the stop
 export const RATIO = 2;        // target at least this many times the stop
 export const STOP_MIN = 0.5, STOP_MAX = 4;  // ATRs: closer or further stops are left out
 
-// Plays out a Buy at candle i's close: { win, ret } after fees, or null when
-// the chart ends first.
+// Plays out a Buy at candle i's close: { win, ret, days } after fees (days =
+// candles until it closed), or null when the chart ends first.
 export function playOut(S, i, stop, take, type) {
   if (i + HOLD >= S.close.length) return null;
   const c = S.close[i];
@@ -45,10 +45,10 @@ export function playOut(S, i, stop, take, type) {
   const net = exit => (exit / c) * (1 - fee) * (1 - fee) - 1;
   for (let j = i + 1; j <= i + HOLD; j++) {
     const b = S.candles[j];
-    if (b.low <= stop) return { win: 0, ret: net(Math.min(b.open, stop)) };
-    if (b.high >= take) return { win: 1, ret: net(Math.max(b.open, take)) };
+    if (b.low <= stop) return { win: 0, ret: net(Math.min(b.open, stop)), days: j - i };
+    if (b.high >= take) return { win: 1, ret: net(Math.max(b.open, take)), days: j - i };
   }
-  return { win: 0, ret: net(S.close[i + HOLD]) };
+  return { win: 0, ret: net(S.close[i + HOLD]), days: HOLD };
 }
 
 // Support and resistance at candle i, from swing points confirmed by then.

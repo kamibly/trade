@@ -20,6 +20,11 @@
 // Run on the server (it needs the chart history):
 //   docker exec trade-service python voters_check.py
 //   docker exec trade-service python voters_check.py --weights
+//   docker exec trade-service python voters_check.py --lines
+//
+// --lines: today's score with Buy lines of 15 to 40. A trade opens when the
+// score first reaches the line and closes at the stop, the target or after 30
+// candles (no new trade on that chart until then).
 import { analyze, baseVotesAt, scoreVotes, MIN_CANDLES, GROUPS } from './js/signals.js';
 import { turnLabels } from './js/ml.js';
 import { candlesFor, trainingItems, defaultDeps } from './engine.mjs';
@@ -28,7 +33,7 @@ import { playOut } from './levels_check.mjs';
 export const FIRM = 0.3;      // the scoreboard's firm vote
 export const SCORE = 40;      // the score's Buy and Sell lines
 
-// One chart's labelled candles: [{ t, votes: [[id, group, vote]], bottom, top, ret }],
+// One chart's labelled candles: [{ t, votes: [[id, group, vote]], bottom, top, ret, days }],
 // ret = a Buy's result after fees with the fixed stop and target (levels_check's playOut).
 export function rowsOf(S, settings = {}, type = 'stock') {
   const rows = [];
@@ -39,7 +44,7 @@ export function rowsOf(S, settings = {}, type = 'stock') {
     if (!votes.length) continue;
     const c = S.close[i], atr = S.atr[i];
     const o = playOut(S, i, c - (settings.stopAtr || 2) * atr, c + (settings.takeAtr || 3) * atr, type);
-    rows.push({ t: S.candles[i].time, votes: votes.map(v => [v.id, v.group, v.vote]), bottom: lab.bottom, top: lab.top, ret: o ? o.ret : NaN });
+    rows.push({ t: S.candles[i].time, votes: votes.map(v => [v.id, v.group, v.vote]), bottom: lab.bottom, top: lab.top, ret: o ? o.ret : NaN, days: o ? o.days : NaN });
   }
   return rows;
 }
@@ -223,6 +228,63 @@ export function showHoldout(title, h) {
   return lines.join('\n');
 }
 
+// ---- --lines: which Buy line earns the most? ----
+
+export const BUY_LINES = [15, 20, 25, 30, 40];
+export const MIN_TRADES = 100;
+
+// Trades at one Buy line: [{ t, ret }]. Rows are consecutive candles per chart.
+export function tradesAt(charts, line, weights = {}) {
+  const out = [];
+  for (const rows of charts) {
+    let prev = -Infinity;
+    for (let k = 0; k < rows.length; k++) {
+      const row = rows[k];
+      const s = scoreVotes(asVotes(row), weights);
+      if (s >= line && prev < line && Number.isFinite(row.ret)) {
+        out.push({ t: row.t, ret: row.ret });
+        k += row.days;                 // in the trade until it closes
+        prev = Infinity;               // and the score must dip under the line again
+        continue;
+      }
+      prev = s;
+    }
+  }
+  return out;
+}
+
+// Per line: trades and average % in all, the older and the newer half, and
+// whether it passes (100+ trades and above 0 in both halves, and above the 40 line in both).
+export function lineTable(charts) {
+  const ts = charts.flat().map(x => x.t).sort((a, b) => a - b);
+  const mid = ts[Math.floor(ts.length / 2)];
+  const part = xs => ({ n: xs.length, pct: mean(xs.map(x => x.ret)) * 100, right: mean(xs.map(x => (x.ret > 0 ? 1 : 0))) });
+  const rows = {};
+  for (const line of BUY_LINES) {
+    const tr = tradesAt(charts, line);
+    rows[line] = { ...part(tr), older: part(tr.filter(x => x.t < mid)), newer: part(tr.filter(x => x.t >= mid)) };
+  }
+  const base = rows[40];
+  for (const line of BUY_LINES) {
+    const r = rows[line];
+    r.passes = line !== 40 && ['older', 'newer'].every(h => r[h].n >= MIN_TRADES && r[h].pct > 0 && !(base[h].pct >= r[h].pct));
+  }
+  return { mid, rows };
+}
+
+export function showLines(title, tbl) {
+  const day = new Date(tbl.mid * 1000).toISOString().slice(0, 10);
+  const sp = v => (Number.isFinite(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}` : '–');
+  const lines = [title, `Older half before ${day}, newer from ${day}.`,
+    `${'Buy at'.padEnd(8)}${'trades'.padStart(7)}${'won'.padStart(6)}${'avg %'.padStart(8)}   ${'older'.padStart(6)}${'avg %'.padStart(8)}   ${'newer'.padStart(6)}${'avg %'.padStart(8)}  passes`];
+  for (const line of BUY_LINES) {
+    const r = tbl.rows[line];
+    lines.push(`${String(line).padEnd(8)}${String(r.n).padStart(7)}${pct(r.right).padStart(6)}${sp(r.pct).padStart(8)}   `
+      + `${String(r.older.n).padStart(6)}${sp(r.older.pct).padStart(8)}   ${String(r.newer.n).padStart(6)}${sp(r.newer.pct).padStart(8)}  ${r.passes ? 'yes' : ''}`);
+  }
+  return lines.join('\n');
+}
+
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
@@ -230,6 +292,7 @@ async function main() {
   const deps = defaultDeps;
   const printed = [];
   const weightsMode = process.argv.includes('--weights');
+  const linesMode = process.argv.includes('--lines');
   for (const [kind, total] of [['stock', job.total || 120], ['crypto', job.cryptoTotal || 50]]) {
     const items = await trainingItems({ ...job, kind, total }, deps);
     const charts = [];
@@ -247,6 +310,10 @@ async function main() {
       printed.push(showHoldout(title, holdout(charts)));
       continue;
     }
+    if (linesMode) {
+      printed.push(showLines(title, lineTable(charts)));
+      continue;
+    }
     const all = { calls: [], base: [] };
     for (const rows of charts) {
       const { calls, base } = callsOfRows(rows);
@@ -254,6 +321,13 @@ async function main() {
       for (const b of base) all.base.push(b);
     }
     printed.push(show(title, summarize(all)));
+  }
+  if (linesMode) {
+    process.stdout.write(`${printed.join('\n\n')}\n\nA trade opens when today's score first reaches the line and closes at your stop, your target or after 30 candles.
+won: share of trades that made money after fees. avg %: average result per trade after fees.
+passes: 100+ trades and above 0 in both halves, and better than the 40 line in both.
+`);
+    return;
   }
   if (weightsMode) {
     process.stdout.write(`${printed.join('\n\n')}\n\nequal: today's score. winners: only voters that beat chance in the older half. edge: winners weighted by their edge.

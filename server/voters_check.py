@@ -4,6 +4,7 @@ the ML trains on? The work is in voters_check.mjs; this only hands it your
 watchlist and settings. Nothing is saved.
     docker exec trade-service python voters_check.py            (a few minutes)
     docker exec trade-service python voters_check.py --weights  (weights set on the older half, graded on the newer)
+    docker exec trade-service python voters_check.py --lines    (which Buy line earns the most)
 """
 import json
 import os

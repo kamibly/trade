@@ -49,3 +49,16 @@ test('weights keep only voters that beat chance, and the holdout grades the newe
   assert.ok(newer > 0 && h.grades.equal[20].up + h.grades.equal[20].down <= newer);
   assert.match(showHoldout('Test', h), /winners/);
 });
+
+test('Buy lines: one trade at a time per chart, opened when the score reaches the line', async () => {
+  const { tradesAt, lineTable, showLines } = await import('../server/voters_check.mjs');
+  const row = (t, vote, ret, days) => ({ t, votes: [['x', 'trend', vote]], bottom: 0, top: 0, ret, days });
+  // Score = 100 × vote: reaches 20 at t=1, stays up (no new trade), trade lasts 2 candles, dips, crosses again at t=6.
+  const rows = [row(0, 0, 0, 1), row(1, 0.3, 0.05, 2), row(2, 0.3, 0.01, 1), row(3, 0.3, 0.01, 1), row(4, 0.1, 0, 1), row(5, 0.1, 0, 1), row(6, 0.5, -0.02, 1)];
+  assert.deepEqual(tradesAt([rows], 20).map(x => x.t), [1, 6]);
+  assert.deepEqual(tradesAt([rows], 40).map(x => x.t), [6]);
+  const tbl = lineTable([rows]);
+  assert.equal(tbl.rows[20].n, 2);
+  assert.equal(tbl.rows[20].passes, false);
+  assert.match(showLines('Test', tbl), /Buy at/);
+});
