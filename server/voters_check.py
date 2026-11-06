@@ -2,7 +2,8 @@
 One-off check: is each voter right more often than chance on the daily charts
 the ML trains on? The work is in voters_check.mjs; this only hands it your
 watchlist and settings. Nothing is saved.
-    docker exec trade-service python voters_check.py        (a few minutes)
+    docker exec trade-service python voters_check.py            (a few minutes)
+    docker exec trade-service python voters_check.py --weights  (weights set on the older half, graded on the newer)
 """
 import json
 import os

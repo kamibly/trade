@@ -13,47 +13,67 @@
 //   flipped       "yes" when both sides lose in both halves: the rule would do
 //                 better turned around, which is what a sign error looks like
 //
+// --weights: sets voter weights from the older half of the history (only the
+// voters that beat chance there) and grades the score with them on the newer
+// half, next to today's equal weights.
+//
 // Run on the server (it needs the chart history):
 //   docker exec trade-service python voters_check.py
+//   docker exec trade-service python voters_check.py --weights
 import { analyze, baseVotesAt, scoreVotes, MIN_CANDLES, GROUPS } from './js/signals.js';
 import { turnLabels } from './js/ml.js';
 import { candlesFor, trainingItems, defaultDeps } from './engine.mjs';
+import { playOut } from './levels_check.mjs';
 
 export const FIRM = 0.3;      // the scoreboard's firm vote
 export const SCORE = 40;      // the score's Buy and Sell lines
 
-// One chart's calls: [{ id, side: 'up'|'down', t, right, fresh }] plus its labelled candles.
-export function callsOf(S, settings = {}) {
-  const calls = [];
-  const base = [];
-  const last = {};           // id → side of the previous candle's call
+// One chart's labelled candles: [{ t, votes: [[id, group, vote]], bottom, top, ret }],
+// ret = a Buy's result after fees with the fixed stop and target (levels_check's playOut).
+export function rowsOf(S, settings = {}, type = 'stock') {
+  const rows = [];
   for (let i = MIN_CANDLES - 1; i < S.close.length; i++) {
+    const lab = turnLabels(S, i, settings);
+    if (!lab) continue;
     const votes = baseVotesAt(S, i);
     if (!votes.length) continue;
-    const lab = turnLabels(S, i, settings);
+    const c = S.close[i], atr = S.atr[i];
+    const o = playOut(S, i, c - (settings.stopAtr || 2) * atr, c + (settings.takeAtr || 3) * atr, type);
+    rows.push({ t: S.candles[i].time, votes: votes.map(v => [v.id, v.group, v.vote]), bottom: lab.bottom, top: lab.top, ret: o ? o.ret : NaN });
+  }
+  return rows;
+}
+
+const asVotes = row => row.votes.map(([id, group, vote]) => ({ id, group, vote }));
+
+// Firm calls of every voter, group and the score: [{ id, side, t, right, fresh }].
+// Rows must be one chart's, in order (fresh = the call before it was different).
+export function callsOfRows(rows, weights = {}) {
+  const calls = [];
+  const base = [];
+  let last = {};
+  for (const row of rows) {
     const now = {};
     const lean = (id, v) => { if (v >= FIRM) now[id] = 'up'; else if (v <= -FIRM) now[id] = 'down'; };
     const groups = {};
-    for (const v of votes) {
-      lean(v.id, v.vote);
-      (groups[v.group] ||= []).push(v.vote);
+    for (const [id, group, vote] of row.votes) {
+      lean(id, vote);
+      (groups[group] ||= []).push(vote);
     }
     for (const [g, list] of Object.entries(groups)) lean(`g:${g}`, list.reduce((a, b) => a + b, 0) / list.length);
-    const score = scoreVotes(votes, {});
+    const score = scoreVotes(asVotes(row), weights);
     if (score >= SCORE) now.score = 'up';
     else if (score <= -SCORE) now.score = 'down';
-    if (lab) {
-      const t = S.candles[i].time;
-      base.push({ t, bottom: lab.bottom, top: lab.top });
-      for (const [id, side] of Object.entries(now)) {
-        calls.push({ id, side, t, right: side === 'up' ? lab.bottom : lab.top, fresh: last[id] !== side });
-      }
+    base.push({ t: row.t, bottom: row.bottom, top: row.top });
+    for (const [id, side] of Object.entries(now)) {
+      calls.push({ id, side, t: row.t, right: side === 'up' ? row.bottom : row.top, fresh: last[id] !== side });
     }
-    for (const k of Object.keys(last)) delete last[k];
-    Object.assign(last, now);
+    last = now;
   }
   return { calls, base };
 }
+
+export const callsOf = (S, settings = {}) => callsOfRows(rowsOf(S, settings));
 
 const mean = xs => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
 
@@ -118,29 +138,129 @@ export function show(title, s) {
   return lines.join('\n');
 }
 
+// ---- --weights: are voter weights set on the older half still better on the newer half? ----
+
+const DAY = 86400;
+export const LINES = [40, 20];   // the score's Buy/Sell line and a looser one
+
+// Weights from one period's summary: 'winners' gives 1 to every voter whose
+// calls (both sides together) beat chance, 0 to the rest; 'edge' weighs each
+// winner by its edge in points. Voters with fewer than 100 calls get 0.
+export function fitWeights(summary, how = 'winners') {
+  const w = {};
+  for (const [id, r] of Object.entries(summary.rows)) {
+    if (id === 'score' || id.startsWith('g:')) continue;
+    const n = r.up.n + r.down.n;
+    const edge = n ? ((r.up.n ? r.up.edge * r.up.n : 0) + (r.down.n ? r.down.edge * r.down.n : 0)) / n : NaN;
+    w[id] = n >= 100 && edge > 0 ? (how === 'edge' ? edge * 100 : 1) : 0;
+  }
+  return w;
+}
+
+// The score's calls on some rows with some weights, at each line:
+// up and down calls, right, edge, and Buys' average result after fees
+// (all up calls, and fresh ones: the first day of each run, like a trade opening).
+export function gradeScore(charts, weights, keep = () => true) {
+  const kept = charts.map(rows => rows.filter(keep));
+  const all = kept.flat();
+  const rate = side => mean(all.map(x => (side === 'up' ? x.bottom : x.top)));
+  const out = {};
+  for (const line of LINES) {
+    const up = [], down = [], fresh = [];
+    for (const rows of kept) {
+      let prev = 0;
+      for (const row of rows) {
+        const s = scoreVotes(asVotes(row), weights);
+        const side = s >= line ? 1 : s <= -line ? -1 : 0;
+        if (side > 0) { up.push(row); if (prev <= 0) fresh.push(row); }
+        if (side < 0) down.push(row);
+        prev = side;
+      }
+    }
+    const rets = xs => xs.map(x => x.ret).filter(Number.isFinite);
+    out[line] = {
+      up: up.length, upRight: mean(up.map(x => x.bottom)), upEdge: mean(up.map(x => x.bottom)) - rate('up'),
+      down: down.length, downRight: mean(down.map(x => x.top)), downEdge: mean(down.map(x => x.top)) - rate('down'),
+      buyPct: mean(rets(up)) * 100, fresh: fresh.length, freshPct: mean(rets(fresh)) * 100,
+    };
+  }
+  return out;
+}
+
+// Fits on the older half (leaving out the 30 days before the split, whose
+// outcomes run into the newer half) and grades on the newer half.
+export function holdout(charts) {
+  const ts = charts.flat().map(x => x.t).sort((a, b) => a - b);
+  const mid = ts[Math.floor(ts.length / 2)];
+  const old = { calls: [], base: [] };
+  for (const rows of charts) {
+    const r = callsOfRows(rows.filter(x => x.t < mid - 30 * DAY));
+    old.calls.push(...r.calls);
+    old.base.push(...r.base);
+  }
+  const fitted = summarize(old);
+  const weights = { equal: {}, winners: fitWeights(fitted, 'winners'), edge: fitWeights(fitted, 'edge') };
+  const newer = x => x.t >= mid;
+  const grades = Object.fromEntries(Object.entries(weights).map(([k, w]) => [k, gradeScore(charts, w, newer)]));
+  return { mid, weights, grades };
+}
+
+export function showHoldout(title, h) {
+  const day = new Date(h.mid * 1000).toISOString().slice(0, 10);
+  const kept = Object.entries(h.weights.edge).filter(([, w]) => w > 0).sort((a, b) => b[1] - a[1])
+    .map(([id, w]) => `${id} ${w.toFixed(1)}`);
+  const lines = [title, `Weights set on candles before ${day}, graded from ${day} on.`,
+    `Voters kept (edge in points): ${kept.join(', ') || 'none'}`,
+    `${'weights'.padEnd(9)}${'line'.padStart(5)}${'up'.padStart(7)}${'right'.padStart(7)}${'edge'.padStart(7)}${'down'.padStart(7)}${'right'.padStart(7)}${'edge'.padStart(7)}   ${'Buy %'.padStart(7)}${'trades'.padStart(8)}${'trade %'.padStart(9)}`];
+  for (const [name, g] of Object.entries(h.grades)) {
+    for (const line of LINES) {
+      const x = g[line];
+      const sp = v => (Number.isFinite(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}` : '–');
+      lines.push(`${name.padEnd(9)}${`±${line}`.padStart(5)}${String(x.up).padStart(7)}${pct(x.upRight).padStart(7)}${pts(x.upEdge).padStart(7)}`
+        + `${String(x.down).padStart(7)}${pct(x.downRight).padStart(7)}${pts(x.downEdge).padStart(7)}   ${sp(x.buyPct).padStart(7)}${String(x.fresh).padStart(8)}${sp(x.freshPct).padStart(9)}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 async function main() {
   let input = '';
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
   const deps = defaultDeps;
   const printed = [];
+  const weightsMode = process.argv.includes('--weights');
   for (const [kind, total] of [['stock', job.total || 120], ['crypto', job.cryptoTotal || 50]]) {
     const items = await trainingItems({ ...job, kind, total }, deps);
-    const all = { calls: [], base: [] };
-    let charts = 0;
+    const charts = [];
     for (const item of items) {
       try {
         const { candles } = await candlesFor(item, '1D', job.settings, deps);
         if (candles.length < MIN_CANDLES + 50) continue;
-        const { calls, base } = callsOf(analyze(candles), job.settings);
-        for (const c of calls) all.calls.push(c);
-        for (const b of base) all.base.push(b);
-        charts++;
+        charts.push(rowsOf(analyze(candles), job.settings, item.type));
       } catch (e) {
         // A chart that can't load is left out.
       }
     }
-    printed.push(show(`${kind === 'stock' ? 'Stocks' : 'Crypto'}: ${charts} charts`, summarize(all)));
+    const title = `${kind === 'stock' ? 'Stocks' : 'Crypto'}: ${charts.length} charts`;
+    if (weightsMode) {
+      printed.push(showHoldout(title, holdout(charts)));
+      continue;
+    }
+    const all = { calls: [], base: [] };
+    for (const rows of charts) {
+      const { calls, base } = callsOfRows(rows);
+      for (const c of calls) all.calls.push(c);
+      for (const b of base) all.base.push(b);
+    }
+    printed.push(show(title, summarize(all)));
+  }
+  if (weightsMode) {
+    process.stdout.write(`${printed.join('\n\n')}\n\nequal: today's score. winners: only voters that beat chance in the older half. edge: winners weighted by their edge.
+line: score of +line or more is an up call (Buy), -line or less a down call. right / edge: as in the voters table.
+Buy %: every up-call day bought, average result after fees. trades / trade %: only the first day of each run (one trade each).
+`);
+    return;
   }
   process.stdout.write(`${printed.join('\n\n')}\n\nright: how often the call's target came before its stop. edge: right minus "right anyway", in points.\n`
     + 'fresh: only the first day of each run of calls. older / newer: edge of all calls in each half of the history.\n'
