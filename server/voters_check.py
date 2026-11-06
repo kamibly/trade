@@ -5,6 +5,7 @@ watchlist and settings. Nothing is saved.
     docker exec trade-service python voters_check.py            (a few minutes)
     docker exec trade-service python voters_check.py --weights  (weights set on the older half, graded on the newer)
     docker exec trade-service python voters_check.py --lines    (which Buy line earns the most)
+    docker exec trade-service python voters_check.py --exits    (the same with stops and targets of 2/3, 3/2, 2/2 and 3/3 ATR)
 """
 import json
 import os

@@ -21,10 +21,12 @@
 //   docker exec trade-service python voters_check.py
 //   docker exec trade-service python voters_check.py --weights
 //   docker exec trade-service python voters_check.py --lines
+//   docker exec trade-service python voters_check.py --exits
 //
 // --lines: today's score with Buy lines of 15 to 40. A trade opens when the
 // score first reaches the line and closes at the stop, the target or after 30
 // candles (no new trade on that chart until then).
+// --exits: the same with other stops and targets (EXITS, in ATRs).
 import { analyze, baseVotesAt, scoreVotes, MIN_CANDLES, GROUPS } from './js/signals.js';
 import { turnLabels } from './js/ml.js';
 import { candlesFor, trainingItems, defaultDeps } from './engine.mjs';
@@ -35,7 +37,8 @@ export const SCORE = 40;      // the score's Buy and Sell lines
 
 // One chart's labelled candles: [{ t, votes: [[id, group, vote]], bottom, top, ret, days }],
 // ret = a Buy's result after fees with the fixed stop and target (levels_check's playOut).
-export function rowsOf(S, settings = {}, type = 'stock') {
+// `exits`: more [stopAtr, takeAtr] pairs to play each Buy out with, kept in row.exits.
+export function rowsOf(S, settings = {}, type = 'stock', exits = []) {
   const rows = [];
   for (let i = MIN_CANDLES - 1; i < S.close.length; i++) {
     const lab = turnLabels(S, i, settings);
@@ -44,7 +47,14 @@ export function rowsOf(S, settings = {}, type = 'stock') {
     if (!votes.length) continue;
     const c = S.close[i], atr = S.atr[i];
     const o = playOut(S, i, c - (settings.stopAtr || 2) * atr, c + (settings.takeAtr || 3) * atr, type);
-    rows.push({ t: S.candles[i].time, votes: votes.map(v => [v.id, v.group, v.vote]), bottom: lab.bottom, top: lab.top, ret: o ? o.ret : NaN, days: o ? o.days : NaN });
+    const row = { t: S.candles[i].time, votes: votes.map(v => [v.id, v.group, v.vote]), bottom: lab.bottom, top: lab.top, ret: o ? o.ret : NaN, days: o ? o.days : NaN };
+    if (exits.length) {
+      row.exits = exits.map(([sa, ta]) => {
+        const x = playOut(S, i, c - sa * atr, c + ta * atr, type);
+        return x ? { ret: x.ret, days: x.days } : { ret: NaN, days: NaN };
+      });
+    }
+    rows.push(row);
   }
   return rows;
 }
@@ -231,19 +241,22 @@ export function showHoldout(title, h) {
 // ---- --lines: which Buy line earns the most? ----
 
 export const BUY_LINES = [15, 20, 25, 30, 40];
+export const EXITS = [[2, 3], [3, 2], [2, 2], [3, 3]];   // [stop, target] in ATRs
 export const MIN_TRADES = 100;
 
 // Trades at one Buy line: [{ t, ret }]. Rows are consecutive candles per chart.
-export function tradesAt(charts, line, weights = {}) {
+// `ex`: which of row.exits to use (-1: the settings' stop and target).
+export function tradesAt(charts, line, weights = {}, ex = -1) {
   const out = [];
   for (const rows of charts) {
     let prev = -Infinity;
     for (let k = 0; k < rows.length; k++) {
       const row = rows[k];
       const s = scoreVotes(asVotes(row), weights);
-      if (s >= line && prev < line && Number.isFinite(row.ret)) {
-        out.push({ t: row.t, ret: row.ret });
-        k += row.days;                 // in the trade until it closes
+      const o = ex >= 0 ? row.exits[ex] : row;
+      if (s >= line && prev < line && Number.isFinite(o.ret)) {
+        out.push({ t: row.t, ret: o.ret });
+        k += o.days;                 // in the trade until it closes
         prev = Infinity;               // and the score must dip under the line again
         continue;
       }
@@ -255,13 +268,13 @@ export function tradesAt(charts, line, weights = {}) {
 
 // Per line: trades and average % in all, the older and the newer half, and
 // whether it passes (100+ trades and above 0 in both halves, and above the 40 line in both).
-export function lineTable(charts) {
+export function lineTable(charts, ex = -1) {
   const ts = charts.flat().map(x => x.t).sort((a, b) => a - b);
   const mid = ts[Math.floor(ts.length / 2)];
   const part = xs => ({ n: xs.length, pct: mean(xs.map(x => x.ret)) * 100, right: mean(xs.map(x => (x.ret > 0 ? 1 : 0))) });
   const rows = {};
   for (const line of BUY_LINES) {
-    const tr = tradesAt(charts, line);
+    const tr = tradesAt(charts, line, {}, ex);
     rows[line] = { ...part(tr), older: part(tr.filter(x => x.t < mid)), newer: part(tr.filter(x => x.t >= mid)) };
   }
   const base = rows[40];
@@ -293,6 +306,7 @@ async function main() {
   const printed = [];
   const weightsMode = process.argv.includes('--weights');
   const linesMode = process.argv.includes('--lines');
+  const exitsMode = process.argv.includes('--exits');
   for (const [kind, total] of [['stock', job.total || 120], ['crypto', job.cryptoTotal || 50]]) {
     const items = await trainingItems({ ...job, kind, total }, deps);
     const charts = [];
@@ -300,7 +314,7 @@ async function main() {
       try {
         const { candles } = await candlesFor(item, '1D', job.settings, deps);
         if (candles.length < MIN_CANDLES + 50) continue;
-        charts.push(rowsOf(analyze(candles), job.settings, item.type));
+        charts.push(rowsOf(analyze(candles), job.settings, item.type, exitsMode ? EXITS : []));
       } catch (e) {
         // A chart that can't load is left out.
       }
@@ -314,6 +328,13 @@ async function main() {
       printed.push(showLines(title, lineTable(charts)));
       continue;
     }
+    if (exitsMode) {
+      EXITS.forEach(([sa, ta], ex) => {
+        const even = Math.round((100 * sa) / (sa + ta));
+        printed.push(showLines(`${title}. Stop ${sa} ATR, target ${ta} ATR: break-even ${even}% won, before fees`, lineTable(charts, ex)));
+      });
+      continue;
+    }
     const all = { calls: [], base: [] };
     for (const rows of charts) {
       const { calls, base } = callsOfRows(rows);
@@ -321,6 +342,14 @@ async function main() {
       for (const b of base) all.base.push(b);
     }
     printed.push(show(title, summarize(all)));
+  }
+  if (exitsMode) {
+    process.stdout.write(`${printed.join('\n\n')}\n\nA trade opens when today's score first reaches the line and closes at the stop, the target or after 30 candles.
+won: share of trades that made money after fees. avg %: average result per trade after fees.
+break-even: how often a trade must win to make 0 before fees (stop / (stop + target)).
+passes: 100+ trades and above 0 in both halves, and better than the 40 line in both.
+`);
+    return;
   }
   if (linesMode) {
     process.stdout.write(`${printed.join('\n\n')}\n\nA trade opens when today's score first reaches the line and closes at your stop, your target or after 30 candles.

@@ -62,3 +62,13 @@ test('Buy lines: one trade at a time per chart, opened when the score reaches th
   assert.equal(tbl.rows[20].passes, false);
   assert.match(showLines('Test', tbl), /Buy at/);
 });
+
+test('other exits: each row plays the Buy out with every stop and target', async () => {
+  const { rowsOf, lineTable } = await import('../server/voters_check.mjs');
+  const S = chart(400, 13);
+  const rows = rowsOf(S, { stopAtr: 2, takeAtr: 3 }, 'crypto', [[2, 3], [1, 1]]);
+  const r = rows.find(x => Number.isFinite(x.ret));
+  assert.equal(r.exits[0].ret, r.ret);
+  assert.ok(rows.some(x => x.exits[1].days < x.days), 'a tighter exit closes sooner');
+  assert.equal(lineTable([rows], 0).rows[20].n, lineTable([rows]).rows[20].n);
+});
