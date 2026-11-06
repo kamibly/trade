@@ -37,6 +37,39 @@ const LINES = {
 
 // Colors of the flat level lines (support/resistance, pivots, Fibonacci).
 export const LEVEL_COLORS = { support: UP, resistance: DOWN, pivot: '#f2c94c', fib: 'rgba(199,125,255,0.9)' };
+const BAND_COLORS = { support: 'rgba(38,166,154,0.24)', resistance: 'rgba(239,83,80,0.24)' };
+
+// Shaded price bands across the chart (support and resistance zones), drawn
+// under the candles with Lightweight Charts' series primitives.
+class Bands {
+  constructor() { this.bands = []; this.series = null; this.update = () => {}; }
+  attached({ series, requestUpdate }) { this.series = series; this.update = requestUpdate; }
+  detached() { this.series = null; }
+  set(bands) { this.bands = bands; this.update(); }
+  updateAllViews() {}
+  paneViews() {
+    const self = this;
+    return [{
+      zOrder: () => 'bottom',
+      renderer: () => ({
+        draw(target) {
+          if (!self.series) return;
+          target.useBitmapCoordinateSpace(({ context: ctx, bitmapSize, verticalPixelRatio: r }) => {
+            for (const b of self.bands) {
+              const y1 = self.series.priceToCoordinate(b.hi);
+              const y2 = self.series.priceToCoordinate(b.lo);
+              if (y1 === null || y2 === null) continue;
+              const top = Math.min(y1, y2) * r;
+              const h = Math.max(2 * r, Math.abs(y2 - y1) * r);
+              ctx.fillStyle = b.color;
+              ctx.fillRect(0, top, bitmapSize.width, h);
+            }
+          });
+        },
+      }),
+    }];
+  }
+}
 
 export class PriceChart {
   constructor(el) {
@@ -58,6 +91,8 @@ export class PriceChart {
     this.chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     this.lines = {};
     this.levels = [];
+    this.bands = new Bands();
+    this.candles.attachPrimitive(this.bands);
     this.key = null;
     this.shift = t => t;
   }
@@ -94,7 +129,8 @@ export class PriceChart {
 
   // overlays: { name: [{ time, value }] | null }, markers: [{ time, action }],
   // titles: { name: label shown with the line's last value on the price scale }
-  // levels: [{ price, kind: key of LEVEL_COLORS, title, strong? }], flat lines across the chart.
+  // levels: [{ price, kind: key of LEVEL_COLORS, title, strong?, weak? }], flat lines across the chart;
+  // a level with lo and hi also gets a shaded band from lo to hi.
   setOverlays(overlays, markers = [], titles = {}, levels = []) {
     for (const name of Object.keys(LINES)) {
       const points = overlays[name];
@@ -106,9 +142,12 @@ export class PriceChart {
       series.setData(points ? points.filter(p => gaps || Number.isFinite(p.value)).map(p => (Number.isFinite(p.value) ? { time: this.shift(p.time), value: p.value } : { time: this.shift(p.time) })) : []);
     }
     for (const l of this.levels) this.candles.removePriceLine(l);
-    this.levels = levels.filter(l => Number.isFinite(l.price)).map(l => this.candles.createPriceLine({
-      price: l.price, color: LEVEL_COLORS[l.kind], lineWidth: l.strong ? 2 : 1, lineStyle: l.strong ? 0 : 2, axisLabelVisible: true, title: l.title,
+    const shown = levels.filter(l => Number.isFinite(l.price));
+    this.levels = shown.map(l => this.candles.createPriceLine({
+      price: l.price, color: LEVEL_COLORS[l.kind], lineWidth: l.strong && !l.weak ? 2 : 1, lineStyle: l.strong && !l.weak ? 0 : 2, axisLabelVisible: true, title: l.title,
     }));
+    this.bands.set(shown.filter(l => Number.isFinite(l.lo) && Number.isFinite(l.hi))
+      .map(l => ({ lo: l.lo, hi: l.hi, color: BAND_COLORS[l.kind] || 'rgba(139,148,158,0.12)' })));
     this.candles.setMarkers(markers.map(m => ({
       time: this.shift(m.time),
       position: m.action === 'buy' ? 'belowBar' : 'aboveBar',
@@ -125,6 +164,7 @@ export class PriceChart {
     for (const s of Object.values(this.lines)) s.setData([]);
     for (const l of this.levels) this.candles.removePriceLine(l);
     this.levels = [];
+    this.bands.set([]);
     this.key = null;
   }
 }

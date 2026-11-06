@@ -331,6 +331,65 @@ export function srZones(c, end, atrNow, { w = 3, lookback = 150, width = 0.75, r
   };
 }
 
+// Support and resistance ranked by strength. Like srZones, but each touch is
+// worth more when it is recent (half as much every `halfLife` candles), when
+// the bounce away from it was big (up to `bigBounce` ATRs doubles it) and when
+// volume was high on the turning candle (×0.5 to ×2 of the 20-candle average).
+// The newest unconfirmed high and low count as touches too. Zones are ranked
+// by score, discounted by distance (a zone `reach` ATRs away counts half),
+// and the best `keep` on each side are returned, strongest first.
+// Zone: { price, lo, hi, touches, score, weak } (weak: touched only once).
+// Returns { supports, resistances, support, resistance }.
+export function srLevels(c, end, atrNow, { w = 3, lookback = 250, width = 0.75, recent = 10, gap = 0.5, halfLife = 60, bigBounce = 3, after = 10, reach = 4, keep = 2 } = {}) {
+  const none = { supports: [], resistances: [], support: null, resistance: null };
+  const close = c[end] && c[end].close;
+  if (!(close > 0) || !(atrNow > 0)) return none;
+  const { highs, lows } = swings(c, end, w, lookback);
+  const volAt = k => {
+    const from = Math.max(0, k - 19);
+    let sum = 0;
+    for (let j = from; j <= k; j++) sum += c[j].volume || 0;
+    const avg = sum / (k - from + 1);
+    return avg > 0 && c[k].volume > 0 ? Math.max(0.5, Math.min(2, c[k].volume / avg)) : 1;
+  };
+  const touch = (k, isHigh) => {
+    const p = isHigh ? c[k].high : c[k].low;
+    let away = 0;
+    for (let j = k + 1; j <= Math.min(end, k + after); j++) away = Math.max(away, isHigh ? p - c[j].low : c[j].high - p);
+    const bounce = 1 + Math.min(bigBounce, away / atrNow) / bigBounce;
+    return { p, k, score: 0.5 ** ((end - k) / halfLife) * bounce * volAt(k) };
+  };
+  const points = [...highs.map(k => touch(k, true)), ...lows.map(k => touch(k, false))];
+  // The newest high and low, before swings can confirm them: full weight and a full bounce.
+  const from = Math.max(0, end - recent + 1);
+  let hi = from;
+  let lo = from;
+  for (let k = from; k <= end; k++) {
+    if (c[k].high >= c[hi].high) hi = k;
+    if (c[k].low <= c[lo].low) lo = k;
+  }
+  if (hi > end - w) points.push({ p: c[hi].high, k: hi, score: 2 * volAt(hi) });
+  if (lo > end - w) points.push({ p: c[lo].low, k: lo, score: 2 * volAt(lo) });
+  points.sort((a, b) => a.p - b.p);
+  const zones = [];
+  for (const pt of points) {
+    const z = zones.at(-1);
+    if (z && pt.p - z.lo <= width * atrNow) {
+      z.hi = pt.p;
+      z.sum += pt.p * pt.score;
+      z.score += pt.score;
+      z.touches += 1;
+    } else zones.push({ lo: pt.p, hi: pt.p, sum: pt.p * pt.score, score: pt.score, touches: 1 });
+  }
+  const all = zones.map(z => ({ price: z.sum / z.score, lo: z.lo, hi: z.hi, touches: z.touches, score: Number(z.score.toFixed(2)), weak: z.touches < 2 }));
+  const best = (list, dist) => list
+    .map(z => ({ z, v: z.score / (1 + dist(z) / (reach * atrNow)) }))
+    .sort((a, b) => b.v - a.v).slice(0, keep).map(x => x.z);
+  const resistances = best(all.filter(z => z.lo > close + gap * atrNow), z => z.lo - close);
+  const supports = best(all.filter(z => z.hi < close - gap * atrNow), z => close - z.hi);
+  return { supports, resistances, support: supports[0] || null, resistance: resistances[0] || null };
+}
+
 // Retracement of the largest move in the last `p` candles.
 export function fibonacci(c, end, p = 100) {
   const start = Math.max(0, end - p + 1);

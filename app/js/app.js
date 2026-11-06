@@ -18,11 +18,11 @@ import * as paper from './paper.js';
 import { bothSizes, inputName, JUDGE_MIN, tradeId as ownId } from './owntrades.js';
 import { feeOf } from './fees.js';
 import * as pf from './portfolio.js';
-import { atr as atrSeries, srZones, pivots as pivotsAt, fibonacci } from './indicators.js';
+import { atr as atrSeries, srLevels, pivots as pivotsAt, fibonacci } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.29.4 (Chart: support and resistance zones)';
+export const APP_VERSION = '0.29.5 (Chart: support and resistance by strength)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -552,11 +552,16 @@ function chartLevels(S, candles, o) {
   const i = candles.length - 1;
   const out = [];
   if (o.sr) {
-    // Zones the price turned at more than once (see srZones in indicators.js).
-    const { support, resistance } = srZones(candles, i, S.atr[i]);
-    const label = (name, z) => `${name}${z.touches > 1 ? ` · ${z.touches} touches` : ''}`;
-    if (resistance) out.push({ price: resistance.price, kind: 'resistance', title: label('Resistance', resistance), strong: true });
-    if (support) out.push({ price: support.price, kind: 'support', title: label('Support', support), strong: true });
+    // The two strongest zones on each side (see srLevels in indicators.js), as shaded bands.
+    const atr = S.atr[i];
+    const { supports, resistances } = srLevels(candles, i, atr);
+    const pad = 0.25 * atr;
+    const add = (z, k, kind, name) => out.push({
+      price: z.price, lo: z.lo - pad, hi: z.hi + pad, kind, strong: k === 0, weak: z.weak,
+      title: `${name}${k ? ' 2' : ''} · ${z.touches} touch${z.touches === 1 ? '' : 'es'}${z.weak ? ' (weak)' : ''}`,
+    });
+    resistances.forEach((z, k) => add(z, k, 'resistance', 'Resistance'));
+    supports.forEach((z, k) => add(z, k, 'support', 'Support'));
   }
   if (o.pivots) {
     const p = pivotsAt(candles, i);
@@ -581,7 +586,7 @@ const LEGEND = [
   ['psar', [['#e6edf3', 'Parabolic SAR dots']]],
   ['vwap', [['#9b8cff', 'VWAP 20']]],
   ['channel', [['rgba(201,209,217,0.9)', 'Trend channel (100)']]],
-  ['sr', [[LEVEL_COLORS.support, 'Support'], [LEVEL_COLORS.resistance, 'Resistance']]],
+  ['sr', [[LEVEL_COLORS.support, 'Support'], [LEVEL_COLORS.resistance, 'Resistance: 2 strongest zones each side, dashed when weak']]],
   ['pivots', [[LEVEL_COLORS.pivot, 'Pivot, R1, S1']]],
   ['fib', [[LEVEL_COLORS.fib, 'Fibonacci 38-62%']]],
   ['forecast', [['#4c9aff', 'Forecast: median and 10–90% range of 500 simulated paths']]],

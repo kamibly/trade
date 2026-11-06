@@ -68,3 +68,20 @@ test('srZones counts the newest high before it is confirmed', async () => {
   const { resistance } = srZones(c, c.length - 1, 1);
   assert.equal(resistance.price, 108);
 });
+
+test('srLevels ranks recent, strong touches first and keeps two each side', async () => {
+  const { srLevels } = await import('../app/js/indicators.js');
+  // Two old dips to 90 and two recent dips to 94: the recent zone ranks first.
+  const shape = { 20: 90, 50: 90, 160: 94, 190: 94, 30: 110, 175: 106 };
+  const c = [];
+  for (let i = 0; i < 220; i++) {
+    const near = Object.keys(shape).map(Number).find(k => Math.abs(i - k) <= 2);
+    const mid = near === undefined ? 100 : 100 + (shape[near] - 100) * (1 - Math.abs(i - near) / 3);
+    c.push({ open: mid, high: mid + 0.5, low: mid - 0.5, close: mid, volume: 1000 });
+  }
+  const r = srLevels(c, c.length - 1, 1);
+  assert.ok(r.supports.length <= 2 && r.resistances.length <= 2);
+  assert.ok(Math.abs(r.support.price - 93.5) < 1, `support ${r.support.price}`);
+  assert.ok(r.supports.some(z => Math.abs(z.price - 89.5) < 1));
+  assert.ok(r.resistance.price > 100);
+});
