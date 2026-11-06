@@ -283,6 +283,54 @@ export function swings(c, end, w = 3, lookback = 150) {
   return { highs, lows };
 }
 
+// Support and resistance as a trader would draw them: price zones where the
+// market turned more than once, instead of the single nearest swing.
+// Swing highs and lows (confirmed by `w` candles each side) in the last
+// `lookback` candles are grouped into zones no wider than `width` ATRs. The
+// newest high and low, which aren't confirmed yet, count too, twice over: the
+// latest turn is the level everyone sees. A zone is strong with 2 or more
+// touches. Resistance is the nearest strong zone wholly above the close (by
+// at least `gap` ATRs: closer is where the price already is), support the
+// nearest one below; with none, the nearest zone at all.
+// Returns { support, resistance }, each { price, lo, hi, touches } or null.
+export function srZones(c, end, atrNow, { w = 3, lookback = 150, width = 0.75, recent = 10, gap = 0.5 } = {}) {
+  const close = c[end] && c[end].close;
+  if (!(close > 0) || !(atrNow > 0)) return { support: null, resistance: null };
+  const { highs, lows } = swings(c, end, w, lookback);
+  const points = [...highs.map(k => ({ p: c[k].high, n: 1 })), ...lows.map(k => ({ p: c[k].low, n: 1 }))];
+  // The latest turns: the highest high and lowest low of the last `recent`
+  // candles, when they fall in the newest `w` candles that swings can't confirm yet.
+  const from = Math.max(0, end - recent + 1);
+  let hi = from;
+  let lo = from;
+  for (let k = from; k <= end; k++) {
+    if (c[k].high >= c[hi].high) hi = k;
+    if (c[k].low <= c[lo].low) lo = k;
+  }
+  if (hi > end - w) points.push({ p: c[hi].high, n: 2 });
+  if (lo > end - w) points.push({ p: c[lo].low, n: 2 });
+  points.sort((a, b) => a.p - b.p);
+  const zones = [];
+  for (const pt of points) {
+    const z = zones.at(-1);
+    if (z && pt.p - z.lo <= width * atrNow) {
+      z.hi = pt.p;
+      z.sum += pt.p * pt.n;
+      z.touches += pt.n;
+    } else zones.push({ lo: pt.p, hi: pt.p, sum: pt.p * pt.n, touches: pt.n });
+  }
+  const out = zones.map(z => ({ price: z.sum / z.touches, lo: z.lo, hi: z.hi, touches: z.touches }));
+  const pick = (list, dist) => {
+    const strong = list.filter(z => z.touches >= 2);
+    const from = strong.length ? strong : list;
+    return from.length ? from.reduce((a, b) => (dist(b) < dist(a) ? b : a)) : null;
+  };
+  return {
+    resistance: pick(out.filter(z => z.lo > close + gap * atrNow), z => z.lo - close),
+    support: pick(out.filter(z => z.hi < close - gap * atrNow), z => close - z.hi),
+  };
+}
+
 // Retracement of the largest move in the last `p` candles.
 export function fibonacci(c, end, p = 100) {
   const start = Math.max(0, end - p + 1);

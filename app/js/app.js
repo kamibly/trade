@@ -18,11 +18,11 @@ import * as paper from './paper.js';
 import { bothSizes, inputName, JUDGE_MIN, tradeId as ownId } from './owntrades.js';
 import { feeOf } from './fees.js';
 import * as pf from './portfolio.js';
-import { atr as atrSeries, swings, pivots as pivotsAt, fibonacci } from './indicators.js';
+import { atr as atrSeries, srZones, pivots as pivotsAt, fibonacci } from './indicators.js';
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.29.3 (Chart: lines for more voters)';
+export const APP_VERSION = '0.29.4 (Chart: support and resistance zones)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -550,14 +550,13 @@ function trendChannel(S, candles) {
 // Flat lines at the levels the structure voters look at on the last candle.
 function chartLevels(S, candles, o) {
   const i = candles.length - 1;
-  const c = S.close[i];
   const out = [];
   if (o.sr) {
-    // As the support and resistance voter: the nearest swing low under the price and swing high over it.
-    const { highs, lows } = swings(candles, i, 3, 120);
-    const res = highs.map(k => candles[k].high).filter(h => h > c).sort((a, b) => a - b)[0];
-    const sup = lows.map(k => candles[k].low).filter(l => l < c).sort((a, b) => b - a)[0];
-    out.push({ price: res, kind: 'resistance', title: 'Resistance', strong: true }, { price: sup, kind: 'support', title: 'Support', strong: true });
+    // Zones the price turned at more than once (see srZones in indicators.js).
+    const { support, resistance } = srZones(candles, i, S.atr[i]);
+    const label = (name, z) => `${name}${z.touches > 1 ? ` · ${z.touches} touches` : ''}`;
+    if (resistance) out.push({ price: resistance.price, kind: 'resistance', title: label('Resistance', resistance), strong: true });
+    if (support) out.push({ price: support.price, kind: 'support', title: label('Support', support), strong: true });
   }
   if (o.pivots) {
     const p = pivotsAt(candles, i);

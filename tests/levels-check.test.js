@@ -42,3 +42,29 @@ test('levels sit on either side of the close and the table builds', () => {
   assert.equal(typeof s.passes, 'boolean');
   assert.match(show('Stocks', s), /levels 2:1/);
 });
+
+test('srZones prefers a level touched twice over a nearer single swing', async () => {
+  const { srZones } = await import('../app/js/indicators.js');
+  // Flat at 100 with dips: two to 90 (a real support), one to 97 (a wiggle);
+  // peaks: two to 110, one to 103.
+  const shape = { 20: 90, 40: 110, 60: 90, 80: 110, 100: 97, 110: 103 };
+  const c = [];
+  for (let i = 0; i < 130; i++) {
+    const near = Object.keys(shape).map(Number).find(k => Math.abs(i - k) <= 2);
+    const mid = near === undefined ? 100 : 100 + (shape[near] - 100) * (1 - Math.abs(i - near) / 3);
+    c.push({ open: mid, high: mid + 0.5, low: mid - 0.5, close: mid });
+  }
+  const { support, resistance } = srZones(c, c.length - 1, 1);
+  assert.ok(Math.abs(support.price - 89.5) < 1, `support ${support.price}`);
+  assert.equal(support.touches, 2);
+  assert.ok(Math.abs(resistance.price - 110.5) < 1, `resistance ${resistance.price}`);
+});
+
+test('srZones counts the newest high before it is confirmed', async () => {
+  const { srZones } = await import('../app/js/indicators.js');
+  const c = [];
+  for (let i = 0; i < 60; i++) c.push({ open: 100, high: 100.5 + (i % 7 === 0 ? 1 : 0), low: 99.5, close: 100 });
+  c.push({ open: 100, high: 108, low: 99.5, close: 104 }, { open: 104, high: 105, low: 101, close: 102 });
+  const { resistance } = srZones(c, c.length - 1, 1);
+  assert.equal(resistance.price, 108);
+});

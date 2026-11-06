@@ -10,6 +10,10 @@
 //   levels 2:1    the same, only when the target is at least twice the stop
 //   fixed, same   fixed levels on the same candles as "levels 2:1", so the
 //                 difference between those two rows is the exit alone
+//   zones, zones 2:1, fixed, same z
+//                 the same three with srZones: levels the price turned at
+//                 more than once (the stop under the top of the support zone,
+//                 the target at the bottom of the resistance zone)
 // Fees are taken off. Each row shows the average result per trade and per unit
 // of risk (what a trade sized by the 1% risk rule earns), for the older and the
 // newer half of the history apart: a rule only passes if it wins in both.
@@ -17,7 +21,9 @@
 // Run on the server (it needs the chart history):
 //   docker exec trade-service python levels_check.py
 import { analyze, baseVotesAt, scoreVotes, MIN_CANDLES } from './js/signals.js';
-import { swings } from './js/indicators.js';
+import { swings, srZones } from './js/indicators.js';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { MIN_SCORE } from './js/filter.js';
 import { feeRate } from './js/fees.js';
 import { candlesFor, trainingItems, defaultDeps } from './engine.mjs';
@@ -51,7 +57,7 @@ export function levelsAt(S, i) {
   return { sup, res };
 }
 
-const ROWS = ['fixed', 'levels', 'levels 2:1', 'fixed, same'];
+const ROWS = ['fixed', 'levels', 'levels 2:1', 'fixed, same', 'zones', 'zones 2:1', 'fixed, same z'];
 
 // One chart's trades: [{ row, t, ret, risk, win }], risk = the stop's distance as a share.
 export function tradesOf(S, type, { stopAtr = 2, takeAtr = 3 } = {}) {
@@ -68,16 +74,23 @@ export function tradesOf(S, type, { stopAtr = 2, takeAtr = 3 } = {}) {
     };
     const fs = c - stopAtr * atr, ft = c + takeAtr * atr;
     add('fixed', fs, ft);
+    // Two ways to find the levels: the nearest swing (today's voter) and zones touched more than once.
+    const tryLevels = (sup, res, [all, ratio, same]) => {
+      if (!(sup > 0) || !(res > 0)) return;
+      const ls = sup - BUFFER * atr;
+      const dist = (c - ls) / atr;
+      if (!(ls > 0) || dist < STOP_MIN || dist > STOP_MAX) return;
+      add(all, ls, res);
+      if (res - c >= RATIO * (c - ls)) {
+        add(ratio, ls, res);
+        add(same, fs, ft);
+      }
+    };
     const { sup, res } = levelsAt(S, i);
-    if (!(sup > 0) || !(res > 0)) continue;
-    const ls = sup - BUFFER * atr;
-    const dist = (c - ls) / atr;
-    if (!(ls > 0) || dist < STOP_MIN || dist > STOP_MAX) continue;
-    add('levels', ls, res);
-    if (res - c >= RATIO * (c - ls)) {
-      add('levels 2:1', ls, res);
-      add('fixed, same', fs, ft);
-    }
+    tryLevels(sup, res, ['levels', 'levels 2:1', 'fixed, same']);
+    const z = srZones(S.candles, i, atr);
+    // A zone's near edge: the stop goes under the top of support, the target at the bottom of resistance.
+    tryLevels(z.support && z.support.hi, z.resistance && z.resistance.lo, ['zones', 'zones 2:1', 'fixed, same z']);
   }
   return out;
 }
@@ -99,9 +112,11 @@ export function summarize(trades) {
     });
     out[row] = { ...part(mine), older: part(mine.filter(x => x.t < mid)), newer: part(mine.filter(x => x.t >= mid)) };
   }
-  const a = out['levels 2:1'], b = out['fixed, same'], f = out.fixed;
+  const f = out.fixed;
   const beats = (x, y) => x.n >= 100 && y.n >= 100 && x.pct > y.pct && x.r > y.r;
-  out.passes = beats(a.older, b.older) && beats(a.newer, b.newer) && beats(a.older, f.older) && beats(a.newer, f.newer);
+  const passes = (a, b) => beats(a.older, b.older) && beats(a.newer, b.newer) && beats(a.older, f.older) && beats(a.newer, f.newer);
+  out.passes = passes(out['levels 2:1'], out['fixed, same']);
+  out.zonesPass = passes(out['zones 2:1'], out['fixed, same z']);
   return out;
 }
 
@@ -109,13 +124,40 @@ const f1 = (x, d = 1) => (Number.isFinite(x) ? x.toFixed(d) : '–');
 const sgn = (x, d = 2) => (Number.isFinite(x) ? `${x >= 0 ? '+' : ''}${x.toFixed(d)}` : '–');
 
 export function show(kind, s) {
-  const lines = [`${kind}`, `${''.padEnd(13)}${'trades'.padStart(7)}${'right'.padStart(7)}${'avg %'.padStart(8)}${'avg R'.padStart(7)}   ${'older %'.padStart(8)}${'R'.padStart(6)}   ${'newer %'.padStart(8)}${'R'.padStart(6)}`];
+  const lines = [`${kind}`, `${''.padEnd(14)}${'trades'.padStart(7)}${'right'.padStart(7)}${'avg %'.padStart(8)}${'avg R'.padStart(7)}   ${'older %'.padStart(8)}${'R'.padStart(6)}   ${'newer %'.padStart(8)}${'R'.padStart(6)}`];
   for (const row of ROWS) {
     const x = s[row];
-    lines.push(`${row.padEnd(13)}${String(x.n).padStart(7)}${`${f1(x.right * 100, 0)}%`.padStart(7)}${sgn(x.pct).padStart(8)}${sgn(x.r).padStart(7)}   ${sgn(x.older.pct).padStart(8)}${sgn(x.older.r).padStart(6)}   ${sgn(x.newer.pct).padStart(8)}${sgn(x.newer.r).padStart(6)}`);
+    lines.push(`${row.padEnd(14)}${String(x.n).padStart(7)}${`${f1(x.right * 100, 0)}%`.padStart(7)}${sgn(x.pct).padStart(8)}${sgn(x.r).padStart(7)}   ${sgn(x.older.pct).padStart(8)}${sgn(x.older.r).padStart(6)}   ${sgn(x.newer.pct).padStart(8)}${sgn(x.newer.r).padStart(6)}`);
   }
-  lines.push(`Levels 2:1 ${s.passes ? 'PASSES' : 'does not pass'} (beats both fixed rows on % and R in both halves)`);
+  lines.push(`Levels 2:1 ${s.passes ? 'PASSES' : 'does not pass'}, zones 2:1 ${s.zonesPass ? 'PASSES' : 'does not pass'} (beats both its fixed rows on % and R in both halves)`);
   return lines.join('\n');
+}
+
+// --sr: today's levels on your watchlist's daily charts, both ways, and the
+// charts saved to DATA_DIR/research/sr-charts.json to share.
+async function showLevels(job, deps) {
+  const rows = [];
+  const saved = {};
+  const money = x => (Number.isFinite(x) ? x.toFixed(2) : '–');
+  for (const item of job.items || []) {
+    try {
+      const { candles } = await candlesFor(item, '1D', job.settings, deps);
+      const S = analyze(candles);
+      const i = candles.length - 1;
+      const old = levelsAt(S, i);
+      const z = srZones(candles, i, S.atr[i]);
+      const zone = x => (x ? `${money(x.price)} (${x.touches})` : '–');
+      rows.push(`${item.symbol.padEnd(8)}${money(S.close[i]).padStart(11)}   ${money(old.sup).padStart(10)}${money(old.res).padStart(10)}   ${zone(z.support).padStart(14)}${zone(z.resistance).padStart(14)}`);
+      saved[`${item.type}:${item.symbol}`] = candles.slice(-200).map(x => [x.time, x.open, x.high, x.low, x.close]);
+    } catch (e) {
+      rows.push(`${item.symbol.padEnd(8)} could not load: ${e.message}`);
+    }
+  }
+  const dir = join(process.env.DATA_DIR || '/data', 'research');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'sr-charts.json'), JSON.stringify(saved));
+  return [`${'symbol'.padEnd(8)}${'close'.padStart(11)}   ${'old sup'.padStart(10)}${'old res'.padStart(10)}   ${'zone sup'.padStart(14)}${'zone res'.padStart(14)}`, ...rows,
+    '', '(n) = touches. Charts saved to trade-data/research/sr-charts.json'].join('\n');
 }
 
 async function main() {
@@ -123,6 +165,10 @@ async function main() {
   for await (const chunk of process.stdin) input += chunk;
   const job = JSON.parse(input);
   const deps = defaultDeps;
+  if (process.argv.includes('--sr')) {
+    process.stdout.write(`${await showLevels(job, deps)}\n`);
+    return;
+  }
   const printed = [];
   for (const [kind, total] of [['stock', job.total || 120], ['crypto', job.cryptoTotal || 50]]) {
     const items = await trainingItems({ ...job, kind, total }, deps);
