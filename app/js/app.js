@@ -22,7 +22,7 @@ import { atr as atrSeries, srLevels, pivots as pivotsAt, fibonacci } from './ind
 import * as srv from './server.js';
 import { usable as modelUsable, mlOutlook, modelsFor, HORIZON as ML_HORIZON, TURN_EDGE } from './ml.js';
 
-export const APP_VERSION = '0.29.5 (Chart: support and resistance by strength)';
+export const APP_VERSION = '0.29.6 (Chart: support and resistance by strength)';
 const MARKET_REFRESH_MS = 10 * 60_000;
 const SYNC_DELAY_MS = 2000;
 const SCAN_EVERY_MS = 5 * 60_000;
@@ -555,10 +555,11 @@ function chartLevels(S, candles, o) {
     // The two strongest zones on each side (see srLevels in indicators.js), as shaded bands.
     const atr = S.atr[i];
     const { supports, resistances } = srLevels(candles, i, atr);
-    const pad = 0.25 * atr;
+    // The band is the zone's core: its price ± a quarter ATR, inside the zone's range when that is wider.
+    const half = 0.25 * atr;
     const add = (z, k, kind, name) => out.push({
-      price: z.price, lo: z.lo - pad, hi: z.hi + pad, kind, strong: k === 0, weak: z.weak,
-      title: `${name}${k ? ' 2' : ''} · ${z.touches} touch${z.touches === 1 ? '' : 'es'}${z.weak ? ' (weak)' : ''}`,
+      price: z.price, lo: Math.min(z.price - half, Math.max(z.lo, z.price - 2 * half)), hi: Math.max(z.price + half, Math.min(z.hi, z.price + 2 * half)), kind, strong: k === 0, weak: z.weak,
+      title: `${name}${k ? ' 2' : ''} · ${z.touches === 1 && z.recent ? (kind === 'resistance' ? 'recent high' : 'recent low') : `${z.touches} touch${z.touches === 1 ? '' : 'es'}`}${z.weak ? ' (weak)' : ''}`,
     });
     resistances.forEach((z, k) => add(z, k, 'resistance', 'Resistance'));
     supports.forEach((z, k) => add(z, k, 'support', 'Support'));

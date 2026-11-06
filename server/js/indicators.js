@@ -337,8 +337,9 @@ export function srZones(c, end, atrNow, { w = 3, lookback = 150, width = 0.75, r
 // volume was high on the turning candle (×0.5 to ×2 of the 20-candle average).
 // The newest unconfirmed high and low count as touches too. Zones are ranked
 // by score, discounted by distance (a zone `reach` ATRs away counts half),
-// and the best `keep` on each side are returned, strongest first.
-// Zone: { price, lo, hi, touches, score, weak } (weak: touched only once).
+// and the best `keep` on each side are returned, nearest first.
+// Zone: { price, lo, hi, touches, score, recent, weak } (recent: holds the newest
+// unconfirmed high or low; weak: one old touch only).
 // Returns { supports, resistances, support, resistance }.
 export function srLevels(c, end, atrNow, { w = 3, lookback = 250, width = 0.75, recent = 10, gap = 0.5, halfLife = 60, bigBounce = 3, after = 10, reach = 4, keep = 2 } = {}) {
   const none = { supports: [], resistances: [], support: null, resistance: null };
@@ -368,8 +369,8 @@ export function srLevels(c, end, atrNow, { w = 3, lookback = 250, width = 0.75, 
     if (c[k].high >= c[hi].high) hi = k;
     if (c[k].low <= c[lo].low) lo = k;
   }
-  if (hi > end - w) points.push({ p: c[hi].high, k: hi, score: 2 * volAt(hi) });
-  if (lo > end - w) points.push({ p: c[lo].low, k: lo, score: 2 * volAt(lo) });
+  if (hi > end - w) points.push({ p: c[hi].high, k: hi, score: 2 * volAt(hi), recent: true });
+  if (lo > end - w) points.push({ p: c[lo].low, k: lo, score: 2 * volAt(lo), recent: true });
   points.sort((a, b) => a.p - b.p);
   const zones = [];
   for (const pt of points) {
@@ -379,14 +380,19 @@ export function srLevels(c, end, atrNow, { w = 3, lookback = 250, width = 0.75, 
       z.sum += pt.p * pt.score;
       z.score += pt.score;
       z.touches += 1;
-    } else zones.push({ lo: pt.p, hi: pt.p, sum: pt.p * pt.score, score: pt.score, touches: 1 });
+      z.recent = z.recent || !!pt.recent;
+    } else zones.push({ lo: pt.p, hi: pt.p, sum: pt.p * pt.score, score: pt.score, touches: 1, recent: !!pt.recent });
   }
-  const all = zones.map(z => ({ price: z.sum / z.score, lo: z.lo, hi: z.hi, touches: z.touches, score: Number(z.score.toFixed(2)), weak: z.touches < 2 }));
+  // weak: a single old touch (the newest high or low alone is not weak: it is where the price just turned).
+  const all = zones.map(z => ({ price: z.sum / z.score, lo: z.lo, hi: z.hi, touches: z.touches, score: Number(z.score.toFixed(2)), recent: z.recent, weak: z.touches < 2 && !z.recent }));
+  // The `keep` strongest, then nearest first.
   const best = (list, dist) => list
     .map(z => ({ z, v: z.score / (1 + dist(z) / (reach * atrNow)) }))
-    .sort((a, b) => b.v - a.v).slice(0, keep).map(x => x.z);
-  const resistances = best(all.filter(z => z.lo > close + gap * atrNow), z => z.lo - close);
-  const supports = best(all.filter(z => z.hi < close - gap * atrNow), z => close - z.hi);
+    .sort((a, b) => b.v - a.v).slice(0, keep).map(x => x.z)
+    .sort((a, b) => dist(a) - dist(b));
+  // A zone counts by its centre: half an ATR from the close or more (its edge may reach the price).
+  const resistances = best(all.filter(z => z.price > close + gap * atrNow), z => z.price - close);
+  const supports = best(all.filter(z => z.price < close - gap * atrNow), z => close - z.price);
   return { supports, resistances, support: supports[0] || null, resistance: resistances[0] || null };
 }
 
